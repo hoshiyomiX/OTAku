@@ -15,7 +15,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -24,18 +23,18 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * MainActivity — Primary UI for Payload Toolkit Android.
+ * MainActivity — Payload Toolkit Android.
  *
- * Provides a Material Design 3 interface for:
- *   - Selecting payload.bin / .img files via SAF file picker
- *   - Choosing output directory
- *   - Selecting operation mode (info / dump / gen / zip / sign)
- *   - Configuring mode-specific options (compression, partitions, device info)
- *   - Executing operations via [PayloadBridge] with progress indication
- *   - Displaying structured log output
+ * Single-purpose: Repack partition images (.img) into a flashable OTA ZIP.
  *
- * Python runtime: uses external Python (Termux recommended).
- * The .pyz is bundled as an asset and extracted at first launch.
+ * Flow:
+ *   1. Select partition images (dd.img, odm.img, dlkm.img, etc.)
+ *   2. Choose compression algorithm
+ *   3. Select output directory
+ *   4. Tap "Repack" to generate flashable OTA ZIP
+ *
+ * Python runtime: external Python (Termux recommended).
+ * payload_toolkit.pyz is bundled as an asset and extracted at first launch.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -43,27 +42,17 @@ class MainActivity : AppCompatActivity() {
     //  State
     // ═══════════════════════════════════════════════════════════════
 
-    private var selectedMode: String = "info"
-    private var inputFilePath: String? = null
-    private var outputDirPath: String? = null
-    private var selectedCompression: String = "none"
+    private var selectedCompression: String = "gzip"
     private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
     private var isExecuting = false
 
     // App-internal directories
     private lateinit var inputDir: File
     private lateinit var outputDir: File
-    private lateinit var keysDir: File
 
     // ═══════════════════════════════════════════════════════════════
-    //  Activity Result Launchers (modern file picker API)
+    //  Activity Result Launchers
     // ═══════════════════════════════════════════════════════════════
-
-    private val inputFileChooser = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let { handleInputFileSelected(it) }
-    }
 
     private val outputDirChooser = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -77,11 +66,9 @@ class MainActivity : AppCompatActivity() {
         uris?.let { handleImageFilesSelected(it) }
     }
 
-    private val keyFileChooser = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let { handleKeyFileSelected(it) }
-    }
+    private val removeImageConfirm = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { /* Not used — placeholder for future file save */ }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -105,24 +92,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Initialize directories
         inputDir = File(filesDir, "input").also { it.mkdirs() }
         outputDir = File(filesDir, "output").also { it.mkdirs() }
-        keysDir = File(filesDir, "keys").also { it.mkdirs() }
 
-        // Initialize Python bridge
         initializePython()
-
-        // Setup UI
-        setupModeChips()
         setupCompressionSelector()
         setupButtons()
         setupToolbar()
 
-        // Request permissions
         requestStoragePermissions()
-
-        // Handle incoming intents (file opened from another app)
         handleIncomingIntent(intent)
     }
 
@@ -148,30 +126,24 @@ class MainActivity : AppCompatActivity() {
                                     .redirectErrorStream(true)
                                     .start()
                                 pb.inputStream.bufferedReader().readText().trim()
-                            } catch (e: Exception) {
-                                "unknown"
-                            }
+                            } catch (_: Exception) { "unknown" }
                         }
                         showLog("Python runtime: $pyVer\n")
                         showLog("Path: ${result.pythonPath}\n")
 
-                        // Get .pyz version
                         lifecycleScope.launch {
                             val ptVer = PayloadBridge.getPyzVersion()
-                            if (ptVer != null) {
-                                showLog("payload_toolkit $ptVer loaded from .pyz\n")
-                            }
+                            if (ptVer != null) showLog("payload_toolkit $ptVer loaded\n")
                         }
 
-                        showLog("Supported modes: ${PayloadBridge.SUPPORTED_MODES.joinToString(", ")}\n")
-                        showLog("\u2550".repeat(60) + "\n\n")
+                        showLog("\u2550".repeat(50) + "\n\n")
                     } else {
                         showLog("WARNING: ${result.error}\n\n")
                         showLog("This app requires Python to be installed.\n")
                         showLog("Recommended: Install Termux, then run:\n")
                         showLog("  pkg install python\n\n")
                         showLog("After installing Python, restart this app.\n")
-                        showLog("\u2550".repeat(60) + "\n\n")
+                        showLog("\u2550".repeat(50) + "\n\n")
                     }
                 }
             }
@@ -183,31 +155,6 @@ class MainActivity : AppCompatActivity() {
         setSupportActionBar(toolbar)
         supportActionBar?.title = getString(R.string.app_name)
         supportActionBar?.subtitle = "v${BuildConfig.VERSION_NAME}"
-    }
-
-    private fun setupModeChips() {
-        val chipGroup = findViewById<com.google.android.material.chip.ChipGroup>(R.id.chipGroupModes)
-        val modes = PayloadBridge.SUPPORTED_MODES
-
-        modes.forEach { mode ->
-            val chip = Chip(this).apply {
-                text = mode.uppercase()
-                isCheckable = true
-                tag = mode
-                setChipBackgroundColorResource(
-                    if (mode == "info") R.color.chip_selected_bg
-                    else R.color.chip_default_bg
-                )
-            }
-            chip.setOnClickListener {
-                selectedMode = mode
-                updateModeUI(mode)
-            }
-            chipGroup.addView(chip)
-        }
-
-        // Select "info" by default
-        chipGroup.check(chipGroup.getChildAt(0)?.id ?: return)
     }
 
     private fun setupCompressionSelector() {
@@ -222,31 +169,31 @@ class MainActivity : AppCompatActivity() {
         spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 selectedCompression = PayloadBridge.COMPRESSION_ALGORITHMS[position]
+                updateOutputPreview()
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
     }
 
     private fun setupButtons() {
-        findViewById<View>(R.id.buttonBrowseInput).setOnClickListener {
-            val mimeType = when (selectedMode) {
-                "sign" -> "*/*"
-                "gen", "zip" -> "application/octet-stream"
-                else -> "application/octet-stream"
-            }
-            inputFileChooser.launch(arrayOf(mimeType))
+        findViewById<View>(R.id.buttonAddImages).setOnClickListener {
+            imageFileChooser.launch(arrayOf("application/octet-stream", "image/*"))
         }
 
         findViewById<View>(R.id.buttonBrowseOutput).setOnClickListener {
             outputDirChooser.launch(null)
         }
 
-        findViewById<View>(R.id.buttonAddImages)?.setOnClickListener {
-            imageFileChooser.launch(arrayOf("application/octet-stream", "image/*"))
+        findViewById<View>(R.id.buttonRemoveAll)?.setOnClickListener {
+            imageFiles.clear()
+            copyPendingRemovals()
+            updateImageListUI()
+            updateOutputPreview()
+            showLog("All images removed.\n")
         }
 
         findViewById<View>(R.id.buttonExecute).setOnClickListener {
-            onExecuteClicked()
+            onRepackClicked()
         }
 
         findViewById<View>(R.id.buttonClearLog).setOnClickListener {
@@ -264,22 +211,16 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-            }
+            ) permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            }
+            ) permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
-            }
+            ) permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
         if (permissionsToRequest.isNotEmpty()) {
@@ -294,7 +235,7 @@ class MainActivity : AppCompatActivity() {
                     .setTitle("Storage Permission Required")
                     .setMessage(
                         "Payload Toolkit needs access to all files to read/write " +
-                        "payload.bin and partition images.\n\n" +
+                        "partition images and generate OTA ZIPs.\n\n" +
                         "Please grant 'All files access' in the next screen."
                     )
                     .setPositiveButton("Grant Access") { _, _ ->
@@ -313,21 +254,6 @@ class MainActivity : AppCompatActivity() {
     //  File handling
     // ═══════════════════════════════════════════════════════════════
 
-    private fun handleInputFileSelected(uri: Uri) {
-        lifecycleScope.launch {
-            val fileName = getFileName(uri) ?: "input.bin"
-            val destFile = File(inputDir, fileName)
-            copyUriToFile(uri, destFile)
-            inputFilePath = destFile.absolutePath
-
-            runOnUiThread {
-                findViewById<android.widget.EditText>(R.id.editTextInput)
-                    .setText(inputFilePath)
-                showLog("Input file: $fileName (${formatFileSize(destFile.length())})\n")
-            }
-        }
-    }
-
     private fun handleOutputDirSelected(uri: Uri) {
         outputDirPath = outputDir.absolutePath
         runOnUiThread {
@@ -337,48 +263,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var outputDirPath: String? = null
+
     private fun handleImageFilesSelected(uris: List<Uri>) {
         lifecycleScope.launch {
             for (uri in uris) {
                 val fileName = getFileName(uri) ?: "image.img"
-                val partitionName = fileName.removeSuffix(".img")
+                // Partition name = filename without .img extension
+                val partitionName = if (fileName.lowercase().endsWith(".img"))
+                    fileName.removeSuffix(".img")
+                else fileName.removeSuffix(".IMG")
+
                 val destFile = File(inputDir, fileName)
+
+                // Skip if already added
+                if (imageFiles.any { it.first == partitionName }) {
+                    showLog("SKIP: $partitionName already added\n")
+                    continue
+                }
+
                 copyUriToFile(uri, destFile)
                 imageFiles.add(partitionName to destFile.absolutePath)
             }
 
             runOnUiThread {
-                val summary = imageFiles.joinToString("\n") { (name, path) ->
-                    "  $name -> ${File(path).name}"
-                }
-                showLog("Image files added:\n$summary\n")
+                updateImageListUI()
+                updateOutputPreview()
             }
-        }
-    }
-
-    private fun handleKeyFileSelected(uri: Uri) {
-        lifecycleScope.launch {
-            val fileName = getFileName(uri) ?: "key.pem"
-            val destFile = File(keysDir, fileName)
-            copyUriToFile(uri, destFile)
-            showLog("Key file: $fileName (${formatFileSize(destFile.length())})\n")
         }
     }
 
     private fun handleIncomingIntent(intent: Intent) {
+        // Accept .img files shared/opened from another app
         when (intent.action) {
             Intent.ACTION_VIEW -> {
                 intent.data?.let { uri ->
-                    handleInputFileSelected(uri)
-                    selectedMode = "info"
-                    updateModeUI("info")
+                    handleImageFilesSelected(listOf(uri))
                 }
             }
             Intent.ACTION_SEND -> {
                 (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { uri ->
-                    handleInputFileSelected(uri)
-                    selectedMode = "info"
-                    updateModeUI("info")
+                    handleImageFilesSelected(listOf(uri))
                 }
             }
         }
@@ -406,17 +331,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Execution
+    //  Execution — Repack to OTA ZIP
     // ═══════════════════════════════════════════════════════════════
 
-    private fun onExecuteClicked() {
+    private fun onRepackClicked() {
         if (isExecuting) {
             showLog("WARNING: Operation already in progress. Please wait.\n")
             return
         }
 
         if (!PythonBridge.isReady()) {
-            showLog("ERROR: Python runtime not available. Cannot execute.\n")
+            showLog("ERROR: Python runtime not available.\n")
             showLog("Install Python via Termux: pkg install python\n")
             return
         }
@@ -425,133 +350,99 @@ class MainActivity : AppCompatActivity() {
             isExecuting = true
             setUIExecuting(true)
 
-            showLog("\n${"\u2550".repeat(60)}\n")
-            showLog("MODE: ${selectedMode.uppercase()}\n")
+            showLog("\n${"\u2550".repeat(50)}\n")
+            showLog("REPACK: Generate flashable OTA ZIP\n")
             showLog("Time: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}\n")
-            showLog("\u2500".repeat(60) + "\n\n")
+            showLog("\u2500".repeat(50) + "\n\n")
 
-            val result = when (selectedMode) {
-                "info" -> executeInfo()
-                "dump" -> executeDump()
-                "gen" -> executeGen()
-                "zip" -> executeZip()
-                "sign" -> executeSign()
-                else -> PayloadResult.error("Unknown mode: $selectedMode")
-            }
+            val result = executeRepack()
 
-            showLog("\n" + "\u2550".repeat(60) + "\n")
+            showLog("\n" + "\u2550".repeat(50) + "\n")
             if (result.success) {
                 showLog("COMPLETED in ${result.durationMs}ms\n")
-                if (result.output.isNotBlank()) {
-                    showLog(result.output)
-                }
+                if (result.output.isNotBlank()) showLog(result.output)
             } else {
                 showLog("FAILED in ${result.durationMs}ms\n")
                 showLog("Error: ${result.error}\n")
-                if (result.output.isNotBlank()) {
-                    showLog(result.output)
-                }
+                if (result.output.isNotBlank()) showLog(result.output)
             }
-            showLog("\u2550".repeat(60) + "\n\n")
+            showLog("\u2550".repeat(50) + "\n\n")
 
             isExecuting = false
             setUIExecuting(false)
         }
     }
 
-    private suspend fun executeInfo(): PayloadResult {
-        val path = inputFilePath
-        if (path == null || !File(path).exists()) {
-            return PayloadResult.error("No input file selected or file not found.")
+    private suspend fun executeRepack(): PayloadResult {
+        if (imageFiles.isEmpty()) {
+            return PayloadResult.error("No partition images added. Use 'Add Images' button.")
         }
-        showLog("Reading: ${File(path).name}...\n")
-        return PayloadBridge.getInfo(path, verbose = true)
-    }
 
-    private suspend fun executeDump(): PayloadResult {
-        val path = inputFilePath
-        if (path == null || !File(path).exists()) {
-            return PayloadResult.error("No payload.bin selected or file not found.")
-        }
         val outDir = outputDirPath ?: outputDir.absolutePath
         File(outDir).mkdirs()
-        showLog("Extracting to: $outDir\n")
-        return PayloadBridge.dump(path, outDir)
-    }
 
-    private suspend fun executeGen(): PayloadResult {
-        if (imageFiles.isEmpty()) {
-            return PayloadResult.error("No image files added. Use 'Add Images' button.")
-        }
-        val outPath = File(outputDirPath ?: outputDir.absolutePath, "payload.bin").absolutePath
         val images = imageFiles.toMap()
-        showLog("Generating payload.bin with ${images.size} partition(s)...\n")
+        val outputFileName = PayloadBridge.buildOutputFileName(images, selectedCompression)
+        val outPath = File(outDir, outputFileName).absolutePath
+
+        showLog("Partitions (${images.size}):\n")
+        images.entries.sortedBy { it.key }.forEach { (name, path) ->
+            val file = File(path)
+            showLog("  $name (${formatFileSize(file.length())})\n")
+        }
         showLog("Compression: $selectedCompression\n")
-        return PayloadBridge.gen(images, selectedCompression, outPath)
-    }
+        showLog("Output: $outputFileName\n\n")
 
-    private suspend fun executeZip(): PayloadResult {
-        if (imageFiles.isEmpty()) {
-            return PayloadResult.error("No image files added. Use 'Add Images' button.")
-        }
-        val outPath = File(outputDirPath ?: outputDir.absolutePath, "partial_ota.zip").absolutePath
-        val images = imageFiles.toMap()
-
-        val device = "S666LN,itel-S666LN"
-        val fingerprint = "Itel/S666LN-OP/itel-S666LN:13/TP1A.220624.014/251212V1661:user/release-keys"
-
-        showLog("Generating OTA ZIP with ${images.size} partition(s)...\n")
-        showLog("Compression: $selectedCompression\n")
-        return PayloadBridge.zip(images, device, fingerprint, selectedCompression, outPath)
-    }
-
-    private suspend fun executeSign(): PayloadResult {
-        val path = inputFilePath
-        if (path == null || !File(path).exists()) {
-            return PayloadResult.error("No payload.bin selected or file not found.")
-        }
-        val outPath = File(outputDirPath ?: outputDir.absolutePath, "payload_signed.bin").absolutePath
-
-        val keyFiles = keysDir.listFiles() ?: emptyArray()
-        val keyFile = keyFiles.find { it.name.contains("private") || it.name.contains("key") }
-        val certFile = keyFiles.find { it.name.contains("cert") || it.name.contains("public") }
-
-        if (keyFile == null || certFile == null) {
-            return PayloadResult.error(
-                "RSA key pair not found. Place private_key.pem and public_cert.pem " +
-                "in the keys directory, or use the key picker.\n" +
-                "Keys directory: ${keysDir.absolutePath}"
-            )
-        }
-
-        showLog("Signing payload.bin...\n")
-        showLog("Key: ${keyFile.name}\n")
-        showLog("Cert: ${certFile.name}\n")
-        return PayloadBridge.sign(path, outPath, keyFile.absolutePath, certFile.absolutePath)
+        return PayloadBridge.zip(
+            images = images,
+            compression = selectedCompression,
+            outputPath = outPath
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════
     //  UI Updates
     // ═══════════════════════════════════════════════════════════════
 
-    private fun updateModeUI(mode: String) {
-        val addImagesButton = findViewById<View>(R.id.buttonAddImages)
-        val imageListCard = findViewById<View>(R.id.cardImageList)
-        val compressionCard = findViewById<View>(R.id.cardCompression)
-        val signOptionsCard = findViewById<View>(R.id.cardSignOptions)
+    private fun updateImageListUI() {
+        val textView = findViewById<android.widget.TextView>(R.id.textViewImageList)
+        val removeButton = findViewById<View>(R.id.buttonRemoveAll)
 
-        addImagesButton?.visibility = if (mode in listOf("gen", "zip")) View.VISIBLE else View.GONE
-        imageListCard?.visibility = if (mode in listOf("gen", "zip")) View.VISIBLE else View.GONE
-        compressionCard?.visibility = if (mode in listOf("gen", "zip")) View.VISIBLE else View.GONE
-        signOptionsCard?.visibility = if (mode == "sign") View.VISIBLE else View.GONE
-
-        val inputHint = when (mode) {
-            "info", "dump" -> "payload.bin path"
-            "gen", "zip" -> "Partition images added below"
-            "sign" -> "payload.bin to sign"
-            else -> "Input file path"
+        if (imageFiles.isEmpty()) {
+            textView?.text = getString(R.string.hint_no_images)
+            removeButton?.visibility = View.GONE
+        } else {
+            val lines = imageFiles.sortedBy { it.first }.mapIndexed { idx, (name, path) ->
+                val file = File(path)
+                "  ${idx + 1}. $name  (${formatFileSize(file.length())})"
+            }
+            textView?.text = lines.joinToString("\n")
+            removeButton?.visibility = View.VISIBLE
         }
-        findViewById<android.widget.EditText>(R.id.editTextInput)?.hint = inputHint
+
+        // Show/hide empty state hint
+        val emptyHint = findViewById<View>(R.id.textEmptyHint)
+        emptyHint?.visibility = if (imageFiles.isEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private fun updateOutputPreview() {
+        val textView = findViewById<android.widget.TextView>(R.id.textViewOutputPreview)
+        if (imageFiles.isEmpty()) {
+            textView?.text = ""
+            return
+        }
+        val images = imageFiles.toMap()
+        val fileName = PayloadBridge.buildOutputFileName(images, selectedCompression)
+        textView?.text = fileName
+    }
+
+    private fun copyPendingRemovals() {
+        // Cleanup input dir for removed images
+        inputDir.listFiles()?.forEach { file ->
+            if (file.name.endsWith(".img") && !imageFiles.any { it.second == file.absolutePath }) {
+                file.delete()
+            }
+        }
     }
 
     private fun setUIExecuting(executing: Boolean) {
@@ -559,12 +450,8 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(R.id.buttonExecute)?.isEnabled = !executing
             findViewById<View>(R.id.progressBar)?.visibility =
                 if (executing) View.VISIBLE else View.GONE
-            findViewById<android.widget.EditText>(R.id.editTextInput)?.isEnabled = !executing
-
-            val chipGroup = findViewById<com.google.android.material.chip.ChipGroup>(R.id.chipGroupModes)
-            for (i in 0 until chipGroup.childCount) {
-                chipGroup.getChildAt(i)?.isEnabled = !executing
-            }
+            findViewById<View>(R.id.buttonAddImages)?.isEnabled = !executing
+            findViewById<View>(R.id.buttonRemoveAll)?.isEnabled = !executing
         }
     }
 

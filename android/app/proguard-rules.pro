@@ -1,4 +1,4 @@
-# Additional ProGuard rules for Payload Toolkit
+# ProGuard rules for Payload Toolkit v2.1
 # ================================
 
 # Keep Kotlin coroutines
@@ -11,13 +11,13 @@
 -keep class com.hoshiyomi.payloadtoolkit.PayloadResult { *; }
 -keep class com.hoshiyomi.payloadtoolkit.ExecResult { *; }
 
-# Keep PayloadToolkitApp
+# Keep PayloadToolkitApp (declared in AndroidManifest)
 -keep class com.hoshiyomi.payloadtoolkit.PayloadToolkitApp { *; }
 
 # Keep service classes (declared in AndroidManifest)
 -keep class com.hoshiyomi.payloadtoolkit.service.** { *; }
 
-# Keep data classes (used for serialization and backup)
+# Keep data classes (declared in AndroidManifest backup)
 -keep class com.hoshiyomi.payloadtoolkit.data.** { *; }
 
 # AndroidX
