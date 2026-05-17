@@ -375,7 +375,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             Intent.ACTION_SEND -> {
-                (intent.getParcelableExtra<Intent.EXTRA_STREAM>(Intent.EXTRA_STREAM) as? Uri)?.let { uri ->
+                (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { uri ->
                     handleInputFileSelected(uri)
                     selectedMode = "info"
                     updateModeUI("info")
