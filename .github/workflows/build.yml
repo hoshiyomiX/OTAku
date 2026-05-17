@@ -35,16 +35,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-v4-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-v4-${{ runner.os }}-
-
       - name: Build payload_toolkit.pyz
         run: python3 scripts/build_pyz.py
 
@@ -52,6 +42,7 @@ jobs:
         run: |
           mkdir -p android/app/src/main/assets
           cp dist/payload_toolkit.pyz android/app/src/main/assets/
+          echo "Asset size: $(wc -c < dist/payload_toolkit.pyz) bytes"
 
       - name: Generate CI signing key
         run: |
@@ -65,16 +56,15 @@ jobs:
             -keypass ci-key-pass \
             -dname "CN=CI, OU=CI, O=PayloadToolkit, L=CI, ST=CI, C=US"
 
-      - name: Build debug APK
+      - name: Build APKs (debug + release)
         working-directory: android
         run: |
-          chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
-
-      - name: Build release APK (signed)
-        working-directory: android
-        run: |
-          ./gradlew :app:assembleRelease \
+          wget -q https://services.gradle.org/distributions/gradle-8.6-bin.zip
+          unzip -qo gradle-8.6-bin.zip
+          echo "--- Building debug APK ---"
+          ./gradle-8.6/bin/gradle :app:assembleDebug --no-daemon --stacktrace
+          echo "--- Building release APK ---"
+          ./gradle-8.6/bin/gradle :app:assembleRelease \
             -PciSigning=true \
             -PciKeystoreFile=../ci-keystore.jks \
             -PciKeystorePass=ci-store-pass \
@@ -82,30 +72,35 @@ jobs:
             -PciKeyPass=ci-key-pass \
             --no-daemon --stacktrace
 
-      - name: List build outputs
+      - name: Locate and collect APKs
         if: always()
         run: |
-          echo "=== APK files ==="
-          find android/app/build/outputs/apk -type f -name '*.apk' 2>/dev/null || echo "No APK files found"
+          echo "=== Scanning for APK files ==="
+          find android/app/build -type f -name '*.apk' 2>/dev/null | while read f; do
+            size=$(wc -c < "$f")
+            echo "  FOUND: $f ($size bytes)"
+          done
           echo ""
-          echo "=== Full build output tree ==="
-          find android/app/build/outputs -type f 2>/dev/null | head -30 || echo "Empty"
+          echo "=== Build output tree ==="
+          find android/app/build/outputs -type f 2>/dev/null | sort || echo "(empty)"
           echo ""
-          echo "=== Assets ==="
-          ls -la android/app/src/main/assets/ 2>/dev/null || echo "No assets"
+          # Collect APKs to a known location for upload
+          mkdir -p artifacts
+          find android/app/build -type f -name '*.apk' -exec cp {} artifacts/ \;
+          ls -la artifacts/ 2>/dev/null || echo "No APKs collected"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: android/app/build/outputs/apk/debug/**/*.apk
-          if-no-files-found: ignore
+          path: artifacts/*debug*.apk
+          if-no-files-found: warn
           retention-days: 90
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release
-          path: android/app/build/outputs/apk/release/**/*.apk
-          if-no-files-found: ignore
+          path: artifacts/*release*.apk
+          if-no-files-found: warn
           retention-days: 7
