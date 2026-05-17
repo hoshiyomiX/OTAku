@@ -82,7 +82,7 @@ def check_dependencies():
         "brotli": "brotli compression (pip install brotli)",
     }
 
-    for mod_name, desc in required.items():
+    for mod_name, _desc in required.items():
         try:
             __import__(mod_name)
             results["available"].append(mod_name)
@@ -90,7 +90,7 @@ def check_dependencies():
             results["missing"].append(mod_name)
             results["all_ok"] = False
 
-    for mod_name, desc in optional.items():
+    for mod_name, _desc in optional.items():
         try:
             __import__(mod_name)
             results["available"].append(mod_name)
