@@ -10,9 +10,22 @@ buildscript {
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    // Chaquopy applied via buildscript classpath + apply() below
+    // to avoid Gradle plugin DSL task resolution corruption.
 }
 
 apply(plugin = "com.chaquo.python")
+
+// Chaquopy extension configuration (applied via configure because
+// apply() doesn't generate Kotlin DSL type-safe accessors)
+configure<com.chaquo.python.PythonExtension> {
+    defaultConfig {
+        version = "3.11"
+        pip {
+            // No external pip packages required — stdlib only
+        }
+    }
+}
 
 android {
     namespace = "com.hoshiyomi.payloadtoolkit"
@@ -90,21 +103,7 @@ android {
     }
 }
 
-// Chaquopy Python configuration
-chaquopy {
-    defaultConfig {
-        // Python version embedded in the APK
-        version = "3.11"
-
-        // Python packages to pip install (none needed — stdlib only)
-        pip {
-            // No external pip packages required.
-            // payload_toolkit uses only Python stdlib modules:
-            // gzip, bz2, lzma, zipfile, hashlib, struct, tempfile, os, sys, time, argparse
-        }
-    }
-
-}
+// Chaquopy Python configuration applied above via configure<PythonExtension>
 
 dependencies {
     // AndroidX Core
