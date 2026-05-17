@@ -43,9 +43,9 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             android/.gradle
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-v2-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            gradle-v2-${{ runner.os }}-
             gradle-
 
       - name: Grant execute permission for gradlew
@@ -66,13 +66,13 @@ jobs:
       - name: Build release APK (signed)
         working-directory: android
         run: |
-          ./gradlew assembleRelease \
+          ./gradlew :app:assembleRelease \
             -PciSigning=true \
             -PciKeystoreFile=../ci-keystore.jks \
             -PciKeystorePass=release-store-pass \
             -PciKeyAlias=release-key \
             -PciKeyPass=release-key-pass \
-            --stacktrace 2>&1
+            --no-daemon --stacktrace 2>&1
 
       - name: List build outputs
         if: always()
