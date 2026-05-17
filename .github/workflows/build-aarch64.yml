@@ -36,8 +36,13 @@ jobs:
             -v "$PWD:/src" \
             python:3.11-slim \
             bash -c "cd /src && \
+              echo '=== Verifying files ===' && \
+              ls -la ci/ && \
+              cat ci/payload_toolkit.spec | head -3 && \
+              echo '=== Installing dependencies ===' && \
               apt-get update -qq && apt-get install -y -qq binutils > /dev/null 2>&1 && \
               pip install --no-cache-dir pyinstaller && \
+              echo '=== Running PyInstaller ===' && \
               pyinstaller \
                 --distpath /src/dist \
                 --workpath /tmp/pyinstaller-work \
