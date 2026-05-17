@@ -42,9 +42,9 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             android/.gradle
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-v2-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            gradle-v2-${{ runner.os }}-
 
       - name: Build payload_toolkit.pyz
         run: python3 scripts/build_pyz.py
@@ -58,7 +58,7 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace 2>&1
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace 2>&1
 
       - name: List build outputs
         if: always()
@@ -104,9 +104,9 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             android/.gradle
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-v2-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            gradle-v2-${{ runner.os }}-
 
       - name: Build payload_toolkit.pyz
         run: python3 scripts/build_pyz.py
@@ -132,13 +132,13 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease \
+          ./gradlew :app:assembleRelease \
             -PciSigning=true \
             -PciKeystoreFile=../ci-keystore.jks \
             -PciKeystorePass=ci-store-pass \
             -PciKeyAlias=ci-key \
             -PciKeyPass=ci-key-pass \
-            --stacktrace 2>&1
+            --no-daemon --stacktrace 2>&1
 
       - name: List build outputs
         if: always()
