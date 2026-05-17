@@ -2,6 +2,7 @@ package com.hoshiyomi.payloadtoolkit
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * PayloadResult — structured result from a payload_toolkit operation.
