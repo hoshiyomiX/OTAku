@@ -48,9 +48,6 @@ jobs:
             gradle-v2-${{ runner.os }}-
             gradle-
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x android/gradlew
-
       - name: Generate signing key for release
         run: |
           keytool -genkeypair \
@@ -66,13 +63,15 @@ jobs:
       - name: Build release APK (signed)
         working-directory: android
         run: |
-          ./gradlew :app:assembleRelease \
+          wget -q https://services.gradle.org/distributions/gradle-8.6-bin.zip
+          unzip -qo gradle-8.6-bin.zip
+          ./gradle-8.6/bin/gradle :app:assembleRelease \
             -PciSigning=true \
             -PciKeystoreFile=../ci-keystore.jks \
             -PciKeystorePass=release-store-pass \
             -PciKeyAlias=release-key \
             -PciKeyPass=release-key-pass \
-            --no-daemon --stacktrace 2>&1
+            --no-daemon --stacktrace
 
       - name: List build outputs
         if: always()
