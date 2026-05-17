@@ -57,8 +57,9 @@ jobs:
       - name: Build debug APK
         working-directory: android
         run: |
-          chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace 2>&1
+          wget -q https://services.gradle.org/distributions/gradle-8.6-bin.zip
+          unzip -qo gradle-8.6-bin.zip
+          ./gradle-8.6/bin/gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: List build outputs
         if: always()
@@ -131,14 +132,15 @@ jobs:
       - name: Build release APK
         working-directory: android
         run: |
-          chmod +x gradlew
-          ./gradlew :app:assembleRelease \
+          wget -q https://services.gradle.org/distributions/gradle-8.6-bin.zip
+          unzip -qo gradle-8.6-bin.zip
+          ./gradle-8.6/bin/gradle :app:assembleRelease \
             -PciSigning=true \
             -PciKeystoreFile=../ci-keystore.jks \
             -PciKeystorePass=ci-store-pass \
             -PciKeyAlias=ci-key \
             -PciKeyPass=ci-key-pass \
-            --no-daemon --stacktrace 2>&1
+            --no-daemon --stacktrace
 
       - name: List build outputs
         if: always()
