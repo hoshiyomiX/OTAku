@@ -70,15 +70,8 @@ android {
         buildConfig = true
     }
 
-    // Chaquopy requires the Python source to be in a specific location
-    sourceSets {
-        getByName("main") {
-            // Python source root — the payload_toolkit package lives under src/
-            // Chaquopy adds this to sys.path, so `import payload_toolkit` resolves
-            // to src/payload_toolkit/__init__.py and its sub-modules.
-            python.srcDir("../../src")
-        }
-    }
+    // Python source is in app/src/main/python/ (Chaquopy default location).
+    // No python.srcDir() needed — Chaquopy auto-discovers from there.
 
     packaging {
         resources {

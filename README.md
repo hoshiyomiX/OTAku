@@ -197,19 +197,8 @@ See [`scripts/build_aarch64.sh`](scripts/build_aarch64.sh) for requirements (PyI
 
 ```
 payload-toolkit-android/
-├── src/payload_toolkit/               # Refactored Python package
-│   ├── __init__.py                    # Package init + CLI bridge
-│   ├── protobuf.py                    # Minimal protobuf encoder/decoder
-│   ├── compression.py                 # gzip/bz2/xz/brotli compress/decompress
-│   ├── payload.py                     # Payload.bin read/write (AOSP + legacy)
-│   ├── ota_metadata.py                # OTA ZIP metadata generation
-│   └── modes/                         # Mode-specific logic
-│       ├── __init__.py
-│       ├── info.py                    # Parse & display payload.bin info
-│       ├── dump.py                    # Extract partition images
-│       ├── gen.py                     # Generate payload.bin from .img files
-│       ├── zip.py                     # Generate flashable OTA ZIP
-│       └── sign.py                    # Sign payload.bin with RSA key
+├── src/payload_toolkit/               # Standalone Python package (reference copy)
+│   └── ...                            # Same files as below
 ├── android/                           # Android project
 │   ├── build.gradle.kts               # Project-level build config
 │   ├── settings.gradle.kts            # Plugin management + project includes
@@ -218,24 +207,40 @@ payload-toolkit-android/
 │       ├── build.gradle.kts           # App-level build config (Chaquopy, deps)
 │       └── src/main/
 │           ├── AndroidManifest.xml
+│           ├── python/payload_toolkit/ # ← Chaquopy Python source (auto-discovered)
+│           │   ├── __init__.py
+│           │   ├── protobuf.py
+│           │   ├── compression.py
+│           │   ├── payload.py
+│           │   ├── ota_metadata.py
+│           │   └── modes/
+│           │       ├── __init__.py
+│           │       ├── info.py
+│           │       ├── dump.py
+│           │       ├── gen.py
+│           │       ├── zip.py
+│           │       └── sign.py
 │           ├── java/com/hoshiyomi/payloadtoolkit/
-│           │   ├── MainActivity.kt    # Main activity with Material 3 UI
-│           │   ├── PayloadBridge.kt   # Python ↔ Kotlin bridge
-│           │   └── PythonBridge.kt    # Chaquopy init & execution helper
-│           ├── res/
-│           │   ├── values/
-│           │   │   ├── strings.xml
-│           │   │   ├── colors.xml
-│           │   │   └── themes.xml
-│           │   └── layout/
-│           │       └── activity_main.xml
-│           └── assets/
-│               └── (Python package copied here at build time)
+│           │   ├── MainActivity.kt
+│           │   ├── PayloadBridge.kt
+│           │   ├── PythonBridge.kt
+│           │   ├── PayloadToolkitApp.kt
+│           │   ├── service/PayloadService.kt
+│           │   └── data/BackupAgent.kt
+│           └── res/
+│               ├── values/
+│               ├── layout/
+│               ├── drawable/
+│               ├── mipmap-*/
+│               └── xml/
+├── .github/workflows/
+│   ├── build.yml                     # CI: debug + release APK on push/PR
+│   └── release.yml                   # Tag-triggered GitHub Release
 ├── scripts/
-│   ├── build_aarch64.sh               # Cross-compile to standalone binary
-│   └── setup_chaquopy.sh              # Chaquopy environment setup
+│   ├── build_aarch64.sh
+│   └── setup_chaquopy.sh
 ├── docs/
-│   └── ARCHITECTURE.md                # Detailed architecture documentation
+│   └── ARCHITECTURE.md
 ├── .gitignore
 └── README.md
 ```
