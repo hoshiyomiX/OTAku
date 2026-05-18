@@ -1,5 +1,8 @@
 package com.hoshiyomi.payloadtoolkit
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -208,6 +211,10 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.buttonExecute).setOnClickListener {
             onRepackClicked()
+        }
+
+        findViewById<View>(R.id.buttonCopyLog).setOnClickListener {
+            copyLogToClipboard()
         }
 
         findViewById<View>(R.id.buttonClearLog).setOnClickListener {
@@ -477,6 +484,18 @@ class MainActivity : AppCompatActivity() {
             val scrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
             scrollView?.post { scrollView.fullScroll(View.FOCUS_DOWN) }
         }
+    }
+
+    private fun copyLogToClipboard() {
+        val logText = findViewById<android.widget.TextView>(R.id.textViewLog)?.text?.toString()
+        if (logText.isNullOrBlank()) {
+            Toast.makeText(this, "Nothing to copy", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = ClipData.newPlainText("PayloadToolkit Log", logText)
+        clipboard.setPrimaryClip(clip)
+        Toast.makeText(this, getString(R.string.log_copied), Toast.LENGTH_SHORT).show()
     }
 
     // ═══════════════════════════════════════════════════════════════

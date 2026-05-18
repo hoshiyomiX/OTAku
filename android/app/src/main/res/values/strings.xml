@@ -24,7 +24,9 @@
     <!-- Actions -->
     <string name="button_repack">REPACK TO OTA ZIP</string>
     <string name="button_execute">Execute</string>
-    <string name="button_clear_log">Clear Log</string>
+    <string name="button_copy_log">Copy</string>
+    <string name="button_clear_log">Clear</string>
+    <string name="log_copied">Log copied to clipboard</string>
 
     <!-- Status messages -->
     <string name="status_initializing">Initializing Python runtime…</string>
