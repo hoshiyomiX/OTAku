@@ -118,16 +118,19 @@ done
 #      packages it.
 #   3. Use patchelf to rewrite DT_NEEDED entries in ALL .so files so
 #      they reference the .so.so filenames instead of the original SONAMEs.
-#      This way the Android linker finds them in nativeLibraryDir (same
-#      directory) without needing LD_LIBRARY_PATH or runtime symlinks.
+#   4. Set DT_RUNPATH=$ORIGIN on ALL .so files so the Android linker
+#      searches the same directory for transitive dependencies.
+#      This is critical because Android linker namespaces (API 26+) may
+#      NOT include nativeLibraryDir in search paths for dlopen() calls.
+#      $ORIGIN resolves to the directory containing the requesting library.
 #
-# Why patchelf instead of LD_LIBRARY_PATH?
+# Why DT_RUNPATH=$ORIGIN instead of LD_LIBRARY_PATH?
 #   Android linker namespaces (API 26+) define which paths dlopen() searches.
 #   LD_LIBRARY_PATH is often IGNORED for transitive dlopen() calls in the
-#   "default" namespace.  But the linker ALWAYS searches the directory
-#   containing the requesting library.  So if binascii.so (in nativeLibraryDir)
-#   has DT_NEEDED: libz.so.1.so, the linker finds libz.so.1.so in the same
-#   directory.  No LD_LIBRARY_PATH hack needed.
+#   "default" namespace.  DT_RUNPATH is embedded in the ELF file itself,
+#   so it always takes effect regardless of namespace configuration.
+#   $ORIGIN expands to the directory of the requesting .so at load time,
+#   so all libraries find their dependencies in nativeLibraryDir.
 echo "    Resolving symlinks and fixing SONAME extensions..."
 
 # Step 1: Replace symlinks with real copies
@@ -209,6 +212,32 @@ for so_file in "$JNI_DIR"/*.so; do
 done
 echo "    Patched $PATCHED_COUNT DT_NEEDED entries in $PATCHED_FILES files"
 
+# Step 4: Set DT_RUNPATH=$ORIGIN on ALL .so files ----------------------
+# This ensures the Android linker searches the same directory as the
+# requesting library when resolving transitive dependencies.
+#
+# Example chain:
+#   Python dlopens zlib.cpython-313-*.so (from nativeLibraryDir)
+#   -> zlib.so has DT_NEEDED: libz.so.1.so (rewritten by Step 3)
+#   -> zlib.so has DT_RUNPATH: $ORIGIN
+#   -> linker searches $ORIGIN (= nativeLibraryDir) for libz.so.1.so
+#   -> found! (AGP packaged it because filename ends with .so)
+#
+# This also fixes the main executable:
+#   libpython3exec.so has DT_NEEDED: libandroid-support.so
+#   -> libpython3exec.so has DT_RUNPATH: $ORIGIN
+#   -> linker searches nativeLibraryDir for libandroid-support.so
+#   -> found!
+echo "    Setting DT_RUNPATH=\$ORIGIN on all .so files..."
+RPATH_COUNT=0
+for so_file in "$JNI_DIR"/*.so; do
+    [ -f "$so_file" ] || continue
+    if patchelf --set-rpath '$ORIGIN' "$so_file" 2>/dev/null; then
+        RPATH_COUNT=$((RPATH_COUNT + 1))
+    fi
+done
+echo "    Set DT_RUNPATH on $RPATH_COUNT files"
+
 # Verify critical files exist
 if [ ! -f "$JNI_DIR/libpython3exec.so" ]; then
     echo "ERROR: libpython3exec.so was not created!"
@@ -229,6 +258,21 @@ for lib in "${CRITICAL_LIBS[@]}"; do
         echo "WARNING: Critical library $lib not found in jniLibs"
     fi
 done
+
+# Verify DT_RUNPATH is set (spot check)
+echo "    Verifying DT_RUNPATH patches..."
+RUNPATH_CHECK=$(patchelf --print-rpath "$JNI_DIR/libpython3exec.so" 2>/dev/null || true)
+if [ "$RUNPATH_CHECK" != '\$ORIGIN' ]; then
+    echo "    WARNING: libpython3exec.so RUNPATH is '$RUNPATH_CHECK' (expected \$ORIGIN)"
+else
+    echo "    [OK] libpython3exec.so RUNPATH=\$ORIGIN"
+fi
+EXT_CHECK=$(patchelf --print-rpath "$JNI_DIR/zlib.cpython-313-aarch64-linux-android.so" 2>/dev/null || true)
+if [ -n "$EXT_CHECK" ] && [ "$EXT_CHECK" != '\$ORIGIN' ]; then
+    echo "    WARNING: zlib.so RUNPATH is '$EXT_CHECK' (expected \$ORIGIN)"
+elif [ -n "$EXT_CHECK" ]; then
+    echo "    [OK] zlib.so RUNPATH=\$ORIGIN"
+fi
 
 # Verify DT_NEEDED was patched correctly (spot check)
 echo "    Verifying DT_NEEDED patches..."
