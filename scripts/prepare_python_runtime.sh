@@ -433,6 +433,36 @@ fi
 STDLIB_SIZE=$(du -h "$DIST_DIR/python-stdlib.zip" | cut -f1)
 STDLIB_COUNT=$(zipinfo -1 "$DIST_DIR/python-stdlib.zip" | wc -l)
 
+# -- 3. Generate native-libs-manifest.txt ------------------------------
+# Build-time dependency manifest: lists every .so, its size, and its
+# DT_NEEDED entries.  Bundled as an Android asset so the runtime can
+# cross-check device state vs build expectations.
+#
+# This makes debugging IMMEDIATE: if a .so is missing or has wrong deps,
+# the runtime logs the exact mismatch instead of a vague linker error.
+echo ""
+echo "==> Generating native-libs-manifest.txt..."
+MANIFEST="$DIST_DIR/native-libs-manifest.txt"
+{
+    echo "# payload-toolkit native libs manifest"
+    echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# Total: $JNI_COUNT libs, $JNI_SIZE"
+    echo "# FORMAT: filename | size_bytes | DT_NEEDED (comma-separated)"
+    echo "#"
+    for so_file in $(ls -1S "$JNI_DIR"/*.so); do
+        [ -f "$so_file" ] || continue
+        name="$(basename "$so_file")"
+        size="$(stat -c%s "$so_file" 2>/dev/null || echo 0)"
+        # Collect DT_NEEDED entries (excluding system libs)
+        needed_list=$(patchelf --print-needed "$so_file" 2>/dev/null \
+            | grep -v -E '^(libc|libm|libdl|libpthread|librt)\.so$' \
+            | tr '\n' ',' | sed 's/,$//')
+        echo "$name | $size | $needed_list"
+    done
+} > "$MANIFEST"
+MANIFEST_SIZE=$(wc -c < "$MANIFEST")
+echo "    $MANIFEST ($MANIFEST_SIZE bytes, $JNI_COUNT entries)"
+
 # -- Summary ------------------------------------------------------------
 echo ""
 echo "==========================================="
@@ -442,6 +472,8 @@ echo "    Size:   $JNI_SIZE"
 echo "  python-stdlib.zip (.py only):"
 echo "    Files:  $STDLIB_COUNT"
 echo "    Size:   $STDLIB_SIZE"
+echo "  native-libs-manifest.txt:"
+echo "    Size:   $MANIFEST_SIZE"
 echo "  Output:  $DIST_DIR/python-stdlib.zip"
 echo "==========================================="
 

@@ -10,34 +10,41 @@ import java.util.zip.ZipInputStream
 /**
  * PythonBridge — Manages Python runtime initialization and .pyz execution.
  *
- * Architecture (v4 — jniLibs + stdlib asset):
+ * Architecture (v5 — jniLibs + stdlib asset + build manifest):
  *
  *   On the BUILD machine (CI):
- *     Termux Python 3.13 packages → split into two outputs:
- *       1. jniLibs/arm64-v8a/   — .so libs + python binary (renamed libpython3exec.so)
- *       2. assets/python-stdlib.zip — .py stdlib files (613 files, ~2.7 MB)
+ *     Termux Python 3.13 packages → split into three outputs:
+ *       1. jniLibs/arm64-v8a/         — .so libs + python binary
+ *       2. assets/python-stdlib.zip   — .py stdlib files
+ *       3. assets/native-libs-manifest.txt — .so dependency map
  *
  *   At INSTALL time:
  *     Android package manager extracts jniLibs → nativeLibraryDir
- *     nativeLibraryDir has SELinux "app_lib_file" context → EXECUTABLE ✓
+ *     nativeLibraryDir has SELinux "app_lib_file" context → EXECUTABLE
  *
  *   At RUNTIME (first launch):
- *     1. Extract python-stdlib.zip from assets → app-internal storage (read-only)
- *     2. Execute nativeLibraryDir/libpython3exec.so with:
- *        - LD_LIBRARY_PATH = nativeLibraryDir  (finds libpython3.13.so, liblzma, etc.)
- *        - PYTHONHOME      = extracted stdlib   (finds lib/python3.13/...py)
- *        - PYTHONPATH       = nativeLibraryDir  (finds _hashlib.so, _lzma.so, etc.)
- *
- *   Fallback: if nativeLibraryDir lacks libpython3exec.so, tries system Python.
+ *     1. Extract python-stdlib.zip + manifest from assets → app-internal storage
+ *     2. Cross-check nativeLibraryDir against build manifest
+ *     3. Execute nativeLibraryDir/libpython3exec.so with:
+ *        - LD_PRELOAD      = all .so files (transitive dep resolution)
+ *        - LD_LIBRARY_PATH = nativeLibraryDir
+ *        - PYTHONHOME      = extracted stdlib
+ *        - PYTHONPATH       = nativeLibraryDir
  */
 object PythonBridge {
 
     private const val TAG = "PythonBridge"
     private const val PYZ_ASSET_NAME = "payload_toolkit.pyz"
     private const val STDLIB_ASSET_NAME = "python-stdlib.zip"
+    private const val MANIFEST_ASSET_NAME = "native-libs-manifest.txt"
     private const val PYTHON_DIR_NAME = "python"
     private const val STDLIB_SUBDIR = "stdlib"
     private const val BUNDLED_PYTHON_LIB = "libpython3exec.so"
+
+    /** System libs that Android bionic always provides — safe to skip in dep checks. */
+    private val SYSTEM_LIBS = setOf(
+        "libc.so", "libm.so", "libdl.so", "libpthread.so", "librt.so"
+    )
 
     /**
      * System Python paths — fallback when bundled runtime is unavailable.
@@ -91,6 +98,9 @@ object PythonBridge {
             val ctx = context
                 ?: return InitResult(false, null, null, error = "Context required")
 
+            diag("=== PythonBridge Init ===")
+            diag("App version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+
             // Step 1: Extract .pyz from assets
             val extractedPyz = extractPyz(ctx)
             if (extractedPyz == null) {
@@ -99,7 +109,7 @@ object PythonBridge {
                     diagnostics = diagnosticLog.toString())
             }
             pyzPath = extractedPyz
-            diag("[OK] .pyz extracted: $pyzPath (${File(pyzPath).length()} bytes)")
+            diag("[OK] .pyz: $pyzPath (${File(pyzPath).length()} bytes)")
 
             // Step 2: Try bundled Python from nativeLibraryDir (jniLibs)
             val nativeLibDir = ctx.applicationInfo.nativeLibraryDir
@@ -107,47 +117,64 @@ object PythonBridge {
 
             diag("nativeLibraryDir: $nativeLibDir")
 
-            // SONAME resolution is handled at BUILD time by patchelf.
-            // prepare_python_runtime.sh rewrites DT_NEEDED entries in all .so
-            // files so versioned libs like libz.so.1 are referenced as
-            // libz.so.1.so (which AGP packages).  No runtime fixup needed.
-
-            diag("libpython3exec.so exists: ${bundledPy.isFile}")
-            diag("libpython3exec.so canExecute: ${bundledPy.isFile && bundledPy.canExecute()}")
-
-            // List contents of nativeLibraryDir for diagnostics
+            // -- Full .so inventory --
             val nativeDir = File(nativeLibDir)
-            if (nativeDir.isDirectory) {
-                val soFiles = nativeDir.listFiles()?.filter { it.name.endsWith(".so") }
-                diag("Total .so in nativeLibraryDir: ${soFiles?.size ?: 0}")
-                val pythonSo = soFiles?.filter { it.name.contains("python") }
-                if (pythonSo.isNullOrEmpty()) {
-                    diag("WARNING: No python-related .so files found in nativeLibraryDir")
-                    // List all files for full visibility
+            val soFiles = if (nativeDir.isDirectory) {
+                nativeDir.listFiles()?.filter { it.name.endsWith(".so") }?.sortedBy { it.name }
+            } else null
+
+            if (soFiles.isNullOrEmpty()) {
+                diag("ERROR: nativeLibraryDir has NO .so files!")
+                diag("  Directory exists: ${nativeDir.isDirectory}")
+                if (nativeDir.isDirectory) {
                     val allFiles = nativeDir.listFiles()?.map { it.name }?.sorted()
                     if (!allFiles.isNullOrEmpty()) {
-                        diag("Files in nativeLibraryDir: ${allFiles.take(10).joinToString(", ")}")
-                        if (allFiles.size > 10) diag("  ... and ${allFiles.size - 10} more")
-                    } else {
-                        diag("nativeLibraryDir is EMPTY")
+                        diag("  Non-.so files: ${allFiles.joinToString(", ")}")
                     }
-                } else {
-                    diag("Python-related .so files: ${pythonSo.map { it.name }.joinToString(", ")}")
                 }
             } else {
-                diag("ERROR: nativeLibraryDir does not exist or is not a directory")
+                diag("[OK] .so count: ${soFiles.size}")
+                // Log every .so with size — this makes finding missing/extra files instant
+                val totalSize = soFiles.sumOf { it.length() }
+                diag("[OK] .so total size: ${formatBytes(totalSize)}")
+                diag("--- .so inventory ---")
+                soFiles.forEach { f ->
+                    diag("  ${f.name} (${formatBytes(f.length())})")
+                }
+                diag("--- end inventory ---")
+            }
+
+            // -- ELF header validation --
+            diag("libpython3exec.so exists: ${bundledPy.isFile}")
+            if (bundledPy.isFile) {
+                val elfOk = validateElfHeader(bundledPy)
+                diag("libpython3exec.so valid ELF: $elfOk")
+                diag("libpython3exec.so canExecute: ${bundledPy.canExecute()}")
+                diag("libpython3exec.so size: ${formatBytes(bundledPy.length())}")
+            }
+
+            // -- Manifest cross-check --
+            if (soFiles != null && soFiles.isNotEmpty()) {
+                val manifestIssues = crossCheckManifest(ctx, nativeLibDir, soFiles)
+                if (manifestIssues.isNotEmpty()) {
+                    diag("--- MANIFEST MISMATCH ---")
+                    manifestIssues.forEach { diag("  $it") }
+                    diag("--- end mismatch ---")
+                } else {
+                    diag("[OK] Manifest cross-check: all ${soFiles.size} .so files match build")
+                }
             }
 
             if (bundledPy.isFile) {
                 diag("Attempting bundled Python initialization...")
 
-                // Check if stdlib asset exists before extraction
                 val stdlibAssets = try {
-                    ctx.assets.list("")?.filter { it.contains("stdlib") || it.contains("python") }
+                    ctx.assets.list("")?.filter {
+                        it.contains("stdlib") || it.contains("python") || it.contains("manifest")
+                    }
                 } catch (_: Exception) { null }
                 diag("Python-related assets: ${stdlibAssets?.joinToString(", ") ?: "none found"}")
 
-                // Extract Python stdlib (.py files) from assets
                 val extractedStdlib = extractStdlib(ctx)
                 if (extractedStdlib != null) {
                     stdlibDir = extractedStdlib
@@ -189,6 +216,16 @@ object PythonBridge {
             if (verifyError != null) {
                 Log.w(TAG, "Verify failed: $verifyError")
                 diag("Verify failed: $verifyError")
+                // Parse linker error for actionable diagnostics
+                val parsedError = parseLinkerError(verifyError)
+                if (parsedError != null) {
+                    diag("--- LINKER ERROR ANALYSIS ---")
+                    diag("  Problem .so:  ${parsedError.first}")
+                    diag("  Missing dep:  ${parsedError.second}")
+                    diag("  Fix: add the missing .so to prepare_python_runtime.sh PACKAGES,")
+                    diag("       or exclude the problem .so if not needed.")
+                    diag("--- end analysis ---")
+                }
                 return InitResult(false, pythonPath, pyzPath, isBundledPython,
                     verifyError, diagnosticLog.toString())
             }
@@ -202,14 +239,10 @@ object PythonBridge {
     //  Asset extraction
     // ═══════════════════════════════════════════════════════════════
 
-    /**
-     * Extract payload_toolkit.pyz from assets to app-internal storage.
-     */
     private fun extractPyz(context: Context): String? {
         val dir = File(context.filesDir, PYTHON_DIR_NAME).also { it.mkdirs() }
         val file = File(dir, PYZ_ASSET_NAME)
 
-        // Skip if already extracted and same size
         if (file.exists()) {
             try {
                 val assetSize = context.assets.open(PYZ_ASSET_NAME).use { it.available().toLong() }
@@ -228,18 +261,11 @@ object PythonBridge {
         }
     }
 
-    /**
-     * Extract python-stdlib.zip from assets to app-internal storage.
-     * Uses a version marker to skip re-extraction on subsequent launches.
-     *
-     * Output: filesDir/python/stdlib/lib/python3.13/...py
-     */
     private fun extractStdlib(context: Context): String? {
         val pythonDir = File(context.filesDir, PYTHON_DIR_NAME)
         val stdlibDirFile = File(pythonDir, STDLIB_SUBDIR)
         val marker = File(pythonDir, ".stdlib_v${BuildConfig.VERSION_CODE}")
 
-        // Already extracted for this version?
         if (marker.exists() && stdlibDirFile.isDirectory) {
             val children = stdlibDirFile.listFiles()?.size ?: 0
             if (children > 0) {
@@ -248,7 +274,6 @@ object PythonBridge {
             }
         }
 
-        // Clean previous extraction
         stdlibDirFile.deleteRecursively()
 
         return try {
@@ -256,10 +281,7 @@ object PythonBridge {
             stdlibDirFile.mkdirs()
             extractZipAsset(context, STDLIB_ASSET_NAME, stdlibDirFile)
             marker.createNewFile()
-
-            // Clean empty directories left after stripping
             pruneEmptyDirs(stdlibDirFile)
-
             val count = countFiles(stdlibDirFile)
             Log.d(TAG, "Stdlib extracted: $count files")
             stdlibDirFile.absolutePath
@@ -269,9 +291,6 @@ object PythonBridge {
         }
     }
 
-    /**
-     * Extract a ZIP asset to a target directory.
-     */
     private fun extractZipAsset(context: Context, assetName: String, targetDir: File) {
         context.assets.open(assetName).use { input ->
             ZipInputStream(input).use { zipIn ->
@@ -304,6 +323,145 @@ object PythonBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  Diagnostics helpers
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Validate that a file starts with the ELF magic bytes (\x7fELF).
+     * Catches cases where the file is corrupt or not actually an ELF binary.
+     */
+    private fun validateElfHeader(file: File): Boolean {
+        return try {
+            val stream = file.inputStream()
+            val magic = ByteArray(4)
+            val read = stream.read(magic)
+            stream.close()
+            read == 4 && magic[0] == 0x7f.toByte() && magic[1] == 'E'.code.toByte()
+                    && magic[2] == 'L'.code.toByte() && magic[3] == 'F'.code.toByte()
+        } catch (e: Exception) {
+            Log.w(TAG, "ELF header check failed for ${file.name}: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Cross-check nativeLibraryDir .so files against the build-time manifest.
+     * Detects: missing files (expected by build, not on device),
+     *          extra files (on device but not in build),
+     *          size mismatches (file corrupted or wrong version).
+     *
+     * Returns a list of issue descriptions (empty = all OK).
+     */
+    private fun crossCheckManifest(
+        context: Context,
+        nativeLibDir: String,
+        deviceSoFiles: List<File>
+    ): List<String> {
+        val issues = mutableListOf<String>()
+        val manifestMap = parseManifest(context) ?: run {
+            issues.add("WARNING: manifest asset not found — cannot cross-check")
+            return issues
+        }
+
+        val deviceNames = deviceSoFiles.associate { it.name to it.length() }
+
+        // Check for files in manifest but missing on device
+        for ((name, expectedSize) in manifestMap) {
+            val deviceFile = deviceNames[name]
+            if (deviceFile == null) {
+                issues.add("MISSING on device: $name (expected ${formatBytes(expectedSize)})")
+            } else if (deviceFile != expectedSize) {
+                issues.add("SIZE MISMATCH: $name (device=${formatBytes(deviceFile)}, build=${formatBytes(expectedSize)})")
+            }
+        }
+
+        // Check for files on device but not in manifest (stale from old APK?)
+        for (name in deviceNames.keys) {
+            if (name !in manifestMap) {
+                issues.add("EXTRA on device: $name (not in build manifest — stale from old APK?)")
+            }
+        }
+
+        return issues
+    }
+
+    /**
+     * Parse the build-time manifest from assets.
+     * Returns a map of filename -> expected size, or null if manifest not found.
+     */
+    private fun parseManifest(context: Context): Map<String, Long>? {
+        return try {
+            val content = context.assets.open(MANIFEST_ASSET_NAME)
+                .bufferedReader().readText()
+            val map = mutableMapOf<String, Long>()
+            // Parse lines like: libfoo.so | 12345 | libz.so,libpython3.13.so
+            for (line in content.lines()) {
+                if (line.startsWith("#") || line.isBlank()) continue
+                val parts = line.split(" | ")
+                if (parts.size >= 2) {
+                    val name = parts[0].trim()
+                    val size = parts[1].trim().toLongOrNull() ?: continue
+                    map[name] = size
+                }
+            }
+            diag("[Manifest] Parsed ${map.size} entries")
+            map
+        } catch (e: Exception) {
+            diag("[Manifest] Could not read: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Parse Android linker error messages to extract actionable information.
+     *
+     * Recognized patterns:
+     *   - "CANNOT LINK EXECUTABLE ...: library \"libfoo.so\" not found: needed by libbar.so"
+     *   - "dlopen failed: library \"libfoo.so\" not found"
+     *   - "dlopen failed: cannot find \"libfoo.so\" from verneed[N] in DT_NEEDED list"
+     *
+     * Returns Pair(problemSo, missingDep) or null if not a recognizable linker error.
+     */
+    private fun parseLinkerError(error: String): Pair<String, String>? {
+        // Pattern 1: "library "X" not found: needed by Y" or "needed by .../Y"
+        val neededByPattern = Regex(
+            """library\s+"([^"]+)"\s+not\s+found.*?needed\s+by\s+\S*/(\S+)"""
+        )
+        val m1 = neededByPattern.find(error)
+        if (m1 != null) {
+            return Pair(m1.groupValues[2], m1.groupValues[1])
+        }
+
+        // Pattern 2: "dlopen failed: library "X" not found"
+        val dlopenPattern = Regex("""dlopen failed:\s+library\s+"([^"]+)"\s+not\s+found""")
+        val m2 = dlopenPattern.find(error)
+        if (m2 != null) {
+            // We know what's missing but not who needs it
+            return Pair("(unknown requester)", m2.groupValues[1])
+        }
+
+        // Pattern 3: "cannot find "X" from verneed" (Android-specific)
+        val verneedPattern = Regex(
+            """cannot find\s+"([^"]+)"\s+from\s+verneed\[\d+\].*?for\s+(\S+)"""
+        )
+        val m3 = verneedPattern.find(error)
+        if (m3 != null) {
+            return Pair(m3.groupValues[2], m3.groupValues[1])
+        }
+
+        return null
+    }
+
+    /** Format bytes in human-readable form. */
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+            else -> "${"%.1f".format(bytes / (1024.0 * 1024.0))} MB"
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  Python binary discovery
     // ═══════════════════════════════════════════════════════════════
 
@@ -328,12 +486,10 @@ object PythonBridge {
         val py = pythonPath ?: return "No Python path"
         val pyz = pyzPath ?: return "No .pyz path"
 
-        // Pre-flight checks for bundled Python
         if (isBundledPython) {
             val pyFile = File(py)
             if (!pyFile.exists()) return "Bundled Python not found: $py"
             if (!pyFile.canExecute()) {
-                // Log SELinux context for debugging
                 Log.w(TAG, "Bundled Python exists but may not be executable: $py")
                 Log.w(TAG, "nativeLibraryDir: ${pyFile.parent}")
             }
@@ -350,8 +506,6 @@ object PythonBridge {
                 .redirectErrorStream(true)
             configureEnvironment(pb)
             Log.d(TAG, "Running: $py $pyz --version")
-            Log.d(TAG, "PYTHONHOME=${pb.environment()["PYTHONHOME"]}")
-            Log.d(TAG, "LD_LIBRARY_PATH=${pb.environment()["LD_LIBRARY_PATH"]}")
             val process = pb.start()
             val output = process.inputStream.bufferedReader().readText().trim()
             val exitCode = process.waitFor()
@@ -367,10 +521,6 @@ object PythonBridge {
         }
     }
 
-    /**
-     * Execute payload_toolkit.pyz with given arguments.
-     * Automatically configures the environment for bundled or system Python.
-     */
     fun executePyz(args: List<String>): ExecResult {
         val py = pythonPath ?: return ExecResult("", "Python not initialized", -1, 0)
         val pyz = pyzPath ?: return ExecResult("", ".pyz not found", -1, 0)
@@ -416,14 +566,9 @@ object PythonBridge {
      *   LD_PRELOAD = absolute paths of ALL .so files in nativeLibraryDir
      *       -> Preloads every shared lib at process start, so transitive
      *          deps of dlopen'd C extensions are already in the loaded map.
-     *          This is critical because DT_RUNPATH=$ORIGIN does NOT work
-     *          for transitive deps on Android (confirmed on device).
      *   LD_LIBRARY_PATH = nativeLibraryDir
-     *       -> Linker finds all .so files for initial execve deps
      *   PYTHONHOME = stdlibDir
-     *       -> Python finds lib/python3.13/...py (stdlib modules)
      *   PYTHONPATH = nativeLibraryDir
-     *       -> Python finds _hashlib.so, _lzma.so, _bz2.so (C extensions)
      *
      * System Python (Termux fallback):
      *   Standard Termux environment variables.
@@ -439,15 +584,9 @@ object PythonBridge {
             env["TMPDIR"] = File(stdlibDir!!, "../tmp").absolutePath
 
             // LD_PRELOAD: load ALL .so files from nativeLibraryDir at process start.
-            // This ensures that when Python dlopens C extension modules (e.g. zlib.so),
-            // and those modules need shared libs (e.g. libz.so), the libs are already
-            // in the process's loaded library map — no linker search needed.
-            //
-            // Why is this needed?
-            //   Android bionic ignores DT_RUNPATH=$ORIGIN for transitive deps of
-            //   libraries loaded via dlopen().  Python loads zlib.so via dlopen(),
-            //   zlib.so needs libz.so — the linker cannot find it despite $ORIGIN.
-            //   By preloading with absolute paths, we bypass all search logic.
+            // This ensures transitive deps are already loaded when Python dlopens
+            // C extension modules.  DT_RUNPATH=$ORIGIN does NOT work for transitive
+            // deps on Android bionic (confirmed on device).
             val nativeDir = File(nativeLibDir)
             if (nativeDir.isDirectory) {
                 val preloadLibs = nativeDir.listFiles()
@@ -455,8 +594,14 @@ object PythonBridge {
                     ?.sortedBy { it.name }
                     ?: emptyList()
                 if (preloadLibs.isNotEmpty()) {
-                    env["LD_PRELOAD"] = preloadLibs.joinToString(":", transform = { it.absolutePath })
-                    diag("[LD_PRELOAD] ${preloadLibs.size} libraries preloaded")
+                    val preloadString = preloadLibs.joinToString(":", transform = { it.absolutePath })
+                    env["LD_PRELOAD"] = preloadString
+                    // Log detailed preload info for debugging
+                    val totalPreloadSize = preloadLibs.sumOf { it.length() }
+                    diag("[LD_PRELOAD] ${preloadLibs.size} libs, ${formatBytes(totalPreloadSize)} total")
+                    preloadLibs.forEach { f ->
+                        diag("  preload: ${f.name} (${formatBytes(f.length())})")
+                    }
                 }
             }
         } else {
