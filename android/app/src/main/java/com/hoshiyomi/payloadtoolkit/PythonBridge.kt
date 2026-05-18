@@ -25,7 +25,7 @@ import java.util.zip.ZipInputStream
  *     1. Extract python-stdlib.zip from assets → app-internal storage (read-only)
  *     2. Execute nativeLibraryDir/libpython3exec.so with:
  *        - LD_LIBRARY_PATH = nativeLibraryDir  (finds libpython3.13.so, liblzma, etc.)
- *        - PYTHONHOME      = extracted stdlib   (finds lib/python3.13/*.py)
+ *        - PYTHONHOME      = extracted stdlib   (finds lib/python3.13/...py)
  *        - PYTHONPATH       = nativeLibraryDir  (finds _hashlib.so, _lzma.so, etc.)
  *
  *   Fallback: if nativeLibraryDir lacks libpython3exec.so, tries system Python.
@@ -169,7 +169,7 @@ object PythonBridge {
      * Extract python-stdlib.zip from assets to app-internal storage.
      * Uses a version marker to skip re-extraction on subsequent launches.
      *
-     * Output: filesDir/python/stdlib/lib/python3.13/*.py
+     * Output: filesDir/python/stdlib/lib/python3.13/...py
      */
     private fun extractStdlib(context: Context): String? {
         val pythonDir = File(context.filesDir, PYTHON_DIR_NAME)
@@ -353,7 +353,7 @@ object PythonBridge {
      *   LD_LIBRARY_PATH = nativeLibraryDir
      *       → Linker finds libpython3.13.so, liblzma.so, libcrypto.so, etc.
      *   PYTHONHOME = stdlibDir
-     *       → Python finds lib/python3.13/*.py (stdlib modules)
+     *       → Python finds lib/python3.13/...py (stdlib modules)
      *   PYTHONPATH = nativeLibraryDir
      *       → Python finds _hashlib.so, _lzma.so, _bz2.so (C extensions)
      *
