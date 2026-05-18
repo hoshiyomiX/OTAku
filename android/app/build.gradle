@@ -1,7 +1,7 @@
 // Payload Toolkit Android — app module build.gradle (Groovy DSL)
 // Pure Android/Kotlin — no Chaquopy.
-// Python runtime (Termux 3.13) is bundled as an asset (python-runtime.zip).
-// payload_toolkit.pyz is bundled as an asset and executed via ProcessBuilder.
+// Python runtime (Termux 3.13) native libs in jniLibs (executable via nativeLibraryDir).
+// Python stdlib (.py) in assets. payload_toolkit.pyz in assets.
 
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
@@ -14,8 +14,8 @@ android {
         applicationId 'com.hoshiyomi.payloadtoolkit'
         minSdk 26
         targetSdk 34
-        versionCode 5
-        versionName '3.0.0'
+        versionCode 6
+        versionName '3.1.0'
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
