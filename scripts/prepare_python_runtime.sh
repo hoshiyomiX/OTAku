@@ -242,13 +242,24 @@ fi
 SONAME_REMOVED=0
 NEEDED_PATCHED=0
 NEEDED_FILES=0
+PATCHELF_SKIPPED=0
+# Minimum file size (bytes) for patchelf safety.
+# Files smaller than this typically lack ELF section padding for
+# dynamic entry growth.  patchelf corrupts them silently.
+# 8 KB = conservative threshold covering stubs, linker scripts,
+# and tiny C extension modules.
+PATCHELF_MIN_SIZE=8192
+
 for so_file in "$JNI_DIR"/*.so; do
     [ -f "$so_file" ] || continue
-    # Skip the Python executable — it's a tiny (4 KB) PIE executable.
-    # patchelf can corrupt small executables that lack ELF section padding
-    # for dynamic entry growth.  Its DT_NEEDED is already unversioned
-    # ("libpython3.13.so") so no patching is needed.
-    [ "$(basename "$so_file")" = "libpython3exec.so" ] && continue
+    # Skip small files from patchelf — they risk ELF corruption.
+    # libpython3exec.so (4 KB Python binary) and other tiny stubs
+    # don't have enough section padding for patchelf's modifications.
+    file_size=$(stat -c%s "$so_file" 2>/dev/null || echo 0)
+    if [ "$file_size" -lt "$PATCHELF_MIN_SIZE" ]; then
+        PATCHELF_SKIPPED=$((PATCHELF_SKIPPED + 1))
+        continue
+    fi
     file_patched=0
 
     # Strip DT_SONAME so linker uses filename for dedup
@@ -278,6 +289,7 @@ for so_file in "$JNI_DIR"/*.so; do
 done
 echo "    Stripped $SONAME_REMOVED DT_SONAME entries"
 echo "    Patched $NEEDED_PATCHED DT_NEEDED -> unversioned in $NEEDED_FILES files"
+echo "    Skipped $PATCHELF_SKIPPED files (< ${PATCHELF_MIN_SIZE} bytes, patchelf unsafe)"
 
 # Step 4: Set DT_RUNPATH=$ORIGIN on ALL .so files ----------------------
 # Belt-and-suspenders: ensures the linker searches the same directory as
@@ -287,15 +299,20 @@ echo "    Patched $NEEDED_PATCHED DT_NEEDED -> unversioned in $NEEDED_FILES file
 # (set by PythonBridge.kt).
 echo "    Setting DT_RUNPATH=\$ORIGIN on shared libraries..."
 RPATH_COUNT=0
+RPATH_SKIPPED=0
 for so_file in "$JNI_DIR"/*.so; do
     [ -f "$so_file" ] || continue
-    # Skip the Python executable (same reason as Step 3 above)
-    [ "$(basename "$so_file")" = "libpython3exec.so" ] && continue
+    # Skip small files (same threshold as Step 3)
+    file_size=$(stat -c%s "$so_file" 2>/dev/null || echo 0)
+    if [ "$file_size" -lt "$PATCHELF_MIN_SIZE" ]; then
+        RPATH_SKIPPED=$((RPATH_SKIPPED + 1))
+        continue
+    fi
     if patchelf --set-rpath '$ORIGIN' "$so_file" 2>/dev/null; then
         RPATH_COUNT=$((RPATH_COUNT + 1))
     fi
 done
-echo "    Set DT_RUNPATH on $RPATH_COUNT files (skipped libpython3exec.so)"
+echo "    Set DT_RUNPATH on $RPATH_COUNT files (skipped $RPATH_SKIPPED small files)"
 
 # Step 4b: Post-patchelf ELF integrity validation ------------------------
 # patchelf modifies ELF sections (DYNAMIC, dynstr).  On small .so files
