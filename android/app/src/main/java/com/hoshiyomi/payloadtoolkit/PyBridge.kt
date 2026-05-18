@@ -26,7 +26,8 @@ class PyBridge {
         private const val TAG = "PyBridge"
 
         @Volatile private var instance: PyBridge? = null
-        private var loadError: String? = null
+        @JvmStatic internal var loadError: String? = null
+            private set
 
         /**
          * Get singleton instance.  Returns null if libpybridge.so is not
