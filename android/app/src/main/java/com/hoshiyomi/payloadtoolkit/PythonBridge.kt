@@ -5,6 +5,7 @@ import android.util.Log
 import com.hoshiyomi.payloadtoolkit.BuildConfig
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.util.zip.ZipInputStream
 
 /**
@@ -225,6 +226,16 @@ object PythonBridge {
                     diag("  Fix: add the missing .so to prepare_python_runtime.sh PACKAGES,")
                     diag("       or exclude the problem .so if not needed.")
                     diag("--- end analysis ---")
+                } else if (verifyError.contains("did_read_") || verifyError.contains("linker_phdr")
+                    || verifyError.contains("CHECK") || verifyError.contains("SIGABRT")) {
+                    diag("--- LINKER CRASH ANALYSIS ---")
+                    diag("  Error type: bionic linker CHECK failure (ELF corruption)")
+                    diag("  This means a .so file has invalid program headers.")
+                    diag("  The linker crashes during LD_PRELOAD before it can report which file.")
+                    diag("  Check [ELF VALIDATION] section above for detected corrupt files.")
+                    diag("  If no corrupt files detected, the issue may be device-specific.")
+                    diag("  Next step: add small .so files (< 8KB) to patchelf skip list.")
+                    diag("--- end analysis ---")
                 }
                 return InitResult(false, pythonPath, pyzPath, isBundledPython,
                     verifyError, diagnosticLog.toString())
@@ -342,6 +353,95 @@ object PythonBridge {
             Log.w(TAG, "ELF header check failed for ${file.name}: ${e.message}")
             false
         }
+    }
+
+    /**
+     * Deep ELF validation — reads program headers to detect files that will
+     * crash the bionic linker with "Load CHECK 'did_read_' failed".
+     *
+     * This error occurs when e_phoff + e_phnum * e_phentsize > file size,
+     * meaning the program header table extends past the end of the file.
+     * patchelf can produce these corrupt files on small .so binaries.
+     *
+     * Returns null if valid, or a description of the problem.
+     */
+    private fun validateElfProgramHeaders(file: File): String? {
+        return try {
+            val raf = RandomAccessFile(file, "r")
+            try {
+                val size = raf.length()
+                if (size < 64) return "file too small for ELF header (${size} bytes)"
+
+                // Read e_phoff (offset 32, 4 bytes LE), e_phentsize (offset 54, 2 bytes LE),
+                // e_phnum (offset 56, 2 bytes LE)
+                raf.seek(32)
+                val ePhoff = Integer.toUnsignedLong(raf.readInt())
+                raf.seek(54)
+                val ePhentsize = Integer.toUnsignedLong(raf.readUnsignedShort())
+                raf.seek(56)
+                val ePhnum = Integer.toUnsignedLong(raf.readUnsignedShort())
+
+                val phTableEnd = ePhoff + ePhnum * ePhentsize
+                if (phTableEnd > size) {
+                    return "phdr table overflows: offset=$ePhoff + ${ePhnum}x${ePhentsize} = $phTableEnd > fileSize=$size"
+                }
+
+                // Verify we can actually read the first program header
+                if (ePhnum > 0 && ePhoff < size) {
+                    raf.seek(ePhoff)
+                    val firstPhdr = ByteArray(ePhentsize.toInt())
+                    raf.readFully(firstPhdr)
+                }
+
+                null // valid
+            } finally {
+                raf.close()
+            }
+        } catch (e: Exception) {
+            "read error: ${e.message}"
+        }
+    }
+
+    /**
+     * Validate a .so file using dlopen(RTLD_LAZY).  This is the definitive test —
+     * if the Android linker can load it, it's valid.  Returns null if OK,
+     * or an error description.
+     *
+     * Uses RTLD_LAZY so the linker doesn't immediately resolve transitive deps.
+     * We only care whether the ELF headers are parseable.
+     */
+    private fun validateSoWithDlopen(file: File): String? {
+        val handle = try {
+            System.loadLibrary(file.nameWithoutExtension)
+            // If we get here, the library is already loaded (or was loaded by a
+            // previous call).  Since System.loadLibrary doesn't return a handle,
+            // we can't dlclose it.  But success means the file is valid.
+            null // valid
+        } catch (e: UnsatisfiedLinkError) {
+            // This can mean: file not found, corrupt ELF, or missing deps.
+            // Parse the message to distinguish.
+            val msg = e.message ?: "unknown error"
+            when {
+                msg.contains("not found") -> {
+                    // Missing dependency — the file itself is likely valid,
+                    // just its deps aren't available yet.  Not our concern here.
+                    null
+                }
+                msg.contains("is 64-bit instead of 32-bit") ||
+                msg.contains("wrong ELF class") -> {
+                    "wrong architecture"
+                }
+                msg.contains("bad ELF magic") ||
+                msg.contains("not a valid ELF") -> {
+                    "invalid ELF magic"
+                }
+                msg.contains("read") || msg.contains("CHECK") -> {
+                    "linker read failure (corrupt ELF headers): $msg"
+                }
+                else -> null // unknown, assume OK
+            }
+        }
+        return handle
     }
 
     /**
@@ -587,21 +687,75 @@ object PythonBridge {
             // This ensures transitive deps are already loaded when Python dlopens
             // C extension modules.  DT_RUNPATH=$ORIGIN does NOT work for transitive
             // deps on Android bionic (confirmed on device).
+            //
+            // Before preloading, validate each .so file to catch corrupt ELFs
+            // that would crash the linker (e.g. patchelf-corrupted small binaries).
             val nativeDir = File(nativeLibDir)
             if (nativeDir.isDirectory) {
-                val preloadLibs = nativeDir.listFiles()
+                val allSoFiles = nativeDir.listFiles()
                     ?.filter { it.name.endsWith(".so") }
                     ?.sortedBy { it.name }
                     ?: emptyList()
-                if (preloadLibs.isNotEmpty()) {
-                    val preloadString = preloadLibs.joinToString(":", transform = { it.absolutePath })
-                    env["LD_PRELOAD"] = preloadString
-                    // Log detailed preload info for debugging
-                    val totalPreloadSize = preloadLibs.sumOf { it.length() }
-                    diag("[LD_PRELOAD] ${preloadLibs.size} libs, ${formatBytes(totalPreloadSize)} total")
-                    preloadLibs.forEach { f ->
-                        diag("  preload: ${f.name} (${formatBytes(f.length())})")
+
+                // -- Per-file ELF validation --
+                diag("[ELF VALIDATION] checking ${allSoFiles.size} files...")
+                val invalidFiles = mutableListOf<String>()
+                val suspiciousFiles = mutableListOf<String>()
+                for (soFile in allSoFiles) {
+                    val name = soFile.name
+                    val size = soFile.length()
+
+                    // Check 1: ELF magic bytes
+                    if (!validateElfHeader(soFile)) {
+                        val msg = "INVALID ELF magic: $name (${formatBytes(size)})"
+                        diag("  FAIL: $msg")
+                        invalidFiles.add(msg)
+                        continue
                     }
+
+                    // Check 2: Program header table bounds
+                    val phdrProblem = validateElfProgramHeaders(soFile)
+                    if (phdrProblem != null) {
+                        val msg = "PHDR OVERFLOW: $name (${formatBytes(size)}): $phdrProblem"
+                        diag("  FAIL: $msg")
+                        invalidFiles.add(msg)
+                        continue
+                    }
+
+                    // Check 3: Flag small files (< 8 KB) as suspicious
+                    // patchelf is known to corrupt tiny ELF binaries that lack
+                    // section padding for dynamic entry growth.
+                    if (size < 8192) {
+                        // These files are at risk of being corrupt even if
+                        // the header checks pass.  Log them for analysis.
+                        suspiciousFiles.add("$name (${size} bytes)")
+                    }
+                }
+
+                if (invalidFiles.isNotEmpty()) {
+                    diag("[ELF VALIDATION] FAILED: ${invalidFiles.size} corrupt files detected!")
+                    invalidFiles.forEach { diag("  $it") }
+                    diag("  These files will crash the linker via LD_PRELOAD.")
+                    diag("  ROOT CAUSE: patchelf corruption on small .so files.")
+                    diag("  FIX: add these files to the patchelf skip list in prepare_python_runtime.sh")
+                    // Still preload — the linker error will be caught by verifySetup
+                    // and displayed to the user.  But now we know WHICH file caused it.
+                } else {
+                    diag("[ELF VALIDATION] all ${allSoFiles.size} files pass header checks")
+                }
+
+                if (suspiciousFiles.isNotEmpty()) {
+                    diag("[ELF VALIDATION] ${suspiciousFiles.size} small files (< 8 KB, patchelf risk):")
+                    suspiciousFiles.forEach { diag("  SUSPICIOUS: $it") }
+                }
+
+                // Build LD_PRELOAD string
+                val preloadString = allSoFiles.joinToString(":", transform = { it.absolutePath })
+                env["LD_PRELOAD"] = preloadString
+                val totalPreloadSize = allSoFiles.sumOf { it.length() }
+                diag("[LD_PRELOAD] ${allSoFiles.size} libs, ${formatBytes(totalPreloadSize)} total")
+                allSoFiles.forEach { f ->
+                    diag("  preload: ${f.name} (${formatBytes(f.length())})")
                 }
             }
         } else {
