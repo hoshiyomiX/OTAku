@@ -148,9 +148,10 @@ done
 #        was a corruption risk (grew dynamic section on files with minimal padding).
 #
 #   RUNTIME (PythonBridge.kt):
-#     LD_PRELOAD with absolute paths of ALL .so files in nativeLibraryDir.
-#     This preloads everything at process start.  When Python later dlopens
-#     zlib.so and it needs libz.so, the lib is already in the loaded map.
+#     LD_PRELOAD with Python binary's DIRECT dependencies only (typically
+#     2-4 large libs).  Transitive deps (loaded via dlopen) are resolved by
+#     LD_LIBRARY_PATH.  Preloading ALL 74 libs caused persistent ELF
+#     corruption crashes (did_read_ failures).
 echo "    Resolving symlinks and flattening SONAME references..."
 
 # Step 1: Replace symlinks with real copies

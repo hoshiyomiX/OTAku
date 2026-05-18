@@ -27,8 +27,8 @@ import java.util.zip.ZipInputStream
  *     1. Extract python-stdlib.zip + manifest from assets → app-internal storage
  *     2. Cross-check nativeLibraryDir against build manifest
  *     3. Execute nativeLibraryDir/libpython3exec.so with:
- *        - LD_PRELOAD      = all .so files (transitive dep resolution)
- *        - LD_LIBRARY_PATH = nativeLibraryDir
+ *        - LD_PRELOAD      = Python binary's direct deps only (from manifest)
+ *        - LD_LIBRARY_PATH = nativeLibraryDir (for transitive deps via dlopen)
  *        - PYTHONHOME      = extracted stdlib
  *        - PYTHONPATH       = nativeLibraryDir
  */
@@ -684,8 +684,18 @@ object PythonBridge {
             configureEnvironment(pb)
             Log.d(TAG, "Running: $py $pyz --version")
             val process = pb.start()
-            val output = process.inputStream.bufferedReader().readText().trim()
+            val rawOutput = process.inputStream.bufferedReader().readText().trim()
             val exitCode = process.waitFor()
+            // Filter non-fatal bionic linker warnings (CANNOT LINK EXECUTABLE)
+            // that appear when LD_PRELOAD resolves deps the default namespace
+            // can't find for execve()'d binaries.  These are harmless noise.
+            val output = if (isBundledPython) {
+                rawOutput.lineSequence()
+                    .filterNot { it.contains("CANNOT LINK EXECUTABLE") }
+                    .joinToString("\n").trim()
+            } else {
+                rawOutput
+            }
             if (exitCode == 0 && output.isNotEmpty()) {
                 Log.d(TAG, "Verify OK: $output")
                 null
@@ -712,9 +722,23 @@ object PythonBridge {
 
             Log.d(TAG, "Exec: ${command.joinToString(" ")}")
             val process = pb.start()
-            val output = process.inputStream.bufferedReader().readText()
+            val rawOutput = process.inputStream.bufferedReader().readText()
             val exitCode = process.waitFor()
             val duration = System.currentTimeMillis() - startTime
+
+            // Filter known non-fatal linker warnings from stderr.
+            // When execve() runs libpython3exec.so, bionic's default namespace
+            // doesn't search LD_LIBRARY_PATH for direct deps.  LD_PRELOAD
+            // provides the lib, but bionic still prints a CANNOT LINK warning
+            // to stderr before proceeding.  Since we use redirectErrorStream(true),
+            // this noise appears in the combined output.  Strip it for clean UI.
+            val output = if (isBundledPython && exitCode == 0) {
+                rawOutput.lineSequence()
+                    .filterNot { it.contains("CANNOT LINK EXECUTABLE") }
+                    .joinToString("\n")
+            } else {
+                rawOutput
+            }
 
             if (exitCode != 0) {
                 Log.w(TAG, "Python exit $exitCode, output: ${output.take(500)}")
@@ -740,10 +764,11 @@ object PythonBridge {
      * Configure ProcessBuilder environment for the current Python source.
      *
      * Bundled Python (from jniLibs):
-     *   LD_PRELOAD = absolute paths of ALL .so files in nativeLibraryDir
-     *       -> Preloads every shared lib at process start, so transitive
-     *          deps of dlopen'd C extensions are already in the loaded map.
+     *   LD_PRELOAD = direct deps of Python binary only (from build manifest).
+     *       -> Bionic's default namespace doesn't search LD_LIBRARY_PATH for
+     *          execve()'d binaries.  Direct DT_NEEDED deps must be preloaded.
      *   LD_LIBRARY_PATH = nativeLibraryDir
+     *       -> Handles transitive deps loaded via dlopen() from C extensions.
      *   PYTHONHOME = stdlibDir
      *   PYTHONPATH = nativeLibraryDir
      *
@@ -830,8 +855,16 @@ object PythonBridge {
                 .redirectErrorStream(true)
             configureEnvironment(pb)
             val process = pb.start()
-            val output = process.inputStream.bufferedReader().readText().trim()
+            val rawOutput = process.inputStream.bufferedReader().readText().trim()
             process.waitFor()
+            // Filter non-fatal linker warnings (same as executePyz)
+            val output = if (isBundledPython) {
+                rawOutput.lineSequence()
+                    .filterNot { it.contains("CANNOT LINK EXECUTABLE") }
+                    .joinToString("\n").trim()
+            } else {
+                rawOutput
+            }
             output.ifEmpty { "No output (exit ${process.exitValue()})" }
         } catch (e: Exception) {
             "Failed: ${e.message}"
