@@ -12,7 +12,7 @@ Modes:
     sign  — Sign payload.bin with RSA key
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 __author__ = "PayloadToolkit"
 
 # ---------------------------------------------------------------------------

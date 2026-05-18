@@ -1,65 +1,64 @@
 #!/usr/bin/env bash
-# prepare_python_runtime.sh — Download Termux Python + deps, create runtime.zip
+# prepare_python_runtime.sh — Prepare bundled Python runtime for Android APK
 #
-# Downloads Termux aarch64 packages, extracts them, and creates a ZIP file
-# that PythonBridge.kt extracts at app first launch.
+# Downloads Termux aarch64 packages and splits them into two outputs:
 #
-# Output: dist/python-runtime.zip
+#   1. jniLibs/arm64-v8a/  — All .so files + Python binary
+#      → Extracted by Android package manager to nativeLibraryDir at install
+#      → nativeLibraryDir has SELinux app_lib_file context (EXECUTABLE)
 #
-# Packages included:
-#   python, libandroid-support, libbz2, libcrypt, libffi, liblzma,
-#   ncurses, openssl, readline, sqlite, zlib
+#   2. dist/python-stdlib.zip — Python stdlib .py files + configs
+#      → Bundled as Android asset, extracted to app data at first launch
+#      → Read-only access, no exec permission needed
+#
+# Why this split?  Android SELinux blocks execve() from app_data_file context.
+# Files in nativeLibraryDir (from jniLibs) can be executed.  Pure .py files
+# only need read access, so app data is fine for them.
+#
+# Packages: python 3.13, libandroid-support, liblzma, libbz2, libcrypto,
+#           libsqlite3, ncurses, readline, libffi, zlib, libcrypt
 
 set -euo pipefail
 
 ARCH=aarch64
 REPO="https://packages.termux.dev/apt/termux-main"
 STAGING=$(mktemp -d)
-RUNTIME_DIR="$STAGING/runtime"
-DIST_DIR="$(cd "$(dirname "$0")/.." && pwd)/dist"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+JNI_DIR="$PROJECT_ROOT/android/app/src/main/jniLibs/arm64-v8a"
+STDLIB_STAGING="$STAGING/stdlib/lib/python3.13"
+DIST_DIR="$PROJECT_ROOT/dist"
 
-mkdir -p "$DIST_DIR" "$RUNTIME_DIR"
+mkdir -p "$JNI_DIR" "$DIST_DIR" "$STDLIB_STAGING"
 
 # ── Fetch package index ────────────────────────────────────────────
-PACKAGES_URL="$REPO/dists/stable/main/binary-${ARCH}/Packages.gz"
-echo "==> Fetching package index for ${ARCH}..."
-curl -sL "$PACKAGES_URL" | gzip -d > "$STAGING/Packages"
-PKG_COUNT=$(wc -l < "$STAGING/Packages")
-echo "    Index: ${PKG_COUNT} lines"
+echo "==> Fetching Termux package index for ${ARCH}..."
+curl -sL "$REPO/dists/stable/main/binary-${ARCH}/Packages.gz" | gzip -d > "$STAGING/Packages"
 
-# ── Helper: find package Filename in index ─────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────
 pkg_filename() {
     local pkg="$1"
-    local packages_file="$2"
-    # Use regex match ($0 ~ p) since p contains anchors ^ and $
     awk -v p="^Package: ${pkg}$" '
         $0 ~ p { found=1 }
         found && /^Filename:/ { sub(/^Filename: */, ""); print; exit }
-    ' "$packages_file"
+    ' "$STAGING/Packages"
 }
 
-# ── Helper: download and extract a .deb package ────────────────────
 download_and_extract() {
     local pkg="$1"
     local filename
-    filename=$(pkg_filename "$pkg" "$STAGING/Packages")
-    if [ -z "$filename" ]; then
-        echo "    WARNING: Package '${pkg}' not found in index, skipping"
-        return 0
-    fi
-    local url="${REPO}/${filename}"
-    local deb="${STAGING}/${pkg}.deb"
-    echo "    Downloading ${pkg}..."
-    wget -q "$url" -O "$deb" || { echo "    FAIL: ${pkg}"; return 0; }
-
-    # Extract using dpkg-deb (available on ubuntu-latest)
-    dpkg-deb -x "$deb" "${STAGING}/installed/" 2>/dev/null
-    rm -f "$deb"
+    filename=$(pkg_filename "$pkg")
+    [ -z "$filename" ] && { echo "    SKIP: ${pkg} (not found)"; return 0; }
+    echo "    $pkg"
+    wget -q "${REPO}/${filename}" -O "$STAGING/${pkg}.deb" || { echo "    FAIL: ${pkg}"; return 0; }
+    dpkg-deb -x "$STAGING/${pkg}.deb" "$STAGING/installed/" 2>/dev/null
+    rm -f "$STAGING/${pkg}.deb"
 }
 
-# ── Core packages ──────────────────────────────────────────────────
-# python + all shared library dependencies for C extensions
-CORE_PACKAGES=(
+# ── Download packages ──────────────────────────────────────────────
+echo ""
+echo "==> Downloading packages..."
+PACKAGES=(
     python
     libandroid-support
     libbz2
@@ -72,82 +71,93 @@ CORE_PACKAGES=(
     sqlite
     zlib
 )
-
-echo ""
-echo "==> Downloading and extracting ${#CORE_PACKAGES[@]} packages..."
-for pkg in "${CORE_PACKAGES[@]}"; do
+for pkg in "${PACKAGES[@]}"; do
     download_and_extract "$pkg"
 done
 
-# ── Copy from Termux prefix to runtime dir ────────────────────────
-TERMUX_PREFIX="${STAGING}/installed/data/data/com.termux/files/usr"
-if [ ! -d "$TERMUX_PREFIX" ]; then
+TERMUX_PREFIX="$STAGING/installed/data/data/com.termux/files/usr"
+if [ ! -d "$TERMUX_PREFIX/lib" ]; then
     echo "ERROR: Termux prefix not found at ${TERMUX_PREFIX}"
-    echo "Contents of installed/:"
-    find "${STAGING}/installed/" -maxdepth 5 -type d | head -20
     rm -rf "$STAGING"
     exit 1
 fi
 
+# ── 1. Populate jniLibs/arm64-v8a/ ────────────────────────────────
+# All .so files + Python binary go here.
+# Android extracts them to nativeLibraryDir (executable SELinux context).
 echo ""
-echo "==> Copying runtime files..."
-cp -a "$TERMUX_PREFIX/"* "$RUNTIME_DIR/"
+echo "==> Populating jniLibs/arm64-v8a/..."
 
-# ── Size optimization ─────────────────────────────────────────────
-echo "==> Optimizing size..."
-# Remove test suites
-find "$RUNTIME_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-find "$RUNTIME_DIR" -type d -name "test" -path "*/python*/test" -exec rm -rf {} + 2>/dev/null || true
-find "$RUNTIME_DIR" -type d -name "tests" -path "*/python*/tests" -exec rm -rf {} + 2>/dev/null || true
-find "$RUNTIME_DIR" -type d -name "idlelib" -path "*/python*/idlelib" -exec rm -rf {} + 2>/dev/null || true
-find "$RUNTIME_DIR" -type d -name "tkinter" -path "*/python*/tkinter" -exec rm -rf {} + 2>/dev/null || true
-find "$RUNTIME_DIR" -type d -name "turtledemo" -path "*/python*/turtledemo" -exec rm -rf {} + 2>/dev/null || true
-find "$RUNTIME_DIR" -type d -name "unittest" -path "*/python*/unittest/test*" -exec rm -rf {} + 2>/dev/null || true
+# Clean previous output (but keep directory)
+rm -f "$JNI_DIR"/*.so 2>/dev/null || true
 
-# Remove compiled files where source exists
-find "$RUNTIME_DIR" -name "*.pyo" -delete 2>/dev/null || true
+# Python binary → renamed to .so so Android packages it into lib/arm64-v8a/
+if [ -f "$TERMUX_PREFIX/bin/python3.13" ]; then
+    cp -a "$TERMUX_PREFIX/bin/python3.13" "$JNI_DIR/libpython3exec.so"
+    echo "    python3.13 → libpython3exec.so"
+fi
 
-# Remove static libraries and libtool archives
-find "$RUNTIME_DIR" -name "*.a" -delete 2>/dev/null || true
-find "$RUNTIME_DIR" -name "*.la" -delete 2>/dev/null || true
-
-# Remove headers (not needed at runtime)
-find "$RUNTIME_DIR" -name "include" -type d -path "*/usr/include" -exec rm -rf {} + 2>/dev/null || true
-
-# Strip debug symbols from shared libraries
-find "$RUNTIME_DIR" -name "*.so" -exec strip --strip-debug {} + 2>/dev/null || true
-find "$RUNTIME_DIR" -name "python3*" -type f -exec strip --strip-debug {} + 2>/dev/null || true
-
-# ── Handle symlinks for zip compatibility ──────────────────────────
-# ZIP doesn't preserve symlinks well. Copy symlink targets instead.
-echo "==> Resolving symlinks for ZIP compatibility..."
-find "$RUNTIME_DIR" -type l | while read -r link; do
-    target=$(readlink -f "$link" 2>/dev/null || true)
-    if [ -n "$target" ] && [ -f "$target" ]; then
-        # Replace symlink with a copy of the target
-        rm -f "$link"
-        cp -a "$target" "$link"
-    else
-        # Broken symlink — remove it
-        rm -f "$link"
-    fi
+# Shared libraries from lib/ — actual files only (skip symlinks to save space;
+# the linker resolves NEEDED by exact SONAME e.g. libcrypto.so.3)
+find "$TERMUX_PREFIX/lib" -maxdepth 1 -name "*.so*" -type f | while read -r f; do
+    cp -a "$f" "$JNI_DIR/"
 done
 
-# ── Create ZIP for Android asset extraction ───────────────────────
-OUTPUT="$DIST_DIR/python-runtime.zip"
-echo ""
-echo "==> Creating python-runtime.zip..."
-cd "$RUNTIME_DIR"
-zip -qr "$OUTPUT" .
-SIZE=$(du -h "$OUTPUT" | cut -f1)
-FILE_COUNT=$(zipinfo -1 "$OUTPUT" | wc -l)
+# C extension modules from lib-dynload/ — these have names like
+# _hashlib.cpython-313-aarch64-linux-android.so (not "lib*" prefix,
+# but Android still extracts all .so files from jniLibs)
+if [ -d "$TERMUX_PREFIX/lib/python3.13/lib-dynload" ]; then
+    find "$TERMUX_PREFIX/lib/python3.13/lib-dynload" -name "*.so" -type f | while read -r f; do
+        cp -a "$f" "$JNI_DIR/"
+    done
+fi
 
+JNI_COUNT=$(find "$JNI_DIR" -maxdepth 1 -name "*.so" -type f | wc -l)
+JNI_SIZE=$(du -sh "$JNI_DIR" | cut -f1)
+echo "    $JNI_COUNT native libraries ($JNI_SIZE)"
+
+# ── 2. Create python-stdlib.zip ────────────────────────────────────
+# Only .py files and configs — no .so files (those are in jniLibs).
+echo ""
+echo "==> Creating python-stdlib.zip..."
+
+# Copy Python stdlib to staging
+if [ -d "$TERMUX_PREFIX/lib/python3.13" ]; then
+    cp -a "$TERMUX_PREFIX/lib/python3.13/." "$STDLIB_STAGING/"
+fi
+
+# Remove ALL .so files from stdlib (they're in jniLibs now)
+find "$STDLIB_STAGING" -name "*.so" -delete 2>/dev/null || true
+
+# Strip unnecessary content to reduce size
+find "$STDLIB_STAGING" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find "$STDLIB_STAGING" -type d \( -name "test" -o -name "tests" \) \
+    -path "*/python*/test*" -exec rm -rf {} + 2>/dev/null || true
+find "$STDLIB_STAGING" -type d -name "idlelib" -exec rm -rf {} + 2>/dev/null || true
+find "$STDLIB_STAGING" -type d -name "tkinter" -exec rm -rf {} + 2>/dev/null || true
+find "$STDLIB_STAGING" -type d -name "turtledemo" -exec rm -rf {} + 2>/dev/null || true
+find "$STDLIB_STAGING" -type d -name "ensurepip" -exec rm -rf {} + 2>/dev/null || true
+find "$STDLIB_STAGING" -name "*.pyc" -delete 2>/dev/null || true
+find "$STDLIB_STAGING" -name "*.pyo" -delete 2>/dev/null || true
+find "$STDLIB_STAGING" -name "*.a" -delete 2>/dev/null || true
+find "$STDLIB_STAGING" -name "*.la" -delete 2>/dev/null || true
+
+# Create zip preserving lib/python3.13/ structure
+(cd "$STAGING/stdlib" && zip -qr "$DIST_DIR/python-stdlib.zip" lib/)
+
+STDLIB_SIZE=$(du -h "$DIST_DIR/python-stdlib.zip" | cut -f1)
+STDLIB_COUNT=$(zipinfo -1 "$DIST_DIR/python-stdlib.zip" | wc -l)
+
+# ── Summary ────────────────────────────────────────────────────────
 echo ""
 echo "==========================================="
-echo "  python-runtime.zip"
-echo "  Size:     ${SIZE}"
-echo "  Files:    ${FILE_COUNT}"
-echo "  Output:   ${OUTPUT}"
+echo "  jniLibs (native libs):"
+echo "    Files:  $JNI_COUNT"
+echo "    Size:   $JNI_SIZE"
+echo "  python-stdlib.zip (.py only):"
+echo "    Files:  $STDLIB_COUNT"
+echo "    Size:   $STDLIB_SIZE"
+echo "  Output:  $DIST_DIR/python-stdlib.zip"
 echo "==========================================="
 
 # ── Cleanup ────────────────────────────────────────────────────────
