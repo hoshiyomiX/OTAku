@@ -54,7 +54,6 @@ object PythonBridge {
     private var pythonPath: String? = null
     private var pyzPath: String? = null
     private var stdlibDir: String? = null
-    private var sonameDirPath: String? = null
     private var isBundledPython = false
     private val initLock = Any()
 
@@ -108,12 +107,10 @@ object PythonBridge {
 
             diag("nativeLibraryDir: $nativeLibDir")
 
-            // Fix SONAME symlinks in nativeLibraryDir.
-            // AGP only packages files ending with .so, so versioned files like
-            // libz.so.1 are stored as libz.so.1.so in the APK.  At runtime we
-            // create symlinks in an app-writable directory so the linker can
-            // resolve DT_NEEDED references.
-            sonameDirPath = fixSonameSymlinks(nativeLibDir, ctx)
+            // SONAME resolution is handled at BUILD time by patchelf.
+            // prepare_python_runtime.sh rewrites DT_NEEDED entries in all .so
+            // files so versioned libs like libz.so.1 are referenced as
+            // libz.so.1.so (which AGP packages).  No runtime fixup needed.
 
             diag("libpython3exec.so exists: ${bundledPy.isFile}")
             diag("libpython3exec.so canExecute: ${bundledPy.isFile && bundledPy.canExecute()}")
@@ -199,71 +196,6 @@ object PythonBridge {
             initialized = true
             return InitResult(true, pythonPath, pyzPath, isBundledPython)
         }
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  SONAME symlink repair
-    // ═══════════════════════════════════════════════════════════════
-
-    /**
-     * AGP only packages files ending with ".so" from jniLibs.
-     * Versioned SONAME files like libz.so.1 were renamed to libz.so.1.so
-     * by prepare_python_runtime.sh so AGP would include them in the APK.
-     *
-     * At runtime, the linker resolves DT_NEEDED (e.g. "libz.so.1") by
-     * searching LD_LIBRARY_PATH directories.  We COPY the .so.so files
-     * into an app-writable directory (filesDir/python/soname/) with their
-     * correct SONAME names, and prepend this directory to LD_LIBRARY_PATH.
-     *
-     * We use copies instead of symlinks because:
-     *   1. SELinux may block cross-context symlink traversal
-     *      (app_data_file -> app_lib_file)
-     *   2. LD_LIBRARY_PATH is unreliable on modern Android for dlopen()
-     *      transitive dependencies; the linker namespace may not include
-     *      paths added at runtime via LD_LIBRARY_PATH.
-     *   3. Copies are always accessible regardless of linker config.
-     *
-     * Example:
-     *   filesDir/python/soname/libz.so.1  (copy of nativeLibraryDir/libz.so.1.so)
-     *
-     * Returns the soname directory path (to be prepended to LD_LIBRARY_PATH).
-     */
-    private fun fixSonameSymlinks(nativeLibDir: String, context: Context): String {
-        val sonameDir = File(context.filesDir, "python/soname")
-        if (!sonameDir.exists()) sonameDir.mkdirs()
-
-        var created = 0
-        val nativeDir = File(nativeLibDir)
-        val soSoFiles = nativeDir.listFiles()?.filter {
-            it.isFile && it.name.endsWith(".so.so")
-        }
-        diag("SONAME .so.so files in nativeLibraryDir: ${soSoFiles?.size ?: 0}")
-
-        soSoFiles?.forEach { file ->
-            // libz.so.1.so -> remove trailing .so -> libz.so.1
-            val soname = file.name.removeSuffix(".so")
-            val target = File(sonameDir, soname)
-            if (!target.exists() || target.length() != file.length()) {
-                try {
-                    file.copyTo(target, overwrite = true)
-                    // Make readable/executable for the linker
-                    target.setReadable(true, false)
-                    target.setExecutable(true, false)
-                    created++
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to copy SONAME file $soname: ${e.message}")
-                    diag("WARN: Failed to copy SONAME $soname: ${e.message}")
-                }
-            }
-        }
-        if (created > 0) {
-            val sonameList = sonameDir.listFiles()?.map { it.name }?.sorted()
-            Log.d(TAG, "Created $created SONAME copies in ${sonameDir.absolutePath}")
-            diag("Created $created SONAME copies: ${sonameList?.joinToString(", ")}")
-        } else if (soSoFiles.isNullOrEmpty()) {
-            diag("WARNING: No .so.so files found — SONAME resolution disabled")
-        }
-        return sonameDir.absolutePath
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -482,11 +414,12 @@ object PythonBridge {
      *
      * Bundled Python (from jniLibs):
      *   LD_LIBRARY_PATH = nativeLibraryDir
-     *       → Linker finds libpython3.13.so, liblzma.so, libcrypto.so, etc.
+     *       -> Linker finds all .so files (patchelf already rewrote DT_NEEDED
+     *          entries to reference .so.so filenames in the same directory)
      *   PYTHONHOME = stdlibDir
-     *       → Python finds lib/python3.13/...py (stdlib modules)
+     *       -> Python finds lib/python3.13/...py (stdlib modules)
      *   PYTHONPATH = nativeLibraryDir
-     *       → Python finds _hashlib.so, _lzma.so, _bz2.so (C extensions)
+     *       -> Python finds _hashlib.so, _lzma.so, _bz2.so (C extensions)
      *
      * System Python (Termux fallback):
      *   Standard Termux environment variables.
@@ -496,13 +429,7 @@ object PythonBridge {
 
         if (isBundledPython && stdlibDir != null) {
             val nativeLibDir = pythonPath?.let { File(it).parent } ?: return
-            // LD_LIBRARY_PATH: soname dir first (for SONAME resolution),
-            // then nativeLibraryDir (for base libs and C extensions)
-            val ldPath = buildString {
-                sonameDirPath?.let { append("$it:") }
-                append(nativeLibDir)
-            }
-            env["LD_LIBRARY_PATH"] = ldPath
+            env["LD_LIBRARY_PATH"] = nativeLibDir
             env["PYTHONHOME"] = stdlibDir!!
             env["PYTHONPATH"] = nativeLibDir
             env["TMPDIR"] = File(stdlibDir!!, "../tmp").absolutePath

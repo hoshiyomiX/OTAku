@@ -116,8 +116,18 @@ done
 #   2. For every file matching *.so.* (e.g. libz.so.1.3.2 or libz.so.1),
 #      create a copy with .so appended (e.g. libz.so.1.3.2.so) so AGP
 #      packages it.
-#   3. At runtime, PythonBridge.kt creates symlinks from the SONAME name
-#      to the .so.so file so the linker can find them by DT_NEEDED.
+#   3. Use patchelf to rewrite DT_NEEDED entries in ALL .so files so
+#      they reference the .so.so filenames instead of the original SONAMEs.
+#      This way the Android linker finds them in nativeLibraryDir (same
+#      directory) without needing LD_LIBRARY_PATH or runtime symlinks.
+#
+# Why patchelf instead of LD_LIBRARY_PATH?
+#   Android linker namespaces (API 26+) define which paths dlopen() searches.
+#   LD_LIBRARY_PATH is often IGNORED for transitive dlopen() calls in the
+#   "default" namespace.  But the linker ALWAYS searches the directory
+#   containing the requesting library.  So if binascii.so (in nativeLibraryDir)
+#   has DT_NEEDED: libz.so.1.so, the linker finds libz.so.1.so in the same
+#   directory.  No LD_LIBRARY_PATH hack needed.
 echo "    Resolving symlinks and fixing SONAME extensions..."
 
 # Step 1: Replace symlinks with real copies
@@ -140,6 +150,7 @@ echo "    SONAME extensions fixed ($SONAME_COUNT files)"
 # C extension modules from lib-dynload/ -- these have names like
 # _hashlib.cpython-313-aarch64-linux-android.so (not "lib*" prefix,
 # but Android still extracts all .so files from jniLibs)
+# IMPORTANT: Copy BEFORE patchelf so these also get their DT_NEEDED fixed.
 if [ -d "$TERMUX_PREFIX/lib/python3.13/lib-dynload" ]; then
     find "$TERMUX_PREFIX/lib/python3.13/lib-dynload" -name "*.so" \( -type f -o -type l \) | while read -r f; do
         cp -a "$f" "$JNI_DIR/"
@@ -153,6 +164,51 @@ find "$JNI_DIR" -maxdepth 1 -name "xxlimited*.so" -delete 2>/dev/null || true
 find "$JNI_DIR" -maxdepth 1 -name "xxsubtype*.so" -delete 2>/dev/null || true
 find "$JNI_DIR" -maxdepth 1 -name "_ctypes_test*.so" -delete 2>/dev/null || true
 
+# Step 3: Install patchelf and rewrite DT_NEEDED entries ----------------
+# patchelf modifies ELF DT_NEEDED entries so libraries reference the
+# .so.so filenames that AGP actually packages.
+#
+# IMPORTANT: This must run AFTER all .so files are in jniLibs (including
+# lib-dynload extension modules) so they ALL get patched.
+#
+# Example: binascii.so has DT_NEEDED: libz.so.1
+#   -> patchelf changes it to DT_NEEDED: libz.so.1.so
+#   -> linker searches nativeLibraryDir (same dir as binascii.so)
+#   -> finds libz.so.1.so -> success!
+echo "    Patching DT_NEEDED entries with patchelf..."
+if ! command -v patchelf &>/dev/null; then
+    echo "    Installing patchelf..."
+    sudo apt-get install -y -qq patchelf 2>/dev/null || {
+        echo "ERROR: patchelf is required but could not be installed"
+        rm -rf "$STAGING"
+        exit 1
+    }
+fi
+
+PATCHED_COUNT=0
+PATCHED_FILES=0
+for so_file in "$JNI_DIR"/*.so; do
+    [ -f "$so_file" ] || continue
+    file_patched=0
+    # Get all DT_NEEDED entries for this library
+    while IFS= read -r needed; do
+        [ -z "$needed" ] && continue
+        # Only patch versioned libs (*.so.X) where we have a .so.so copy
+        # Skip system libs (libc.so, libm.so, libdl.so, etc.) that the
+        # Android runtime provides.
+        case "$needed" in
+            libc.so|libm.so|libdl.so|libpthread.so|librt.so) continue ;;
+        esac
+        if [[ "$needed" == *.so.* ]] && [[ -f "$JNI_DIR/${needed}.so" ]]; then
+            patchelf --replace-needed "$needed" "${needed}.so" "$so_file" 2>/dev/null && \
+                PATCHED_COUNT=$((PATCHED_COUNT + 1))
+            file_patched=1
+        fi
+    done < <(patchelf --print-needed "$so_file" 2>/dev/null)
+    [ "$file_patched" -eq 1 ] && PATCHED_FILES=$((PATCHED_FILES + 1))
+done
+echo "    Patched $PATCHED_COUNT DT_NEEDED entries in $PATCHED_FILES files"
+
 # Verify critical files exist
 if [ ! -f "$JNI_DIR/libpython3exec.so" ]; then
     echo "ERROR: libpython3exec.so was not created!"
@@ -160,6 +216,28 @@ if [ ! -f "$JNI_DIR/libpython3exec.so" ]; then
     ls -la "$TERMUX_PREFIX/bin/python3.13" 2>/dev/null || echo "  File not found"
     rm -rf "$STAGING"
     exit 1
+fi
+
+# Verify critical shared libraries
+CRITICAL_LIBS=(
+    "libandroid-support.so"
+    "libpython3.13.so"
+    "libz.so"
+)
+for lib in "${CRITICAL_LIBS[@]}"; do
+    if [ ! -f "$JNI_DIR/$lib" ]; then
+        echo "WARNING: Critical library $lib not found in jniLibs"
+    fi
+done
+
+# Verify DT_NEEDED was patched correctly (spot check)
+echo "    Verifying DT_NEEDED patches..."
+SPOT_CHECK=$(patchelf --print-needed "$JNI_DIR/libpython3exec.so" 2>/dev/null | grep -c '\.so\.' || true)
+if [ "$SPOT_CHECK" -gt 0 ]; then
+    echo "    WARNING: libpython3exec.so still has $SPOT_CHECK versioned DT_NEEDED entries (unpatched?)"
+    patchelf --print-needed "$JNI_DIR/libpython3exec.so" 2>/dev/null | grep '\.so\.' | while read -r line; do
+        echo "      UNPATCHED: $line"
+    done
 fi
 
 JNI_COUNT=$(find "$JNI_DIR" -maxdepth 1 -name "*.so" -o -name "*.so.*" | wc -l)
