@@ -40,7 +40,7 @@ jobs:
 
       - name: Prepare Python runtime
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq dpkg zip 2>/dev/null || true
+          sudo apt-get update -qq && sudo apt-get install -y -qq dpkg zip patchelf 2>/dev/null || true
           bash scripts/prepare_python_runtime.sh
 
       - name: Copy assets to Android
