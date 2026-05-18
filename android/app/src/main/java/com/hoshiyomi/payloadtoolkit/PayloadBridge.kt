@@ -40,14 +40,12 @@ object PayloadBridge {
 
     /**
      * Execute payload_toolkit.pyz with the given CLI arguments.
+     * PythonBridge.executePyz auto-configures the environment based on
+     * whether Python is bundled or system (Termux).
      */
     private suspend fun executePyz(args: List<String>): PayloadResult {
         return withContext(Dispatchers.IO) {
-            val execResult = if (PythonBridge.isTermuxInstalled()) {
-                PythonBridge.executePyzWithTermuxEnv(args)
-            } else {
-                PythonBridge.executePyz(args)
-            }
+            val execResult = PythonBridge.executePyz(args)
 
             if (execResult.success) {
                 PayloadResult.success(execResult.output, execResult.durationMs)
