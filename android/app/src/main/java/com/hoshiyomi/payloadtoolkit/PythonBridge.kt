@@ -63,6 +63,7 @@ object PythonBridge {
     private var pyzPath: String? = null
     private var stdlibDir: String? = null
     private var isBundledPython = false
+    private var execDirectDeps: List<String> = emptyList()
     private val initLock = Any()
 
     data class InitResult(
@@ -166,6 +167,14 @@ object PythonBridge {
                 }
             }
 
+            // Extract Python executable's direct dependencies for targeted LD_PRELOAD
+            execDirectDeps = parseExecDeps(ctx)
+            if (execDirectDeps.isNotEmpty()) {
+                diag("[Manifest] $BUNDLED_PYTHON_LIB direct deps: ${execDirectDeps.joinToString(", ")}")
+            } else {
+                diag("[Manifest] WARNING: no DT_NEEDED found for $BUNDLED_PYTHON_LIB in manifest")
+            }
+
             if (bundledPy.isFile) {
                 diag("Attempting bundled Python initialization...")
 
@@ -233,8 +242,8 @@ object PythonBridge {
                     diag("  This means a .so file has invalid program headers.")
                     diag("  The linker crashes during LD_PRELOAD before it can report which file.")
                     diag("  Check [ELF VALIDATION] section above for detected corrupt files.")
-                    diag("  v3.17: LD_PRELOAD removed. If this error persists from an old")
-                    diag("  APK, uninstall and reinstall from the latest build.")
+                    diag("  v3.17.1: If this persists, uninstall old APK and reinstall.")
+                    diag("  If using a fresh install, check [LD_PRELOAD] diagnostics above.")
                     diag("--- end analysis ---")
                 }
                 return InitResult(false, pythonPath, pyzPath, isBundledPython,
@@ -336,6 +345,51 @@ object PythonBridge {
     // ═══════════════════════════════════════════════════════════════
     //  Diagnostics helpers
     // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Resolve a DT_NEEDED library name to an unversioned filename that
+     * exists in jniLibs.  Handles:
+     *   - System libs → null (provided by Android bionic)
+     *   - Versioned names → unversioned (libz.so.1 → libz.so)
+     *   - Already unversioned → pass through
+     */
+    private fun resolveLibName(needed: String): String? {
+        if (SYSTEM_LIBS.contains(needed)) return null
+        return if (needed.contains(".so.")) {
+            needed.substringBefore(".so.") + ".so"
+        } else {
+            needed
+        }
+    }
+
+    /**
+     * Parse the native-libs manifest to extract DT_NEEDED entries for
+     * libpython3exec.so.  These are the Python binary's direct dependencies
+     * that must be preloaded (LD_LIBRARY_PATH is not searched for execve()
+     * on Android 8.0+ due to linker namespace restrictions).
+     */
+    private fun parseExecDeps(context: Context): List<String> {
+        return try {
+            val content = context.assets.open(MANIFEST_ASSET_NAME)
+                .bufferedReader().readText()
+            var result = emptyList<String>()
+            for (line in content.lines()) {
+                if (line.startsWith("#") || line.isBlank()) continue
+                val parts = line.split(" | ")
+                if (parts.size >= 2 && parts[0].trim() == BUNDLED_PYTHON_LIB) {
+                    if (parts.size >= 3 && parts[2].trim().isNotEmpty()) {
+                        result = parts[2].trim().split(",")
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                    }
+                    break
+                }
+            }
+            result
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
 
     /**
      * Validate that a file starts with the ELF magic bytes (\x7fELF).
@@ -706,19 +760,43 @@ object PythonBridge {
             env["PYTHONPATH"] = nativeLibDir
             env["TMPDIR"] = File(stdlibDir!!, "../tmp").absolutePath
 
-            // v3.17: NO LD_PRELOAD.  Previous approach preloaded all 74 .so files
-            // via LD_PRELOAD to handle transitive deps.  This caused persistent
-            // "Load CHECK 'did_read_' failed" crashes — some files have subtle
-            // ELF corruption not detectable from header validation.
+            // v3.17.1: Targeted LD_PRELOAD of Python binary's DIRECT dependencies only.
             //
-            // New approach: rely on LD_LIBRARY_PATH + build-time patching:
-            //   - DT_SONAME stripped → linker registers libs by filename
-            //   - DT_NEEDED unversioned → libz.so.1 → libz.so (matches APK files)
-            //   - LD_LIBRARY_PATH → linker searches nativeLibraryDir for all deps
+            // Why not preload ALL libs?  Preloading all 74 .so files caused persistent
+            // "Load CHECK 'did_read_' failed" crashes — some files have subtle ELF
+            // corruption not detectable from header validation.
             //
-            // This gives SPECIFIC error messages ("library X not found") instead
-            // of generic crashes, making debugging immediate.
-            diag("[LIBRARY RESOLUTION] LD_LIBRARY_PATH=$nativeLibDir (no LD_PRELOAD)")
+            // Why not LD_LIBRARY_PATH alone?  On Android 8.0+ (API 26+), the linker's
+            // default namespace does NOT search LD_LIBRARY_PATH for execve()'d
+            // executables.  Direct DT_NEEDED deps of the executable must be findable
+            // through the default namespace, which only includes the system lib paths
+            // and the app's nativeLibraryDir (for loaded shared libs, not exec'd files).
+            //
+            // Solution: preload only the Python binary's direct dependencies
+            // (typically 2-4 files: libpython3.13.so, libandroid-support.so, etc.)
+            // These are large, well-formed libraries from Termux — no corruption risk.
+            // Transitive deps (loaded via dlopen) are handled by LD_LIBRARY_PATH.
+            val preloadLibs = mutableListOf<File>()
+            for (dep in execDirectDeps) {
+                val resolved = resolveLibName(dep)
+                if (resolved == null) continue // system lib
+                val depFile = File(nativeLibDir, resolved)
+                if (depFile.isFile) {
+                    preloadLibs.add(depFile)
+                } else {
+                    diag("[WARN] Direct dep not in nativeLibraryDir: $dep → $resolved")
+                }
+            }
+            if (preloadLibs.isNotEmpty()) {
+                val preloadString = preloadLibs.joinToString(":", transform = { it.absolutePath })
+                env["LD_PRELOAD"] = preloadString
+                val totalPreloadSize = preloadLibs.sumOf { it.length() }
+                diag("[LD_PRELOAD] ${preloadLibs.size} direct deps of $BUNDLED_PYTHON_LIB (${formatBytes(totalPreloadSize)}):")
+                preloadLibs.forEach { diag("  preload: ${it.name} (${formatBytes(it.length())})") }
+            } else {
+                diag("[LD_PRELOAD] no direct deps to preload — relying on LD_LIBRARY_PATH only")
+            }
+            diag("[LD_LIBRARY_PATH] $nativeLibDir")
         } else {
             val py = pythonPath ?: return
             if (py.contains("termux")) {
