@@ -89,7 +89,7 @@ echo ""
 echo "==> Populating jniLibs/arm64-v8a/..."
 
 # Clean previous output (but keep directory)
-rm -f "$JNI_DIR"/*.so 2>/dev/null || true
+find "$JNI_DIR" -maxdepth 1 -name "*.so" -delete 2>/dev/null || true
 
 # Python binary → renamed to .so so Android packages it into lib/arm64-v8a/
 if [ -f "$TERMUX_PREFIX/bin/python3.13" ]; then
@@ -97,9 +97,9 @@ if [ -f "$TERMUX_PREFIX/bin/python3.13" ]; then
     echo "    python3.13 → libpython3exec.so"
 fi
 
-# Shared libraries from lib/ — actual files only (skip symlinks to save space;
-# the linker resolves NEEDED by exact SONAME e.g. libcrypto.so.3)
-find "$TERMUX_PREFIX/lib" -maxdepth 1 -name "*.so*" -type f | while read -r f; do
+# Shared libraries from lib/ — include symlinks so the linker can
+# resolve SONAMEs (e.g. libpython3.13.so → libpython3.13.so.1.0)
+find "$TERMUX_PREFIX/lib" -maxdepth 1 -name "*.so*" \( -type f -o -type l \) | while read -r f; do
     cp -a "$f" "$JNI_DIR/"
 done
 
@@ -107,12 +107,28 @@ done
 # _hashlib.cpython-313-aarch64-linux-android.so (not "lib*" prefix,
 # but Android still extracts all .so files from jniLibs)
 if [ -d "$TERMUX_PREFIX/lib/python3.13/lib-dynload" ]; then
-    find "$TERMUX_PREFIX/lib/python3.13/lib-dynload" -name "*.so" -type f | while read -r f; do
+    find "$TERMUX_PREFIX/lib/python3.13/lib-dynload" -name "*.so" \( -type f -o -type l \) | while read -r f; do
         cp -a "$f" "$JNI_DIR/"
     done
 fi
 
-JNI_COUNT=$(find "$JNI_DIR" -maxdepth 1 -name "*.so" -type f | wc -l)
+# Strip test extension modules (saves ~1 MB, not needed for payload_toolkit)
+find "$JNI_DIR" -maxdepth 1 -name "_test*.so" -delete 2>/dev/null || true
+find "$JNI_DIR" -maxdepth 1 -name "_xxtestfuzz*.so" -delete 2>/dev/null || true
+find "$JNI_DIR" -maxdepth 1 -name "xxlimited*.so" -delete 2>/dev/null || true
+find "$JNI_DIR" -maxdepth 1 -name "xxsubtype*.so" -delete 2>/dev/null || true
+find "$JNI_DIR" -maxdepth 1 -name "_ctypes_test*.so" -delete 2>/dev/null || true
+
+# Verify critical files exist
+if [ ! -f "$JNI_DIR/libpython3exec.so" ]; then
+    echo "ERROR: libpython3exec.so was not created!"
+    echo "  Expected: $TERMUX_PREFIX/bin/python3.13"
+    ls -la "$TERMUX_PREFIX/bin/python3.13" 2>/dev/null || echo "  File not found"
+    rm -rf "$STAGING"
+    exit 1
+fi
+
+JNI_COUNT=$(find "$JNI_DIR" -maxdepth 1 -name "*.so" | wc -l)
 JNI_SIZE=$(du -sh "$JNI_DIR" | cut -f1)
 echo "    $JNI_COUNT native libraries ($JNI_SIZE)"
 
@@ -144,6 +160,12 @@ find "$STDLIB_STAGING" -name "*.la" -delete 2>/dev/null || true
 
 # Create zip preserving lib/python3.13/ structure
 (cd "$STAGING/stdlib" && zip -qr "$DIST_DIR/python-stdlib.zip" lib/)
+
+if [ ! -f "$DIST_DIR/python-stdlib.zip" ]; then
+    echo "ERROR: python-stdlib.zip was not created!"
+    rm -rf "$STAGING"
+    exit 1
+fi
 
 STDLIB_SIZE=$(du -h "$DIST_DIR/python-stdlib.zip" | cut -f1)
 STDLIB_COUNT=$(zipinfo -1 "$DIST_DIR/python-stdlib.zip" | wc -l)

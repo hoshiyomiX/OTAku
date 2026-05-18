@@ -265,10 +265,30 @@ object PythonBridge {
         val py = pythonPath ?: return "No Python path"
         val pyz = pyzPath ?: return "No .pyz path"
 
+        // Pre-flight checks for bundled Python
+        if (isBundledPython) {
+            val pyFile = File(py)
+            if (!pyFile.exists()) return "Bundled Python not found: $py"
+            if (!pyFile.canExecute()) {
+                // Log SELinux context for debugging
+                Log.w(TAG, "Bundled Python exists but may not be executable: $py")
+                Log.w(TAG, "nativeLibraryDir: ${pyFile.parent}")
+            }
+            if (stdlibDir != null) {
+                val libDir = File(stdlibDir!!, "lib/python3.13")
+                if (!libDir.isDirectory) return "Stdlib lib dir missing: ${libDir.absolutePath}"
+                val pyCount = libDir.listFiles()?.count { it.name.endsWith(".py") } ?: 0
+                if (pyCount < 10) return "Stdlib too small: $pyCount .py files in $libDir"
+            }
+        }
+
         return try {
             val pb = ProcessBuilder(py, pyz, "--version")
                 .redirectErrorStream(true)
             configureEnvironment(pb)
+            Log.d(TAG, "Running: $py $pyz --version")
+            Log.d(TAG, "PYTHONHOME=${pb.environment()["PYTHONHOME"]}")
+            Log.d(TAG, "LD_LIBRARY_PATH=${pb.environment()["LD_LIBRARY_PATH"]}")
             val process = pb.start()
             val output = process.inputStream.bufferedReader().readText().trim()
             val exitCode = process.waitFor()
@@ -279,6 +299,7 @@ object PythonBridge {
                 "Python exit $exitCode: $output"
             }
         } catch (e: Exception) {
+            Log.e(TAG, "Verify exception", e)
             "Failed to run Python: ${e.message}"
         }
     }
@@ -299,14 +320,19 @@ object PythonBridge {
             val pb = ProcessBuilder(command).redirectErrorStream(true)
             configureEnvironment(pb)
 
+            Log.d(TAG, "Exec: ${command.joinToString(" ")}")
             val process = pb.start()
             val output = process.inputStream.bufferedReader().readText()
             val exitCode = process.waitFor()
             val duration = System.currentTimeMillis() - startTime
 
+            if (exitCode != 0) {
+                Log.w(TAG, "Python exit $exitCode, output: ${output.take(500)}")
+            }
             ExecResult(output, null, exitCode, duration)
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
+            Log.e(TAG, "executePyz failed", e)
             ExecResult("", "Execution failed: ${e.message}", -1, duration)
         }
     }
