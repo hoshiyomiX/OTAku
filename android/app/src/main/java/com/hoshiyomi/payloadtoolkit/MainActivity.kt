@@ -128,11 +128,13 @@ class MainActivity : AppCompatActivity() {
                                 pb.inputStream.bufferedReader().readText().trim()
                             } catch (_: Exception) { "unknown" }
                         }
-                        showLog("Python runtime: $pyVer\n")
-                        showLog("Path: ${result.pythonPath}\n")
+                        val source = if (result.isBundled) "bundled" else "system"
+                        showLog("Python runtime: $pyVer ($source)\n")
 
                         lifecycleScope.launch {
-                            val ptVer = PayloadBridge.getPyzVersion()
+                            val ptVer = withContext(Dispatchers.IO) {
+                                PayloadBridge.getPyzVersion()
+                            }
                             if (ptVer != null) showLog("payload_toolkit $ptVer loaded\n")
 
                             // Run dependency health check
@@ -145,10 +147,9 @@ class MainActivity : AppCompatActivity() {
                         showLog("\u2550".repeat(50) + "\n\n")
                     } else {
                         showLog("WARNING: ${result.error}\n\n")
-                        showLog("This app requires Python to be installed.\n")
-                        showLog("Recommended: Install Termux, then run:\n")
-                        showLog("  pkg install python\n\n")
-                        showLog("After installing Python, restart this app.\n")
+                        showLog("This app requires a Python runtime.\n")
+                        showLog("If bundled extraction failed, ensure the APK\n")
+                        showLog("was downloaded (not from a partial build).\n")
                         showLog("\u2550".repeat(50) + "\n\n")
                     }
                 }
@@ -348,15 +349,7 @@ class MainActivity : AppCompatActivity() {
 
         if (!PythonBridge.isReady()) {
             showLog("ERROR: Python runtime not available.\n")
-            showLog("Install Python via Termux: pkg install python\n\n")
-
-            // Show dependency check if .pyz is extracted
-            lifecycleScope.launch {
-                val depReport = withContext(Dispatchers.IO) {
-                    PythonBridge.checkDependencies()
-                }
-                showLog(depReport + "\n")
-            }
+            showLog("Restart the app to retry initialization.\n\n")
             return
         }
 

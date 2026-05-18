@@ -38,11 +38,18 @@ jobs:
       - name: Build payload_toolkit.pyz
         run: python3 scripts/build_pyz.py
 
-      - name: Copy .pyz to Android assets
+      - name: Prepare Python runtime
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq dpkg zip 2>/dev/null || true
+          bash scripts/prepare_python_runtime.sh
+
+      - name: Copy assets to Android
         run: |
           mkdir -p android/app/src/main/assets
           cp dist/payload_toolkit.pyz android/app/src/main/assets/
-          echo "Asset: $(wc -c < dist/payload_toolkit.pyz) bytes"
+          cp dist/python-runtime.zip android/app/src/main/assets/
+          echo "pyz: $(wc -c < dist/payload_toolkit.pyz) bytes"
+          echo "runtime: $(wc -c < dist/python-runtime.zip) bytes"
 
       - name: Build debug APK
         working-directory: android
