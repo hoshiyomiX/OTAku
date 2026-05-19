@@ -41,3 +41,31 @@ Stage Summary:
 - CI is now fully green: https://github.com/hoshiyomiX/payload-toolkit-android/actions/runs/26012855222
 - Debug and release APKs uploaded as artifacts (30-day retention)
 - Fix commit: b8dadb1 "fix: remove /* patterns from block comments"
+
+---
+Task ID: 2
+Agent: Super Z (main)
+Task: Re-implement 4 features on correct repo (payload-toolkit-android) after wrong-repo fix
+
+Work Log:
+- Discovered previous commits went to wrong repo (payload-toolkit instead of payload-toolkit-android)
+- Ran SSV: fetched correct remote, compared local vs remote — completely diverged histories
+- Reset local main to origin/main (d55e5a9) of hoshiyomiX/payload-toolkit-android
+- Previous feature code was never committed (lost), so re-implemented from scratch
+- IMPL-001: Rewrote src/payload_toolkit/modes/dd.py with:
+  - Slant ASCII art "Renuked v3" as TWRP flasher banner
+  - "Gate" → "Step" throughout update-binary script
+  - Device codename validation as conditional Step 2
+  - Dynamic step numbering (adjusts when device check enabled)
+  - Em-dash separators in completion message
+- IMPL-002: Added custom filename TextInputEditText in activity_main.xml + strings.xml
+- IMPL-003: Added setupCustomFilenameField() + theme toggle (Light/Dark/System) in MainActivity.kt
+- IMPL-004: Created android/app/src/main/res/menu/settings_menu.xml
+- IMPL-005: PayloadBridge.kt always passes --device param to Python CLI
+- All 5 IMPL steps verified: Python syntax OK, Kotlin XML references consistent
+- Committed as e018212, pushed to origin/main
+
+Stage Summary:
+- Correct repo: hoshiyomiX/payload-toolkit-android (not hoshiyomiX/payload-toolkit)
+- 6 files changed: 225 insertions, 37 deletions
+- Push confirmed: d55e5a9..e018212 main -> main
