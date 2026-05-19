@@ -7,6 +7,8 @@ Called from Kotlin via Chaquopy:
         compress="gzip",
         output_path="/path/to/flashable_dd.zip",
         device="S666LN-OP",
+        level=6,
+        skip_verify=False,
     )
 
 ddbundle format:
@@ -92,17 +94,7 @@ def _human_size(size_bytes):
 
 
 def _build_header(compress_id, num_parts):
-    """Build the 4096-byte ddbundle.bin header.
-
-    Header layout (first 12 bytes, all little-endian):
-        Offset  Size  Field
-        0       4     Magic "DDBU"
-        4       2     Version (uint16) = 1
-        6       2     Compress ID (uint16): 0=none, 1=gzip, 2=bzip2, 3=xz
-        8       2     Number of partitions (uint16)
-        10      2     Header data size (uint16) = 4096
-        12      4084  Zero padding (to reach 4096)
-    """
+    """Build the 4096-byte ddbundle.bin header."""
     hdr = struct.pack(
         "<4sHHHH",
         DDBUNDLE_MAGIC,
@@ -111,17 +103,18 @@ def _build_header(compress_id, num_parts):
         num_parts,
         HEADER_SIZE,
     )
-    # Pad to HEADER_SIZE
     hdr += b"\x00" * (HEADER_SIZE - len(hdr))
     return hdr
 
 
-def _build_update_script(num_parts, compress_id, compress_name, partitions_meta, device=""):
+def _build_update_script(num_parts, compress_id, compress_name, partitions_meta,
+                          device="", skip_verify=False):
     """Build the META-INF/com/google/android/update-binary shell script.
 
     partitions_meta: list of dicts with keys:
         name, unc_size, hash_hex, comp_size, data_offset
-    device: device codename string (optional, for target validation)
+    device: device codename string (optional, supports comma-separated list)
+    skip_verify: if True, skip post-flash SHA-256 hash verification
     """
     # Build partition variable assignments
     part_vars = []
@@ -137,8 +130,7 @@ def _build_update_script(num_parts, compress_id, compress_name, partitions_meta,
     decomp_cmd = COMPRESS_CMD_MAP.get(compress_id, "cat")
     decomp_ext = COMPRESS_EXT_MAP.get(compress_id, ".raw")
 
-    # Calculate step numbers dynamically based on whether device check is enabled
-    # Step 0 (extract) + 1 (decompressor) + 2 (integrity) + [3 (device)] + 4/3 (slot) + 5/4 (validation) + N flash
+    # Calculate step numbers dynamically
     extract_step = 0
     decomp_step = 1
     integrity_step = 2
@@ -147,7 +139,7 @@ def _build_update_script(num_parts, compress_id, compress_name, partitions_meta,
     flash_step_offset = 6 if device else 5
     total_steps = num_parts + flash_step_offset
 
-    # Device check step — only emitted when device is set
+    # Device check step — supports comma-separated device list
     device_check_step = integrity_step + 1  # = 3
     device_check_block = ""
     if device:
@@ -156,8 +148,21 @@ def _build_update_script(num_parts, compress_id, compress_name, partitions_meta,
 TARGET_DEVICE="{device}"
 CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null || getprop ro.build.product 2>/dev/null)
 
+# Support comma-separated device list
+DEVICE_MATCH=0
+OLD_IFS="$IFS"
+IFS=','
+for _dev in $TARGET_DEVICE; do
+    _clean=$(echo "$_dev" | tr -d '[:space:]')
+    if [ "$CURRENT_DEVICE" = "$_clean" ]; then
+        DEVICE_MATCH=1
+        break
+    fi
+done
+IFS="$OLD_IFS"
+
 if [ -n "$TARGET_DEVICE" ]; then
-    if [ "$CURRENT_DEVICE" != "$TARGET_DEVICE" ]; then
+    if [ "$DEVICE_MATCH" != "1" ]; then
         ui_print ""
         ui_print "  WARNING: Device mismatch!"
         ui_print "  Expected : $TARGET_DEVICE"
@@ -166,7 +171,6 @@ if [ -n "$TARGET_DEVICE" ]; then
         ui_print "  Flashing on wrong device may BRICK it."
         ui_print "  Press Power to continue, Vol- to abort."
         ui_print ""
-        # Wait for key press (Power = continue, Vol- = abort)
         choose -t 30 "Continue?" "Yes" "No"
         if [ $? -ne 0 ]; then
             ui_print "! ABORT: User cancelled (device mismatch)"
@@ -186,7 +190,40 @@ ui_print ""
         header_info += f" | Device: {device}"
     header_info += f" | Compress: {compress_name}"
 
-    script = f'''#!/sbin/sh
+    # Verification block — conditional on skip_verify
+    if skip_verify:
+        verify_block = 'ui_print "  Verification skipped"\n'
+    else:
+        verify_block = '''ui_print "  Verifying $PNAME..."
+VERIFY_HASH=""
+FULL_BLOCKS=$(( PSIZE / 4096 ))
+REMAINDER_BYTES=$(( PSIZE % 4096 ))
+
+if [ "$REMAINDER_BYTES" -eq 0 ]; then
+    VERIFY_HASH=$(dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null | sha256sum | cut -d' ' -f1)
+else
+    VERIFY_HASH=$(
+        dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null
+        dd if="$PTARGET" bs=1 skip=$(( FULL_BLOCKS * 4096 )) count=$REMAINDER_BYTES 2>/dev/null
+    ) | sha256sum | cut -d' ' -f1
+fi
+
+if [ "$VERIFY_HASH" = "$PHASH" ]; then
+    ui_print "  $PNAME: VERIFIED OK"
+else
+    ui_print "! ABORT: Hash mismatch for $PNAME!"
+    ui_print "  Expected: $PHASH"
+    ui_print "  Got:      $VERIFY_HASH"
+    exit 1
+fi
+'''
+
+    # Done message — conditional on skip_verify
+    verified_word = "and verified" if not skip_verify else ""
+
+    # Build script using string concatenation to avoid f-string escaping issues
+    script_parts = []
+    script_parts.append(f'''#!/sbin/sh
 # {BANNER}
 # {header_info}
 
@@ -209,8 +246,9 @@ COMPRESS_ID={compress_id}
 ui_print ""
 {chr(10).join(line.strip() for line in BANNER.strip().splitlines())}
 ui_print ""
+''')
 
-# ── Step 0: Extract ddbundle.bin from ZIP ──────────────────
+    script_parts.append(f'''# ── Step {extract_step}/{total_steps}: Extract ddbundle.bin from ZIP ──────────────────
 ui_print "[Step {extract_step}/{total_steps}] Extracting ddbundle.bin..."
 
 rm -f "$BUNDLE"
@@ -219,18 +257,13 @@ if [ ! -f "$ZIPFILE" ]; then
     exit 1
 fi
 
-# TWRP/OrangeFox only auto-extracts update-binary. We must extract
-# ddbundle.bin ourselves from the flashable ZIP.
 EXTRACT_OK=0
-# Method 1: unzip
 if which unzip >/dev/null 2>&1; then
     unzip -o -j "$ZIPFILE" ddbundle.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
 fi
-# Method 2: busybox unzip
 if [ "$EXTRACT_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
     busybox unzip -o -j "$ZIPFILE" ddbundle.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
 fi
-# Method 3: toybox (some recoveries)
 if [ "$EXTRACT_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
     toybox unzip -o -j "$ZIPFILE" ddbundle.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
 fi
@@ -245,29 +278,26 @@ fi
 BUNDLE_EXTRACT_SIZE=$(wc -c < "$BUNDLE")
 ui_print "  Extracted: $BUNDLE ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
 ui_print ""
+''')
 
-# ── Step {decomp_step}: Decompressor availability ────────────
+    script_parts.append(f'''# ── Step {decomp_step}/{total_steps}: Decompressor availability ────────────
 ui_print "[Step {decomp_step}/{total_steps}] Decompressor availability..."
 
 DECOMP_CMD=""
 check_decompressor() {{
     local cmd="$1"
-    # Method 1: standalone binary
     if which "$cmd" >/dev/null 2>&1; then
         DECOMP_CMD="$cmd"
         return 0
     fi
-    # Method 2: busybox applet
     if busybox --list 2>/dev/null | grep -q "^${{cmd}}$"; then
         DECOMP_CMD="busybox $cmd"
         return 0
     fi
-    # Method 3: toybox (some recoveries use toybox instead of busybox)
     if toybox --help >/dev/null 2>&1 && toybox "$cmd" --help >/dev/null 2>&1; then
         DECOMP_CMD="toybox $cmd"
         return 0
     fi
-    # Method 4: check common alternative paths
     for p in /system/bin/$cmd /vendor/bin/$cmd /sbin/$cmd; do
         if [ -x "$p" ]; then
             DECOMP_CMD="$p"
@@ -288,11 +318,11 @@ if ! check_decompressor "{decomp_cmd}"; then
 fi
 ui_print "  Decompressor: $DECOMP_CMD"
 ui_print ""
+''')
 
-# ── Step {integrity_step}: Bundle integrity ───────────────────
+    script_parts.append(f'''# ── Step {integrity_step}/{total_steps}: Bundle integrity ───────────────────
 ui_print "[Step {integrity_step}/{total_steps}] Bundle integrity..."
 
-# ddbundle.bin was already extracted in Step 0, just verify it exists
 if [ ! -f "$BUNDLE" ]; then
     ui_print "! ABORT: $BUNDLE not found"
     exit 1
@@ -300,20 +330,17 @@ fi
 
 BUNDLE_SIZE=$(wc -c < "$BUNDLE")
 
-# Read 64-byte header via od
 HDR_MAGIC=$(od -A n -t x1 -N 4 "$BUNDLE" | tr -d ' \\n')
 if [ "$HDR_MAGIC" != "44444255" ]; then
     ui_print "! ABORT: Invalid bundle magic (expected DDBU, got $(echo $HDR_MAGIC | sed 's/\\(..\\)/\\\\x\\1/g'))"
     exit 1
 fi
 
-# Parse header fields (little-endian uint16 at offsets 4,6,8,10)
 HDR_VERSION=$(od -A n -t u2 -j 4 -N 2 "$BUNDLE" | tr -d ' ')
 HDR_COMPRESS=$(od -A n -t u1 -j 6 -N 1 "$BUNDLE" | tr -d ' ')
 HDR_NUM_PARTS=$(od -A n -t u2 -j 8 -N 2 "$BUNDLE" | tr -d ' ')
 HDR_HDR_SIZE=$(od -A n -t u2 -j 10 -N 2 "$BUNDLE" | tr -d ' ')
 
-# Validate header fields
 if [ "$HDR_VERSION" != "1" ]; then
     ui_print "! ABORT: Unsupported bundle version: $HDR_VERSION"
     exit 1
@@ -335,7 +362,6 @@ if [ "$HDR_HDR_SIZE" -lt 64 ] || [ "$HDR_HDR_SIZE" -gt "$BUNDLE_SIZE" ]; then
 fi
 
 DATA_OFFSET=$(( HDR_HDR_SIZE ))
-# Align to 4096
 REMAINDER=$(( DATA_OFFSET % 4096 ))
 if [ "$REMAINDER" -ne 0 ]; then
     DATA_OFFSET=$(( DATA_OFFSET + 4096 - REMAINDER ))
@@ -344,19 +370,20 @@ fi
 ui_print "  Version=$HDR_VERSION Compress=$HDR_COMPRESS Parts=$HDR_NUM_PARTS"
 ui_print "  Header=$HDR_HDR_SIZE DataOffset=$DATA_OFFSET"
 ui_print ""
-{device_check_block}
-# ── Step {slot_step}: Slot detection ──────────────────────────
+''')
+
+    script_parts.append(device_check_block)
+
+    script_parts.append(f'''# ── Step {slot_step}/{total_steps}: Slot detection ──────────────────────────
 ui_print "[Step {slot_step}/{total_steps}] Slot detection..."
 
 TARGET_SLOT=""
 
-# Method 1: /proc/cmdline androidboot.slot_suffix
 CMDLINE_SLOT=$(cat /proc/cmdline 2>/dev/null | tr ' ' '\\n' | grep -o 'androidboot.slot_suffix=[^ ]*' | cut -d= -f2)
 if [ -n "$CMDLINE_SLOT" ]; then
     TARGET_SLOT="$CMDLINE_SLOT"
 fi
 
-# Method 2: /proc/cmdline androidboot.slot (Unisoc/SPD variant)
 if [ -z "$TARGET_SLOT" ]; then
     CMDLINE_SLOT_RAW=$(cat /proc/cmdline 2>/dev/null | tr ' ' '\\n' | grep -o 'androidboot.slot=[^ ]*' | cut -d= -f2)
     if [ -n "$CMDLINE_SLOT_RAW" ]; then
@@ -364,7 +391,6 @@ if [ -z "$TARGET_SLOT" ]; then
     fi
 fi
 
-# Method 3: getprop fallback
 if [ -z "$TARGET_SLOT" ]; then
     PROP_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
     if [ -n "$PROP_SLOT" ]; then
@@ -372,7 +398,6 @@ if [ -z "$TARGET_SLOT" ]; then
     fi
 fi
 
-# Normalize: ensure _a or _b prefix
 case "$TARGET_SLOT" in
     _a|_b) ;;
     a)  TARGET_SLOT="_a" ;;
@@ -383,7 +408,6 @@ esac
 ui_print "  Active slot: ${{TARGET_SLOT:-none (non-A/B device)}}"
 ui_print ""
 
-# Shared partitions that NEVER get slot suffix
 is_shared_partition() {{
     case "$1" in
         modem|bluetooth|dsp|cnss|fvb|persist|keystore|provision) return 0 ;;
@@ -401,8 +425,9 @@ resolve_target() {{
         echo "/dev/block/by-name/$name"
     fi
 }}
+''')
 
-# ── Step {validation_step}: Partition validation ─────────────────────
+    script_parts.append(f'''# ── Step {validation_step}/{total_steps}: Partition validation ─────────────────────
 ui_print "[Step {validation_step}/{total_steps}] Partition validation..."
 
 validate_target() {{
@@ -410,19 +435,16 @@ validate_target() {{
     local min_size="$2"
     local name="$3"
 
-    # Check block device exists
     if [ ! -e "$target" ]; then
         ui_print "! ABORT: $target not found for partition '$name'"
         return 1
     fi
 
-    # Check it's a block device
     if [ ! -b "$target" ]; then
         ui_print "! ABORT: $target is not a block device"
         return 1
     fi
 
-    # Check if mounted — unmount if so
     MOUNT_POINT=$(mount 2>/dev/null | grep " $target " | awk '{{print $3}}' | head -1)
     if [ -z "$MOUNT_POINT" ]; then
         DEV_NAME=$(basename "$target")
@@ -434,7 +456,6 @@ validate_target() {{
         sleep 1
     fi
 
-    # Get partition size
     PART_SIZE=0
     PART_SIZE=$(blockdev --getsize64 "$target" 2>/dev/null)
     if [ -z "$PART_SIZE" ] || [ "$PART_SIZE" = "0" ]; then
@@ -462,7 +483,6 @@ validate_target() {{
     return 0
 }}
 
-# Validate all partitions
 for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     eval "PNAME=\\$PART_${{i}}_NAME"
     eval "PSIZE=\\$PART_${{i}}_UNC_SIZE"
@@ -473,8 +493,9 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     fi
 done
 ui_print ""
+''')
 
-# ── Step {flash_step_offset}+: Flash each partition ────────────────────
+    script_parts.append(f'''# ── Step {flash_step_offset}+{num_parts - 1}/{total_steps}: Flash each partition ────────────────────
 for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     eval "PNAME=\\$PART_${{i}}_NAME"
     eval "PSIZE=\\$PART_${{i}}_UNC_SIZE"
@@ -509,51 +530,32 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         exit 1
     fi
 
-    # Step C: Post-verify — read back and hash compare
-    ui_print "  Verifying $PNAME..."
-    VERIFY_HASH=""
-    FULL_BLOCKS=$(( PSIZE / 4096 ))
-    REMAINDER_BYTES=$(( PSIZE % 4096 ))
-
-    if [ "$REMAINDER_BYTES" -eq 0 ]; then
-        VERIFY_HASH=$(dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null | sha256sum | cut -d' ' -f1)
-    else
-        VERIFY_HASH={{
-            dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null
-            dd if="$PTARGET" bs=1 skip=$(( FULL_BLOCKS * 4096 )) count=$REMAINDER_BYTES 2>/dev/null
-        }} | sha256sum | cut -d' ' -f1
-    fi
-
-    if [ "$VERIFY_HASH" = "$PHASH" ]; then
-        ui_print "  $PNAME: VERIFIED OK"
-    else
-        ui_print "! ABORT: Hash mismatch for $PNAME!"
-        ui_print "  Expected: $PHASH"
-        ui_print "  Got:      $VERIFY_HASH"
-        exit 1
-    fi
+    # Step C: Post-verify (conditional)
+    {verify_block}
     ui_print ""
 done
 
 # ── Done ────────────────────────────────────────────────────
 ui_print "──────────────────────────────────────────"
-ui_print " All $NUM_PARTS partition(s) flashed"
-ui_print " and verified successfully!"
+ui_print " All $NUM_PARTS partition(s) flashed {verified_word} successfully!"
 ui_print "──────────────────────────────────────────"
 ui_print ""
 exit 0
-'''
-    return script
+''')
+
+    return "".join(script_parts)
 
 
-def _build_flash_info(version, compress_name, bundle_size, num_parts, partitions_meta, device=""):
+def _build_flash_info(version, compress_name, bundle_size, num_parts, partitions_meta,
+                      device="", level=None, skip_verify=False):
     """Build the flash_info.txt human-readable metadata."""
     lines = [
         "Renuked v3 — dd-based partition flasher",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
-        f"Compression: {compress_name}",
+        f"Compression: {compress_name}" + (f" (level {level})" if level else ""),
         f"Bundle size: {bundle_size:,} bytes ({_human_size(bundle_size)})",
         f"Partitions: {num_parts}",
+        f"Verification: {'enabled' if not skip_verify else 'disabled'}",
     ]
     if device:
         lines.append(f"Target device: {device}")
@@ -582,10 +584,12 @@ def run(*args, **kwargs):
 
     Parameters (via dict or kwargs)
     -------------------------------
-    images      : dict  — {partition_name: image_file_path, ...}
-    compress    : str   — Compression algorithm (default "gzip")
-    output_path : str   — Path for output .zip file
-    device      : str   — Device codename (optional, informational)
+    images       : dict  — {partition_name: image_file_path, ...}
+    compress     : str   — Compression algorithm (default "gzip")
+    output_path  : str   — Path for output .zip file
+    device       : str   — Device codename (optional, comma-separated for multi)
+    level        : int   — Compression level (0=default/best, 1-9 for gzip/bzip2/xz)
+    skip_verify  : str   — "true"/"false" — skip post-flash hash verification
 
     Returns
     -------
@@ -600,6 +604,8 @@ def run(*args, **kwargs):
     compress_alg = str(params.get("compress", "gzip")).lower()
     output_path = str(params.get("output_path", "flashable_dd.zip"))
     device = str(params.get("device", ""))
+    level = int(params.get("level", 0)) or None  # 0 means use default
+    skip_verify = str(params.get("skip_verify", "false")).lower() in ("true", "1", "yes")
 
     lines = []
     t0 = time.time()
@@ -613,18 +619,15 @@ def run(*args, **kwargs):
         return {"success": False, "output": "[!] Error: output_path is required",
                 "error": "output_path is required"}
 
-    # Normalise images dict
     if isinstance(images, dict):
         images = {str(k): str(v) for k, v in images.items()}
 
-    # Validate compression
     if compress_alg not in COMPRESS_ID_MAP:
         return {"success": False,
                 "output": f"[!] Error: unsupported compression '{compress_alg}'. "
                           f"Supported: {', '.join(COMPRESS_ID_MAP.keys())}",
                 "error": f"unsupported compression: {compress_alg}"}
 
-    # Validate image files
     for name, path in images.items():
         if not os.path.isfile(path):
             return {"success": False,
@@ -646,7 +649,10 @@ def run(*args, **kwargs):
         for name, path in images.items():
             size = os.path.getsize(path)
             lines.append(f"  {name} ({_human_size(size)})")
-        lines.append(f"Compression: {compress_name}")
+        level_display = f" (level {level})" if level else ""
+        lines.append(f"Compression: {compress_name}{level_display}")
+        if skip_verify:
+            lines.append("Verification: disabled")
         lines.append(f"Output: {os.path.basename(output_path)}")
         if device:
             lines.append(f"Device: {device}")
@@ -655,12 +661,10 @@ def run(*args, **kwargs):
         # ── Step 1: Build ddbundle.bin ──
         _report_progress(1, 3, "Building ddbundle.bin")
         lines.append(f"[Step 1] Building ddbundle.bin...")
-        lines.append(f"  Compressing {num_parts} partition(s) with {compress_name}...")
+        lines.append(f"  Compressing {num_parts} partition(s) with {compress_name}{level_display}...")
 
-        # Build header
         header = _build_header(compress_id, num_parts)
 
-        # Compress each partition and build data section
         partitions_meta = []
         data_blobs = bytearray()
 
@@ -674,7 +678,7 @@ def run(*args, **kwargs):
             if compress_id == 0:
                 comp_data = raw_data
             else:
-                comp_data = compress(raw_data, compress_alg)
+                comp_data = compress(raw_data, compress_alg, level=level)
 
             comp_size = len(comp_data)
             data_offset = len(data_blobs)
@@ -689,7 +693,6 @@ def run(*args, **kwargs):
 
             data_blobs.extend(comp_data)
 
-            # Pad to 4096 alignment
             aligned = _align_up(len(data_blobs), ALIGN)
             if aligned > len(data_blobs):
                 data_blobs.extend(b"\x00" * (aligned - len(data_blobs)))
@@ -707,11 +710,13 @@ def run(*args, **kwargs):
         lines.append("[Step 2] Building flasher scripts...")
 
         update_binary = _build_update_script(
-            num_parts, compress_id, compress_name, partitions_meta, device=device
+            num_parts, compress_id, compress_name, partitions_meta,
+            device=device, skip_verify=skip_verify
         )
         updater_script = "#Mtk client script\n"
         flash_info = _build_flash_info(
-            "3", compress_name, bundle_size, num_parts, partitions_meta, device=device
+            "3", compress_name, bundle_size, num_parts, partitions_meta,
+            device=device, level=level, skip_verify=skip_verify
         )
 
         lines.append(f"  update-binary: {len(update_binary):,} bytes")

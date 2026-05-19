@@ -76,14 +76,18 @@ object PayloadBridge {
      *   - flash_info.txt (human-readable metadata)
      *
      * @param images Map of partition name -> absolute path to .img file
-     * @param device Device codename (e.g. "crosshatch", "S666LN-OP")
+     * @param device Device codename (e.g. "crosshatch,S666LN-OP" — comma-separated)
      * @param compression Compression algorithm: none, gzip, bzip2, or xz
+     * @param level Compression level: 0=default(best), 1-9 for gzip/bzip2/xz
+     * @param skipVerify If true, skip post-flash SHA-256 verification
      * @param outputPath Absolute path to output .zip file
      */
     suspend fun dd(
         images: Map<String, String>,
         device: String = "generic",
         compression: String = "gzip",
+        level: Int = 0,
+        skipVerify: Boolean = false,
         outputPath: String
     ): PayloadResult {
         if (images.isEmpty()) return PayloadResult.error("No images specified for DD ZIP")
@@ -102,14 +106,16 @@ object PayloadBridge {
             args.add("--compress")
             args.add(compression)
         }
-        if (device.isNotBlank() && device != "generic") {
-            args.add("--device")
-            args.add(device)
-        } else {
-            // Always pass --device so the Python side receives it (even if empty/generic)
-            args.add("--device")
-            args.add(device.ifEmpty { "generic" })
+        if (level > 0) {
+            args.add("--level")
+            args.add(level.toString())
         }
+        if (skipVerify) {
+            args.add("--skip-verify")
+        }
+        // Always pass --device so the Python side receives it
+        args.add("--device")
+        args.add(device.ifEmpty { "generic" })
         return executePyz(args)
     }
 
