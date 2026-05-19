@@ -151,6 +151,10 @@ object PayloadBridge {
         if (device.isNotBlank() && device != "generic") {
             args.add("--device")
             args.add(device)
+        } else {
+            // Always pass --device so the Python side receives it (even if empty/generic)
+            args.add("--device")
+            args.add(device.ifEmpty { "generic" })
         }
         return executePyz(args)
     }

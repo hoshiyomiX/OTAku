@@ -297,6 +297,35 @@
                         style="@style/TextAppearance.PayloadToolkit.SectionTitle"
                         android:layout_marginBottom="8dp" />
 
+                    <!-- Custom filename input -->
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/layoutCustomFilename"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="8dp"
+                        android:hint="@string/hint_custom_filename"
+                        app:boxBackgroundColor="?attr/colorSurface"
+                        app:boxCornerRadiusTopStart="12dp"
+                        app:boxCornerRadiusTopEnd="12dp"
+                        app:boxCornerRadiusBottomStart="12dp"
+                        app:boxCornerRadiusBottomEnd="12dp"
+                        app:boxStrokeColor="?attr/colorOutline"
+                        app:helperText="@string/helper_custom_filename"
+                        app:helperTextEnabled="true"
+                        app:counterEnabled="true"
+                        app:counterMaxLength="128">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editTextCustomFilename"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text"
+                            android:maxLines="1"
+                            android:textSize="14sp"
+                            android:maxLength="128" />
+
+                    </com.google.android.material.textfield.TextInputLayout>
+
                     <!-- Output filename preview -->
                     <TextView
                         android:id="@+id/textViewOutputPreview"
