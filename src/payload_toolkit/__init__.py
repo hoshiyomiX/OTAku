@@ -8,7 +8,8 @@ Modes:
     info  — Parse and display payload.bin metadata
     dump  — Extract partition images from payload.bin
     gen   — Generate a payload.bin from .img files
-    zip   — Generate a flashable OTA ZIP from .img files
+    zip   — Generate a flashable OTA ZIP from .img files (AOSP payload.bin format)
+    dd    — Generate a ddbundle-format flashable ZIP (dd-based flasher)
     sign  — Sign payload.bin with RSA key
 """
 
@@ -148,7 +149,7 @@ def main(*args, **kwargs):
     Parameters
     ----------
     mode : str
-        One of: "info", "dump", "gen", "zip", "sign"
+        One of: "info", "dump", "gen", "zip", "dd", "sign"
     **kwargs :
         Mode-specific parameters forwarded to the mode handler.
 
@@ -165,7 +166,7 @@ def main(*args, **kwargs):
 
     mode = str(params.get("mode", "")).lower().strip()
 
-    supported = ("info", "dump", "gen", "zip", "sign")
+    supported = ("info", "dump", "gen", "zip", "dd", "sign")
     if mode not in supported:
         return {
             "success": False,

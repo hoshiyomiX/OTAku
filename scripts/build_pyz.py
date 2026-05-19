@@ -80,6 +80,7 @@ def _print_help(version):
     print("  -n, --name <string>   OTA display name")
     print("  -o, --output <path>   Output file path")
     print("  -p, --partitions <p>  Comma-separated partition names")
+    print("  --device <codename>   Device codename (dd mode)")
     print("  -v, --verbose         Verbose output")
     print("  --version             Show version")
     print("  --check-deps          Check Python dependency availability")
@@ -135,6 +136,8 @@ def main():
             opts["key"] = args[i + 1]; i += 1
         elif a in ("-f", "--fingerprint") and i + 1 < len(args):
             opts["fingerprint"] = args[i + 1]; i += 1
+        elif a == "--device" and i + 1 < len(args):
+            opts["device"] = args[i + 1]; i += 1
         elif a == "--image" and i + 1 < len(args):
             opts.setdefault("images", []).append(args[i + 1]); i += 1
         elif a == "--partition" and i + 1 < len(args):
@@ -213,8 +216,9 @@ def main():
         params["images"] = images
         params["output_path"] = opts.get("output", "flashable_dd.zip")
         params["compress"] = opts.get("compress", "gzip")
-        if opts.get("name"):
-            params["device"] = opts["name"]
+        device_val = opts.get("device") or opts.get("name")
+        if device_val:
+            params["device"] = device_val
 
     elif mode == "sign":
         if "input" not in opts:
