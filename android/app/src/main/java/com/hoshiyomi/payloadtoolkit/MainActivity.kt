@@ -1,6 +1,7 @@
 package com.hoshiyomi.payloadtoolkit
 
 import android.content.ClipData
+import android.provider.DocumentsContract
 import android.content.ClipboardManager
 import android.content.Context
 import android.Manifest
@@ -107,6 +108,7 @@ class MainActivity : AppCompatActivity() {
         setupButtons()
         setupToolbar()
         setupDeviceMetaFields()
+        setupOutputField()
 
         requestStoragePermissions()
         handleIncomingIntent(intent)
@@ -188,6 +190,33 @@ class MainActivity : AppCompatActivity() {
 
         // Restore persisted value (or keep empty for default)
         editDevice?.setText(prefs.getString("device", ""))
+    }
+
+    private fun setupOutputField() {
+        val editOutput = findViewById<android.widget.EditText>(R.id.editTextOutput)
+
+        // Restore persisted output directory, or default to filesDir/output
+        val savedDir = prefs.getString("output_dir", null)
+        if (savedDir != null) {
+            outputDirPath = savedDir
+            editOutput?.setText(savedDir)
+        } else {
+            editOutput?.setText(outputDir.absolutePath)
+        }
+
+        // Listen for manual edits in the output path field
+        editOutput?.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val text = s?.toString()?.trim()
+                if (!text.isNullOrEmpty() && text != outputDir.absolutePath) {
+                    outputDirPath = text
+                    prefs.edit { putString("output_dir", text) }
+                    updateOutputPreview()
+                }
+            }
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+        })
     }
 
     private fun setupCompressionSelector() {
@@ -292,11 +321,46 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     private fun handleOutputDirSelected(uri: Uri) {
-        outputDirPath = outputDir.absolutePath
+        // Take persistable URI permission so we can read/write after reboot
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: SecurityException) { }
+
+        // Resolve SAF tree URI to a real filesystem path
+        val resolvedPath = resolveTreeUriToPath(uri) ?: uri.toString()
+        outputDirPath = resolvedPath
+        prefs.edit { putString("output_dir", resolvedPath) }
         runOnUiThread {
             findViewById<android.widget.EditText>(R.id.editTextOutput)
-                .setText(outputDirPath)
-            showLog("Output directory: ${outputDir.absolutePath}\n")
+                .setText(resolvedPath)
+            showLog("Output directory: $resolvedPath\n")
+            updateOutputPreview()
+        }
+    }
+
+    /**
+     * Resolve a SAF tree URI to a filesystem path.
+     * treeDocId is typically "primary:<path>" or "XXXX-XXXX:<path>".
+     */
+    private fun resolveTreeUriToPath(uri: Uri): String? {
+        return try {
+            val treeDocId = DocumentsContract.getTreeDocumentId(uri)
+            val split = treeDocId.split(":", limit = 2)
+            if (split.size == 2) {
+                val volume = split[0]
+                val path = split[1]
+                val storageRoot = when (volume) {
+                    "primary" -> "/storage/emulated/0"
+                    else -> "/storage/$volume"
+                }
+                "$storageRoot/$path"
+            } else {
+                uri.lastPathSegment?.let { "/storage/emulated/0/$it" }
+            }
+        } catch (_: Exception) {
+            uri.lastPathSegment
         }
     }
 
