@@ -35,8 +35,8 @@ data class PayloadResult(
  */
 object PayloadBridge {
 
-    // Compression algorithm choices
-    val COMPRESSION_ALGORITHMS = listOf("gzip", "bzip2", "xz", "brotli", "none")
+    // Compression algorithm choices (dd mode supports gzip, bzip2, xz)
+    val COMPRESSION_ALGORITHMS = listOf("gzip", "bzip2", "xz")
 
     /**
      * Execute payload_toolkit.pyz with the given CLI arguments.
@@ -112,41 +112,46 @@ object PayloadBridge {
     }
 
     /**
-     * ZIP mode — Generate a flashable OTA ZIP from partition images.
+     * DD mode — Generate a dd-based flashable ZIP (ddbundle format).
      *
-     * Device and fingerprint use sensible defaults if not provided.
-     * Output filename follows: flashable_<partitions>_<compress>.zip
+     * This is the primary mode for Payload Toolkit.
+     * Produces a flashable ZIP with:
+     *   - ddbundle.bin (compressed partition images)
+     *   - META-INF/com/google/android/update-binary (TWRP/OrangeFox flasher script)
+     *   - META-INF/com/google/android/updater-script (stub)
+     *   - flash_info.txt (human-readable metadata)
      *
      * @param images Map of partition name -> absolute path to .img file
-     * @param device Device identifier (default: generic AOSP device)
-     * @param fingerprint Build fingerprint (default: generic AOSP fingerprint)
-     * @param compression Compression algorithm (default: "gzip")
+     * @param device Device codename (e.g. "crosshatch", "S666LN-OP")
+     * @param compression Compression algorithm: gzip, bzip2, or xz
      * @param outputPath Absolute path to output .zip file
-     * @param certPath Optional path to OTA certificate
      */
-    suspend fun zip(
+    suspend fun dd(
         images: Map<String, String>,
-        device: String = "aosp_crosshatch,Generic AOSP",
-        fingerprint: String = "AOSP/crosshatch/crosshatch:14/AP2A.240805.005/11572411:user/release-keys",
+        device: String = "generic",
         compression: String = "gzip",
-        outputPath: String,
-        certPath: String? = null
+        outputPath: String
     ): PayloadResult {
-        if (images.isEmpty()) return PayloadResult.error("No images specified for OTA ZIP")
+        if (images.isEmpty()) return PayloadResult.error("No images specified for DD ZIP")
+        if (compression !in COMPRESSION_ALGORITHMS)
+            return PayloadResult.error("Invalid compression: '$compression'")
 
-        val firstPath = images.values.first()
-        val imagesDir = File(firstPath).parentFile?.absolutePath
-            ?: return PayloadResult.error("Cannot determine images directory")
-
-        val args = mutableListOf("zip", "-i", imagesDir, "-o", outputPath)
-        if (compression != "none") {
-            args.add("-c")
+        // dd mode uses --image (repeatable) + --partition (repeatable)
+        val args = mutableListOf("dd")
+        for ((name, path) in images) {
+            args.add("--image"); args.add(path)
+            args.add("--partition"); args.add(name)
+        }
+        args.add("-o")
+        args.add(outputPath)
+        if (compression != "gzip") {
+            args.add("--compress")
             args.add(compression)
         }
-        args.add("-n")
-        args.add(device)
-        args.add("-f")
-        args.add(fingerprint)
+        if (device.isNotBlank() && device != "generic") {
+            args.add("--device")
+            args.add(device)
+        }
         return executePyz(args)
     }
 
@@ -154,13 +159,13 @@ object PayloadBridge {
      * Build a smart output filename based on selected partitions and compression.
      *
      * Examples:
-     *   - flashable_dd_odm_dlkm_gzip.zip
-     *   - flashable_boot_vendor_bzip2.zip
+     *   - flashable_dd_odm_dlkm_v16_gzip.zip
+     *   - flashable_boot_vendor_v16_bzip2.zip
      */
     fun buildOutputFileName(images: Map<String, String>, compression: String, version: Int = 16): String {
         val partitionNames = images.keys.sorted().joinToString("_")
         val compressSuffix = if (compression == "none") "raw" else compression
-        return "flashable_${partitionNames}_v${version}_${compressSuffix}.zip"
+        return "flashable_dd_${partitionNames}_v${version}_${compressSuffix}.zip"
     }
 
     /**

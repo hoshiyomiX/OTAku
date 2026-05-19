@@ -105,7 +105,7 @@ def main():
         sys.exit(0)
 
     mode = args[0].lower()
-    supported = ("info", "dump", "gen", "zip", "sign", "check-deps")
+    supported = ("info", "dump", "gen", "zip", "dd", "sign", "check-deps")
 
     if mode not in supported:
         print("Error: Unknown mode \\'%s\\'. Supported: %s" % (mode, ", ".join(supported)),
@@ -135,6 +135,10 @@ def main():
             opts["key"] = args[i + 1]; i += 1
         elif a in ("-f", "--fingerprint") and i + 1 < len(args):
             opts["fingerprint"] = args[i + 1]; i += 1
+        elif a == "--image" and i + 1 < len(args):
+            opts.setdefault("images", []).append(args[i + 1]); i += 1
+        elif a == "--partition" and i + 1 < len(args):
+            opts.setdefault("partitions", []).append(args[i + 1]); i += 1
         elif a.startswith("-"):
             print("Error: Unknown option: %s" % a, file=sys.stderr)
             sys.exit(1)
@@ -145,6 +149,7 @@ def main():
     #   dump  -> payload_path, output_dir, partitions
     #   gen   -> images, output_path, compress
     #   zip   -> images, output_path, compress, device, fingerprint
+    #   dd    -> images (list), partitions (list), output, compress, device
     #   sign  -> input_path, output_path, key_path
     params = {"mode": mode, "verbose": verbose}
 
@@ -193,6 +198,23 @@ def main():
             params["device"] = opts["name"]
         if opts.get("fingerprint"):
             params["fingerprint"] = opts["fingerprint"]
+
+    elif mode == "dd":
+        if "images" not in opts or not opts["images"]:
+            print("Error: --image <path> required (repeatable)", file=sys.stderr)
+            sys.exit(1)
+        if "partitions" not in opts or not opts["partitions"]:
+            print("Error: --partition <name> required (repeatable)", file=sys.stderr)
+            sys.exit(1)
+        if len(opts["images"]) != len(opts["partitions"]):
+            print("Error: --image and --partition count mismatch", file=sys.stderr)
+            sys.exit(1)
+        images = dict(zip(opts["partitions"], opts["images"]))
+        params["images"] = images
+        params["output_path"] = opts.get("output", "flashable_dd.zip")
+        params["compress"] = opts.get("compress", "gzip")
+        if opts.get("name"):
+            params["device"] = opts["name"]
 
     elif mode == "sign":
         if "input" not in opts:
