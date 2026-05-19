@@ -17,6 +17,7 @@ import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -97,6 +98,8 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Apply theme BEFORE setContentView
+        applyTheme()
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
@@ -109,6 +112,7 @@ class MainActivity : AppCompatActivity() {
         setupToolbar()
         setupDeviceMetaFields()
         setupOutputField()
+        setupCustomFilenameField()
 
         requestStoragePermissions()
         handleIncomingIntent(intent)
@@ -183,6 +187,62 @@ class MainActivity : AppCompatActivity() {
         setSupportActionBar(toolbar)
         supportActionBar?.title = getString(R.string.app_name)
         supportActionBar?.subtitle = "v${BuildConfig.VERSION_NAME}"
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Theme Management
+    // ═══════════════════════════════════════════════════════════════
+
+    private fun applyTheme() {
+        val themeMode = prefs.getString("pref_theme_mode", "system") ?: "system"
+        when (themeMode) {
+            "light" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
+            "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
+            else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
+        }
+    }
+
+    override fun onCreateOptionsMenu(menu: android.view.Menu?): Boolean {
+        menuInflater.inflate(R.menu.settings_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.theme_light -> {
+                prefs.edit { putString("pref_theme_mode", "light") }
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
+                true
+            }
+            R.id.theme_dark -> {
+                prefs.edit { putString("pref_theme_mode", "dark") }
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
+                true
+            }
+            R.id.theme_system -> {
+                prefs.edit { putString("pref_theme_mode", "system") }
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun setupCustomFilenameField() {
+        val editFilename = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextCustomFilename)
+        // Restore persisted custom filename (or keep empty for auto)
+        editFilename?.setText(prefs.getString("pref_custom_filename", ""))
+
+        // Listen for changes and update preview
+        editFilename?.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val text = s?.toString()?.trim() ?: ""
+                prefs.edit { putString("pref_custom_filename", text) }
+                updateOutputPreview()
+            }
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+        })
     }
 
     private fun setupDeviceMetaFields() {
@@ -483,7 +543,14 @@ class MainActivity : AppCompatActivity() {
         File(outDir).mkdirs()
 
         val images = imageFiles.toMap()
-        val outputFileName = PayloadBridge.buildOutputFileName(images, selectedCompression)
+
+        // Use custom filename if set, otherwise auto-generate
+        val customName = prefs.getString("pref_custom_filename", "")?.trim()
+        val outputFileName = if (!customName.isNullOrEmpty()) {
+            if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
+        } else {
+            PayloadBridge.buildOutputFileName(images, selectedCompression)
+        }
         val outPath = File(outDir, outputFileName).absolutePath
 
         showLog("Partitions (${images.size}):\n")
@@ -545,8 +612,15 @@ class MainActivity : AppCompatActivity() {
             textView?.text = ""
             return
         }
-        val images = imageFiles.toMap()
-        val fileName = PayloadBridge.buildOutputFileName(images, selectedCompression)
+        // Use custom filename if set, otherwise auto-generate
+        val customName = prefs.getString("pref_custom_filename", "")?.trim()
+        val fileName = if (!customName.isNullOrEmpty()) {
+            // Ensure .zip extension
+            if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
+        } else {
+            val images = imageFiles.toMap()
+            PayloadBridge.buildOutputFileName(images, selectedCompression)
+        }
         textView?.text = fileName
     }
 

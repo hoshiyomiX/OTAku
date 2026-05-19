@@ -15,7 +15,7 @@ ddbundle format:
                           + num_parts (u16) + header_size (u16) + padding to 4096
                     Data:   each partition compressed, padded to 4096 alignment
     flash_info.txt — Human-readable metadata
-    META-INF/com/google/android/update-binary — TWRP/OrangeFox flasher (5+ gates)
+    META-INF/com/google/android/update-binary — TWRP/OrangeFox flasher
     META-INF/com/google/android/updater-script — Stub ("#Mtk client script")
 
 Compress IDs (stored in header + used by flasher):
@@ -64,6 +64,13 @@ COMPRESS_EXT_MAP = {
     3: ".xz",
 }
 
+# Slant ASCII art for "Renuked v3" — TWRP console banner
+BANNER = r"""    ____              __  __
+   / __ \____  ____  / /_/ /_  ____
+  / / / / __ \/ __ \/ __/ __ \/ __ \
+ / /_/ / /_/ / / / / /_/ / / / /_/ /
+ \____/\____/_/ /_/\__/_/ /_/\____/  v3"""
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -109,11 +116,12 @@ def _build_header(compress_id, num_parts):
     return hdr
 
 
-def _build_update_script(num_parts, compress_id, compress_name, partitions_meta):
+def _build_update_script(num_parts, compress_id, compress_name, partitions_meta, device=""):
     """Build the META-INF/com/google/android/update-binary shell script.
 
     partitions_meta: list of dicts with keys:
         name, unc_size, hash_hex, comp_size, data_offset
+    device: device codename string (optional, for target validation)
     """
     # Build partition variable assignments
     part_vars = []
@@ -129,12 +137,55 @@ def _build_update_script(num_parts, compress_id, compress_name, partitions_meta)
     decomp_cmd = COMPRESS_CMD_MAP.get(compress_id, "cat")
     decomp_ext = COMPRESS_EXT_MAP.get(compress_id, ".raw")
 
+    # Device check step — only emitted when device is set
+    device_check_block = ""
+    if device:
+        device_check_block = f'''
+# ── Step 2: Device compatibility ──────────────────────────
+TARGET_DEVICE="{device}"
+CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null || getprop ro.build.product 2>/dev/null)
+
+if [ -n "$TARGET_DEVICE" ]; then
+    if [ "$CURRENT_DEVICE" != "$TARGET_DEVICE" ]; then
+        ui_print ""
+        ui_print "  WARNING: Device mismatch!"
+        ui_print "  Expected : $TARGET_DEVICE"
+        ui_print "  Current  : $CURRENT_DEVICE"
+        ui_print ""
+        ui_print "  Flashing on wrong device may BRICK it."
+        ui_print "  Press Power to continue, Vol- to abort."
+        ui_print ""
+        # Wait for key press (Power = continue, Vol- = abort)
+        choose -t 30 "Continue?" "Yes" "No"
+        if [ $? -ne 0 ]; then
+            ui_print "! ABORT: User cancelled (device mismatch)"
+            exit 1
+        fi
+    else
+        ui_print "  Device: $CURRENT_DEVICE [OK]"
+    fi
+fi
+ui_print ""
+'''
+
+    # Calculate step numbers dynamically based on whether device check is enabled
+    # With device:    Step 0 (decompressor) + 1 (integrity) + 2 (device) + 3 (slot) + 4 (validation) + N flash
+    # Without device: Step 0 (decompressor) + 1 (integrity) + 2 (slot) + 3 (validation) + N flash
+    slot_step = 3 if device else 2
+    validation_step = 4 if device else 3
+    flash_step_offset = 5 if device else 4
+    total_steps = num_parts + flash_step_offset
+
+    # Header info line
+    header_info_parts = ", ".join(p["name"] for p in partitions_meta)
+    header_info = f"Partitions: {header_info_parts}"
+    if device:
+        header_info += f" | Device: {device}"
+    header_info += f" | Compress: {compress_name}"
+
     script = f'''#!/sbin/sh
-# ═══════════════════════════════════════════════════════════════
-#  ddbundle flasher v1.2 — dd-based partition flasher
-#  Compress: {compress_name} | Partitions: {num_parts}
-#  Strategy: Hybrid (compressed-only temp, pipe to dd)
-# ═══════════════════════════════════════════════════════════════
+# {BANNER}
+# {header_info}
 
 # ── TWRP/OrangeFox bootstrap ────────────────────────────────
 # TWRP calls: update-binary 3 <fd> <zippath>
@@ -153,13 +204,11 @@ NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
 
 ui_print ""
-ui_print "========================================"
-ui_print " ddbundle flasher v1.2"
-ui_print "========================================"
+{chr(10).join(line.strip() for line in BANNER.strip().splitlines())}
 ui_print ""
 
-# ── Gate 0: Decompressor availability ──────────────────────
-ui_print "[Gate 0/4] Decompressor availability..."
+# ── Step 0: Decompressor availability ──────────────────────
+ui_print "[Step 0/{total_steps}] Decompressor availability..."
 
 DECOMP_CMD=""
 check_decompressor() {{
@@ -201,8 +250,8 @@ fi
 ui_print "  Decompressor: $DECOMP_CMD"
 ui_print ""
 
-# ── Gate 1: Bundle integrity ───────────────────────────────
-ui_print "[Gate 1/4] Bundle integrity..."
+# ── Step 1: Bundle integrity ───────────────────────────────
+ui_print "[Step 1/{total_steps}] Bundle integrity..."
 
 if [ ! -f "$BUNDLE" ]; then
     ui_print "! ABORT: $BUNDLE not found"
@@ -255,9 +304,9 @@ fi
 ui_print "  Version=$HDR_VERSION Compress=$HDR_COMPRESS Parts=$HDR_NUM_PARTS"
 ui_print "  Header=$HDR_HDR_SIZE DataOffset=$DATA_OFFSET"
 ui_print ""
-
-# ── Gate 2: Slot detection ─────────────────────────────────
-ui_print "[Gate 2/4] Slot detection..."
+{device_check_block}
+# ── Step {slot_step}: Slot detection ──────────────────────────
+ui_print "[Step {slot_step}/{total_steps}] Slot detection..."
 
 TARGET_SLOT=""
 
@@ -313,8 +362,8 @@ resolve_target() {{
     fi
 }}
 
-# ── Gate 3: Partition validation ───────────────────────────
-ui_print "[Gate 3/4] Partition validation..."
+# ── Step {validation_step}: Partition validation ─────────────────────
+ui_print "[Step {validation_step}/{total_steps}] Partition validation..."
 
 validate_target() {{
     local target="$1"
@@ -385,7 +434,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 done
 ui_print ""
 
-# ── Gate 4+: Flash each partition ──────────────────────────
+# ── Step {flash_step_offset}+: Flash each partition ────────────────────
 for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     eval "PNAME=\\$PART_${{i}}_NAME"
     eval "PSIZE=\\$PART_${{i}}_UNC_SIZE"
@@ -393,10 +442,9 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     eval "PCSIZE=\\$PART_${{i}}_COMP_SIZE"
     eval "POFFSET=\\$PART_${{i}}_DATA_OFFSET"
 
-    GATE_NUM=$(( i + 4 ))
-    TOTAL_GATES=$(( NUM_PARTS + 3 ))
+    STEP_NUM=$(( i + {flash_step_offset} ))
 
-    ui_print "[Gate $GATE_NUM/$TOTAL_GATES] Flashing $PNAME ($(( PSIZE / 1048576 )) MB)..."
+    ui_print "[Step $STEP_NUM/{total_steps}] Flashing $PNAME ($(( PSIZE / 1048576 )) MB)..."
     ui_print "  Compressed: $(( PCSIZE / 1048576 )) MB | Offset: $POFFSET"
 
     PTARGET=$(resolve_target "$PNAME")
@@ -448,26 +496,28 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 done
 
 # ── Done ────────────────────────────────────────────────────
-ui_print "========================================"
+ui_print "──────────────────────────────────────────"
 ui_print " All $NUM_PARTS partition(s) flashed"
 ui_print " and verified successfully!"
-ui_print "========================================"
+ui_print "──────────────────────────────────────────"
 ui_print ""
 exit 0
 '''
     return script
 
 
-def _build_flash_info(version, compress_name, bundle_size, num_parts, partitions_meta):
+def _build_flash_info(version, compress_name, bundle_size, num_parts, partitions_meta, device=""):
     """Build the flash_info.txt human-readable metadata."""
     lines = [
-        f"ddbundle flasher v{version}",
+        "Renuked v3 — dd-based partition flasher",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
         f"Compression: {compress_name}",
         f"Bundle size: {bundle_size:,} bytes ({_human_size(bundle_size)})",
         f"Partitions: {num_parts}",
-        "",
     ]
+    if device:
+        lines.append(f"Target device: {device}")
+    lines.append("")
     for p in partitions_meta:
         lines.append(f"  [{p['name']}]")
         lines.append(f"    Uncompressed: {p['unc_size']:,} bytes ({_human_size(p['unc_size'])})")
@@ -547,10 +597,10 @@ def run(*args, **kwargs):
         decomp_cmd = COMPRESS_CMD_MAP[compress_id]
         num_parts = len(images)
 
-        lines.append("=" * 60)
+        lines.append("\u2550" * 50)
         lines.append("REPACK: Generate flashable OTA ZIP")
         lines.append(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        lines.append("-" * 60)
+        lines.append("\u2500" * 50)
         lines.append("")
         lines.append(f"Partitions ({num_parts}):")
         for name, path in images.items():
@@ -617,11 +667,11 @@ def run(*args, **kwargs):
         lines.append("[Step 2] Building flasher scripts...")
 
         update_binary = _build_update_script(
-            num_parts, compress_id, compress_name, partitions_meta
+            num_parts, compress_id, compress_name, partitions_meta, device=device
         )
         updater_script = "#Mtk client script\n"
         flash_info = _build_flash_info(
-            "1.2", compress_name, bundle_size, num_parts, partitions_meta
+            "3", compress_name, bundle_size, num_parts, partitions_meta, device=device
         )
 
         lines.append(f"  update-binary: {len(update_binary):,} bytes")
@@ -646,11 +696,11 @@ def run(*args, **kwargs):
 
         # ── Summary ──
         elapsed = time.time() - t0
-        lines.append("=" * 60)
+        lines.append("\u2550" * 50)
         lines.append(f"SUCCESS in {elapsed * 1000:.0f}ms")
         lines.append(f"Output: {output_path}")
         lines.append(f"ZIP size: {_human_size(zip_size)}")
-        lines.append("=" * 60)
+        lines.append("\u2550" * 50)
 
         output = "\n".join(lines)
         print(output)
