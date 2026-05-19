@@ -137,11 +137,22 @@ def _build_update_script(num_parts, compress_id, compress_name, partitions_meta,
     decomp_cmd = COMPRESS_CMD_MAP.get(compress_id, "cat")
     decomp_ext = COMPRESS_EXT_MAP.get(compress_id, ".raw")
 
+    # Calculate step numbers dynamically based on whether device check is enabled
+    # Step 0 (extract) + 1 (decompressor) + 2 (integrity) + [3 (device)] + 4/3 (slot) + 5/4 (validation) + N flash
+    extract_step = 0
+    decomp_step = 1
+    integrity_step = 2
+    slot_step = 4 if device else 3
+    validation_step = 5 if device else 4
+    flash_step_offset = 6 if device else 5
+    total_steps = num_parts + flash_step_offset
+
     # Device check step — only emitted when device is set
+    device_check_step = integrity_step + 1  # = 3
     device_check_block = ""
     if device:
         device_check_block = f'''
-# ── Step 2: Device compatibility ──────────────────────────
+# ── Step {device_check_step}: Device compatibility ──────────────────
 TARGET_DEVICE="{device}"
 CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null || getprop ro.build.product 2>/dev/null)
 
@@ -167,14 +178,6 @@ if [ -n "$TARGET_DEVICE" ]; then
 fi
 ui_print ""
 '''
-
-    # Calculate step numbers dynamically based on whether device check is enabled
-    # With device:    Step 0 (decompressor) + 1 (integrity) + 2 (device) + 3 (slot) + 4 (validation) + N flash
-    # Without device: Step 0 (decompressor) + 1 (integrity) + 2 (slot) + 3 (validation) + N flash
-    slot_step = 3 if device else 2
-    validation_step = 4 if device else 3
-    flash_step_offset = 5 if device else 4
-    total_steps = num_parts + flash_step_offset
 
     # Header info line
     header_info_parts = ", ".join(p["name"] for p in partitions_meta)
@@ -207,8 +210,44 @@ ui_print ""
 {chr(10).join(line.strip() for line in BANNER.strip().splitlines())}
 ui_print ""
 
-# ── Step 0: Decompressor availability ──────────────────────
-ui_print "[Step 0/{total_steps}] Decompressor availability..."
+# ── Step 0: Extract ddbundle.bin from ZIP ──────────────────
+ui_print "[Step {extract_step}/{total_steps}] Extracting ddbundle.bin..."
+
+rm -f "$BUNDLE"
+if [ ! -f "$ZIPFILE" ]; then
+    ui_print "! ABORT: ZIP file not found: $ZIPFILE"
+    exit 1
+fi
+
+# TWRP/OrangeFox only auto-extracts update-binary. We must extract
+# ddbundle.bin ourselves from the flashable ZIP.
+EXTRACT_OK=0
+# Method 1: unzip
+if which unzip >/dev/null 2>&1; then
+    unzip -o -j "$ZIPFILE" ddbundle.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
+fi
+# Method 2: busybox unzip
+if [ "$EXTRACT_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
+    busybox unzip -o -j "$ZIPFILE" ddbundle.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
+fi
+# Method 3: toybox (some recoveries)
+if [ "$EXTRACT_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
+    toybox unzip -o -j "$ZIPFILE" ddbundle.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
+fi
+
+if [ "$EXTRACT_OK" = "0" ] || [ ! -f "$BUNDLE" ]; then
+    ui_print "! ABORT: Failed to extract ddbundle.bin from ZIP"
+    ui_print "! ZIP: $ZIPFILE"
+    ui_print "! Make sure the ZIP contains 'ddbundle.bin' in its root."
+    exit 1
+fi
+
+BUNDLE_EXTRACT_SIZE=$(wc -c < "$BUNDLE")
+ui_print "  Extracted: $BUNDLE ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
+ui_print ""
+
+# ── Step {decomp_step}: Decompressor availability ────────────
+ui_print "[Step {decomp_step}/{total_steps}] Decompressor availability..."
 
 DECOMP_CMD=""
 check_decompressor() {{
@@ -250,9 +289,10 @@ fi
 ui_print "  Decompressor: $DECOMP_CMD"
 ui_print ""
 
-# ── Step 1: Bundle integrity ───────────────────────────────
-ui_print "[Step 1/{total_steps}] Bundle integrity..."
+# ── Step {integrity_step}: Bundle integrity ───────────────────
+ui_print "[Step {integrity_step}/{total_steps}] Bundle integrity..."
 
+# ddbundle.bin was already extracted in Step 0, just verify it exists
 if [ ! -f "$BUNDLE" ]; then
     ui_print "! ABORT: $BUNDLE not found"
     exit 1
