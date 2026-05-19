@@ -42,6 +42,14 @@ object PayloadBridge {
     // All valid compression values (for validation)
     val ALL_COMPRESSION = setOf("none", "gzip", "bzip2", "xz")
 
+    // Compression level ranges per algorithm: (min, max, default)
+    val COMPRESS_LEVELS = mapOf(
+        "none" to Triple(0, 0, 0),
+        "gzip" to Triple(1, 9, 6),
+        "bzip2" to Triple(1, 9, 9),
+        "xz" to Triple(0, 9, 6)
+    )
+
     /**
      * Execute payload_toolkit.pyz with the given CLI arguments.
      * PythonBridge.executePyz auto-configures the environment based on
@@ -76,19 +84,35 @@ object PayloadBridge {
      *   - flash_info.txt (human-readable metadata)
      *
      * @param images Map of partition name -> absolute path to .img file
-     * @param device Device codename (e.g. "crosshatch", "S666LN-OP")
+     * @param device Device codename(s), comma-separated (e.g. "crosshatch" or "OP11,OP11A")
      * @param compression Compression algorithm: none, gzip, bzip2, or xz
+     * @param compressionLevel Compression level (algorithm-specific range, null=default)
+     * @param skipVerify Skip post-flash SHA-256 hash verification
+     * @param backup Dump current partitions before flashing (in recovery)
      * @param outputPath Absolute path to output .zip file
      */
     suspend fun dd(
         images: Map<String, String>,
         device: String = "generic",
         compression: String = "gzip",
+        compressionLevel: Int? = null,
+        skipVerify: Boolean = false,
+        backup: Boolean = false,
         outputPath: String
     ): PayloadResult {
         if (images.isEmpty()) return PayloadResult.error("No images specified for DD ZIP")
         if (compression !in ALL_COMPRESSION)
             return PayloadResult.error("Invalid compression: '$compression'")
+
+        // Validate compression level
+        compressionLevel?.let { lvl ->
+            val range = COMPRESS_LEVELS[compression]
+            if (range != null && (lvl < range.first || lvl > range.second)) {
+                return PayloadResult.error(
+                    "Invalid compression level $lvl for $compression (range: ${range.first}-${range.second})"
+                )
+            }
+        }
 
         // dd mode uses --image (repeatable) + --partition (repeatable)
         val args = mutableListOf("dd")
@@ -101,6 +125,16 @@ object PayloadBridge {
         if (compression != "gzip") {
             args.add("--compress")
             args.add(compression)
+        }
+        if (compressionLevel != null && compression != "none") {
+            args.add("--compress-level")
+            args.add(compressionLevel.toString())
+        }
+        if (skipVerify) {
+            args.add("--skip-verify")
+        }
+        if (backup) {
+            args.add("--backup")
         }
         if (device.isNotBlank() && device != "generic") {
             args.add("--device")

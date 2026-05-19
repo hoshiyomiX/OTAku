@@ -55,7 +55,26 @@ ALG_AUTO = "auto"
 ALL_ALGORITHMS = (ALG_NONE, ALG_BZIP2, ALG_GZIP, ALG_XZ, ALG_BROTLI)
 
 
-def compress(data, algorithm="gzip"):
+# Default compression levels per algorithm
+DEFAULT_LEVELS = {
+    ALG_NONE: None,   # No compression
+    ALG_BZIP2: 9,
+    ALG_GZIP: 6,      # Standard gzip default
+    ALG_XZ: 6,        # Standard xz default
+    ALG_BROTLI: 11,
+}
+
+# Valid level ranges per algorithm (min, max)
+LEVEL_RANGES = {
+    ALG_NONE: (0, 0),
+    ALG_BZIP2: (1, 9),
+    ALG_GZIP: (1, 9),
+    ALG_XZ: (0, 9),
+    ALG_BROTLI: (0, 11),
+}
+
+
+def compress(data, algorithm="gzip", level=None):
     """Compress *data* with the specified algorithm.
 
     Parameters
@@ -64,6 +83,9 @@ def compress(data, algorithm="gzip"):
         Raw data to compress.
     algorithm : str
         One of "none", "bzip2", "gzip", "xz", "brotli".
+    level : int or None
+        Compression level. If None, uses the algorithm's default.
+        Ranges: gzip/bzip2 1-9, xz 0-9, brotli 0-11.
 
     Returns
     -------
@@ -75,7 +97,7 @@ def compress(data, algorithm="gzip"):
     RuntimeError
         If brotli is requested but the brotli module is not installed.
     ValueError
-        If *algorithm* is not recognised.
+        If *algorithm* is not recognised or *level* is out of range.
     """
     if not isinstance(data, bytes):
         data = bytes(data)
@@ -85,12 +107,18 @@ def compress(data, algorithm="gzip"):
     if alg == ALG_NONE:
         return data
 
+    # Resolve level: explicit > default
+    if level is None:
+        level = DEFAULT_LEVELS.get(alg)
+
     if alg == ALG_BZIP2:
-        return bz2.compress(data, compresslevel=9)
+        level = max(1, min(9, int(level or 9)))
+        return bz2.compress(data, compresslevel=level)
 
     if alg == ALG_GZIP:
+        level = max(1, min(9, int(level or 6)))
         buf = io.BytesIO()
-        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as f:
+        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=level, mtime=0) as f:
             f.write(data)
         return buf.getvalue()
 
@@ -101,7 +129,8 @@ def compress(data, algorithm="gzip"):
                 "On Termux: pkg install python  (includes liblzma).  "
                 "On Linux: apt install liblzma-dev && reinstall Python."
             )
-        return _lzma_mod.compress(data, format=_lzma_mod.FORMAT_XZ, preset=9 | _lzma_mod.PRESET_EXTREME)
+        level = max(0, min(9, int(level or 6)))
+        return _lzma_mod.compress(data, format=_lzma_mod.FORMAT_XZ, preset=level)
 
     if alg == ALG_BROTLI:
         if not _HAS_BROTLI:
@@ -109,7 +138,8 @@ def compress(data, algorithm="gzip"):
                 "brotli compression requires the 'brotli' Python package.  "
                 "Install it via pip:  pip install brotli"
             )
-        return _brotli_mod.compress(data, quality=11)
+        level = max(0, min(11, int(level or 11)))
+        return _brotli_mod.compress(data, quality=level)
 
     raise ValueError(f"Unknown compression algorithm: {algorithm!r}")
 
