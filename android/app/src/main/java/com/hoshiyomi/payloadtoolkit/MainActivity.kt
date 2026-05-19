@@ -185,11 +185,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupDeviceMetaFields() {
         val editDevice = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-        val editFingerprint = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextFingerprint)
 
-        // Restore persisted values (or keep empty for defaults)
+        // Restore persisted value (or keep empty for default)
         editDevice?.setText(prefs.getString("device", ""))
-        editFingerprint?.setText(prefs.getString("fingerprint", ""))
     }
 
     private fun setupCompressionSelector() {
@@ -432,28 +430,21 @@ class MainActivity : AppCompatActivity() {
         showLog("Compression: $selectedCompression\n")
         showLog("Output: $outputFileName\n\n")
 
-        // Read device metadata from UI fields (empty = use defaults)
+        // Read device metadata from UI field (empty = use default)
         val deviceInput = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
             ?.text?.toString()?.trim() ?: ""
-        val fingerprintInput = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextFingerprint)
-            ?.text?.toString()?.trim() ?: ""
 
-        // Persist values for next launch
-        prefs.edit { putString("device", deviceInput); putString("fingerprint", fingerprintInput) }
+        // Persist value for next launch
+        prefs.edit { putString("device", deviceInput) }
 
-        // Use non-empty user input, otherwise PayloadBridge defaults apply
-        val device = deviceInput.ifEmpty { "aosp_crosshatch,Generic AOSP" }
-        val fingerprint = fingerprintInput.ifEmpty {
-            "AOSP/crosshatch/crosshatch:14/AP2A.240805.005/11572411:user/release-keys"
-        }
+        // Use non-empty user input, otherwise default applies
+        val device = deviceInput.ifEmpty { "generic" }
 
-        showLog("Device: $device\n")
-        showLog("Fingerprint: $fingerprint\n\n")
+        showLog("Device: $device\n\n")
 
-        return PayloadBridge.zip(
+        return PayloadBridge.dd(
             images = images,
             device = device,
-            fingerprint = fingerprint,
             compression = selectedCompression,
             outputPath = outPath
         )
