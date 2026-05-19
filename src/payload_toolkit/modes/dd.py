@@ -116,12 +116,16 @@ def _build_header(compress_id, num_parts):
     return hdr
 
 
-def _build_update_script(num_parts, compress_id, compress_name, partitions_meta, device=""):
+def _build_update_script(num_parts, compress_id, compress_name, partitions_meta,
+                            device="", skip_verify=False, backup=False, compress_level=None):
     """Build the META-INF/com/google/android/update-binary shell script.
 
     partitions_meta: list of dicts with keys:
         name, unc_size, hash_hex, comp_size, data_offset
-    device: device codename string (optional, for target validation)
+    device: device codename(s), comma-separated (optional, for target validation)
+    skip_verify: if True, skip post-flash SHA-256 hash verification
+    backup: if True, dump current partitions before flashing
+    compress_level: compression level used (informational, shown in header)
     """
     # Build partition variable assignments
     part_vars = []
@@ -137,45 +141,94 @@ def _build_update_script(num_parts, compress_id, compress_name, partitions_meta,
     decomp_cmd = COMPRESS_CMD_MAP.get(compress_id, "cat")
     decomp_ext = COMPRESS_EXT_MAP.get(compress_id, ".raw")
 
-    # Calculate step numbers dynamically based on whether device check is enabled
-    # Step 0 (extract) + 1 (decompressor) + 2 (integrity) + [3 (device)] + 4/3 (slot) + 5/4 (validation) + N flash
+    # Calculate step numbers dynamically based on enabled features
+    # Base: Step 0 (extract) + 1 (decompressor) + 2 (integrity)
+    # Optional: 3 (device) + 4 (backup) → shifts slot/validation/flash
     extract_step = 0
     decomp_step = 1
     integrity_step = 2
-    slot_step = 4 if device else 3
-    validation_step = 5 if device else 4
-    flash_step_offset = 6 if device else 5
+    step = 3
+    device_check_step = None
+    device_check_block = ""
+    if device:
+        device_check_step = step
+        step += 1
+    backup_step = None
+    backup_block = ""
+    if backup:
+        backup_step = step
+        step += 1
+    slot_step = step
+    step += 1
+    validation_step = step
+    step += 1
+    flash_step_offset = step
     total_steps = num_parts + flash_step_offset
 
     # Device check step — only emitted when device is set
-    device_check_step = integrity_step + 1  # = 3
-    device_check_block = ""
     if device:
+        # Support comma-separated device list
+        device_list = [d.strip() for d in device.split(",") if d.strip()]
+        device_array = " ".join(f'"{d}"' for d in device_list)
         device_check_block = f'''
 # ── Step {device_check_step}: Device compatibility ──────────────────
-TARGET_DEVICE="{device}"
-CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null || getprop ro.build.product 2>/dev/null)
+ui_print "[Step {device_check_step}/{total_steps}] Device compatibility..."
 
-if [ -n "$TARGET_DEVICE" ]; then
-    if [ "$CURRENT_DEVICE" != "$TARGET_DEVICE" ]; then
-        ui_print ""
-        ui_print "  WARNING: Device mismatch!"
-        ui_print "  Expected : $TARGET_DEVICE"
-        ui_print "  Current  : $CURRENT_DEVICE"
-        ui_print ""
-        ui_print "  Flashing on wrong device may BRICK it."
-        ui_print "  Press Power to continue, Vol- to abort."
-        ui_print ""
-        # Wait for key press (Power = continue, Vol- = abort)
-        choose -t 30 "Continue?" "Yes" "No"
-        if [ $? -ne 0 ]; then
-            ui_print "! ABORT: User cancelled (device mismatch)"
-            exit 1
-        fi
-    else
-        ui_print "  Device: $CURRENT_DEVICE [OK]"
+CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null || getprop ro.build.product 2>/dev/null)
+DEVICE_MATCH=0
+for _d in {device_array}; do
+    if [ "$CURRENT_DEVICE" = "$_d" ]; then
+        DEVICE_MATCH=1
+        break
     fi
+done
+
+if [ $DEVICE_MATCH -eq 0 ]; then
+    ui_print ""
+    ui_print "  WARNING: Device mismatch!"
+    ui_print "  Expected : {device}"
+    ui_print "  Current  : $CURRENT_DEVICE"
+    ui_print ""
+    ui_print "  Flashing on wrong device may BRICK it."
+    ui_print "  Press Power to continue, Vol- to abort."
+    ui_print ""
+    choose -t 30 "Continue?" "Yes" "No"
+    if [ $? -ne 0 ]; then
+        ui_print "! ABORT: User cancelled (device mismatch)"
+        exit 1
+    fi
+else
+    ui_print "  Device: $CURRENT_DEVICE [OK]"
 fi
+ui_print ""
+'''
+
+    # Backup step — dump current partitions before flashing
+    backup_dir = "/tmp/ddbackup"
+    if backup:
+        backup_block = f'''
+# ── Step {backup_step}: Pre-flash backup ────────────────────────────
+ui_print "[Step {backup_step}/{total_steps}] Backing up current partitions..."
+
+BACKUP_DIR="{backup_dir}"
+rm -rf "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR"
+
+for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
+    eval "PNAME=\\$PART_{{${{i}}}}_NAME"
+    eval "PSIZE=\\$PART_{{${{i}}}}_UNC_SIZE"
+    PTARGET=$(resolve_target "$PNAME")
+
+    ui_print "  Backing up $PNAME from $PTARGET..."
+    dd if="$PTARGET" of="$BACKUP_DIR/${{PNAME}}.img" bs=4096 2>/dev/null
+    if [ $? -eq 0 ]; then
+        BSIZE=$(wc -c < "$BACKUP_DIR/${{PNAME}}.img")
+        ui_print "  $PNAME backup: $(( BSIZE / 1048576 )) MB [OK]"
+    else
+        ui_print "! WARNING: Failed to backup $PNAME (continuing...)"
+    fi
+done
+ui_print "  Backups saved to $BACKUP_DIR/"
 ui_print ""
 '''
 
@@ -184,7 +237,24 @@ ui_print ""
     header_info = f"Partitions: {header_info_parts}"
     if device:
         header_info += f" | Device: {device}"
-    header_info += f" | Compress: {compress_name}"
+    if compress_level is not None and compress_id != 0:
+        header_info += f" | {compress_name}-{compress_level}"
+    else:
+        header_info += f" | Compress: {compress_name}"
+    if skip_verify:
+        header_info += " | NoVerify"
+    if backup:
+        header_info += " | Backup"
+
+    # Pre-build conditional shell blocks for Done section
+    if skip_verify:
+        done_status_block = '''ui_print " All $NUM_PARTS partition(s) flashed"
+    ui_print " (verification was skipped by user)"'''
+    else:
+        done_status_block = '''ui_print " All $NUM_PARTS partition(s) flashed"
+    ui_print " and verified successfully!"'''
+
+    backup_done_line = 'ui_print " Backups: %s/"\n' % backup_dir if backup else ""
 
     script = f'''#!/sbin/sh
 # {BANNER}
@@ -344,7 +414,7 @@ fi
 ui_print "  Version=$HDR_VERSION Compress=$HDR_COMPRESS Parts=$HDR_NUM_PARTS"
 ui_print "  Header=$HDR_HDR_SIZE DataOffset=$DATA_OFFSET"
 ui_print ""
-{device_check_block}
+{device_check_block}{backup_block}
 # ── Step {slot_step}: Slot detection ──────────────────────────
 ui_print "[Step {slot_step}/{total_steps}] Slot detection..."
 
@@ -509,54 +579,64 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         exit 1
     fi
 
-    # Step C: Post-verify — read back and hash compare
-    ui_print "  Verifying $PNAME..."
-    VERIFY_HASH=""
-    FULL_BLOCKS=$(( PSIZE / 4096 ))
-    REMAINDER_BYTES=$(( PSIZE % 4096 ))
-
-    if [ "$REMAINDER_BYTES" -eq 0 ]; then
-        VERIFY_HASH=$(dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null | sha256sum | cut -d' ' -f1)
+    # Step C: Post-verify — read back and hash compare (unless skip_verify)
+    if [ "{str(skip_verify).lower()}" = "true" ]; then
+        ui_print "  $PNAME: FLASHED (verification skipped)"
     else
-        VERIFY_HASH={{
-            dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null
-            dd if="$PTARGET" bs=1 skip=$(( FULL_BLOCKS * 4096 )) count=$REMAINDER_BYTES 2>/dev/null
-        }} | sha256sum | cut -d' ' -f1
-    fi
+        ui_print "  Verifying $PNAME..."
+        VERIFY_HASH=""
+        FULL_BLOCKS=$(( PSIZE / 4096 ))
+        REMAINDER_BYTES=$(( PSIZE % 4096 ))
 
-    if [ "$VERIFY_HASH" = "$PHASH" ]; then
-        ui_print "  $PNAME: VERIFIED OK"
-    else
-        ui_print "! ABORT: Hash mismatch for $PNAME!"
-        ui_print "  Expected: $PHASH"
-        ui_print "  Got:      $VERIFY_HASH"
-        exit 1
+        if [ "$REMAINDER_BYTES" -eq 0 ]; then
+            VERIFY_HASH=$(dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null | sha256sum | cut -d' ' -f1)
+        else
+            VERIFY_HASH={{
+                dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null
+                dd if="$PTARGET" bs=1 skip=$(( FULL_BLOCKS * 4096 )) count=$REMAINDER_BYTES 2>/dev/null
+            }} | sha256sum | cut -d' ' -f1
+        fi
+
+        if [ "$VERIFY_HASH" = "$PHASH" ]; then
+            ui_print "  $PNAME: VERIFIED OK"
+        else
+            ui_print "! ABORT: Hash mismatch for $PNAME!"
+            ui_print "  Expected: $PHASH"
+            ui_print "  Got:      $VERIFY_HASH"
+            exit 1
+        fi
     fi
     ui_print ""
 done
 
 # ── Done ────────────────────────────────────────────────────
 ui_print "──────────────────────────────────────────"
-ui_print " All $NUM_PARTS partition(s) flashed"
-ui_print " and verified successfully!"
-ui_print "──────────────────────────────────────────"
-ui_print ""
+{done_status_block}
+{backup_done_line}ui_print ""
 exit 0
 '''
     return script
 
 
-def _build_flash_info(version, compress_name, bundle_size, num_parts, partitions_meta, device=""):
+def _build_flash_info(version, compress_name, bundle_size, num_parts, partitions_meta,
+                       device="", skip_verify=False, backup=False, compress_level=None):
     """Build the flash_info.txt human-readable metadata."""
     lines = [
         "Renuked v3 — dd-based partition flasher",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
-        f"Compression: {compress_name}",
-        f"Bundle size: {bundle_size:,} bytes ({_human_size(bundle_size)})",
-        f"Partitions: {num_parts}",
     ]
+    if compress_level is not None:
+        lines.append(f"Compression: {compress_name} (level {compress_level})")
+    else:
+        lines.append(f"Compression: {compress_name}")
+    lines.append(f"Bundle size: {bundle_size:,} bytes ({_human_size(bundle_size)})")
+    lines.append(f"Partitions: {num_parts}")
     if device:
         lines.append(f"Target device: {device}")
+    if skip_verify:
+        lines.append("Post-flash verification: SKIPPED")
+    if backup:
+        lines.append("Pre-flash backup: ENABLED (/tmp/ddbackup/)")
     lines.append("")
     for p in partitions_meta:
         lines.append(f"  [{p['name']}]")
@@ -582,10 +662,13 @@ def run(*args, **kwargs):
 
     Parameters (via dict or kwargs)
     -------------------------------
-    images      : dict  — {partition_name: image_file_path, ...}
-    compress    : str   — Compression algorithm (default "gzip")
-    output_path : str   — Path for output .zip file
-    device      : str   — Device codename (optional, informational)
+    images          : dict  — {partition_name: image_file_path, ...}
+    compress        : str   — Compression algorithm (default "gzip")
+    compress_level  : int   — Compression level (None=default, 1-9 for gzip/bzip2, 0-9 for xz)
+    output_path     : str   — Path for output .zip file
+    device          : str   — Device codename(s), comma-separated (optional)
+    skip_verify     : bool  — Skip post-flash SHA-256 verification (default False)
+    backup          : bool  — Dump current partitions before flashing (default False)
 
     Returns
     -------
@@ -598,8 +681,13 @@ def run(*args, **kwargs):
     params = _parse_args(args, kwargs)
     images = params.get("images", {})
     compress_alg = str(params.get("compress", "gzip")).lower()
+    compress_level = params.get("compress_level", None)
+    if compress_level is not None:
+        compress_level = int(compress_level)
     output_path = str(params.get("output_path", "flashable_dd.zip"))
     device = str(params.get("device", ""))
+    skip_verify = bool(params.get("skip_verify", False))
+    backup = bool(params.get("backup", False))
 
     lines = []
     t0 = time.time()
@@ -647,9 +735,15 @@ def run(*args, **kwargs):
             size = os.path.getsize(path)
             lines.append(f"  {name} ({_human_size(size)})")
         lines.append(f"Compression: {compress_name}")
+        if compress_level is not None and compress_id != 0:
+            lines.append(f"Compression level: {compress_level}")
         lines.append(f"Output: {os.path.basename(output_path)}")
         if device:
             lines.append(f"Device: {device}")
+        if skip_verify:
+            lines.append(f"Verification: SKIPPED")
+        if backup:
+            lines.append(f"Pre-flash backup: ENABLED")
         lines.append("")
 
         # ── Step 1: Build ddbundle.bin ──
@@ -674,7 +768,7 @@ def run(*args, **kwargs):
             if compress_id == 0:
                 comp_data = raw_data
             else:
-                comp_data = compress(raw_data, compress_alg)
+                comp_data = compress(raw_data, compress_alg, level=compress_level)
 
             comp_size = len(comp_data)
             data_offset = len(data_blobs)
@@ -707,11 +801,13 @@ def run(*args, **kwargs):
         lines.append("[Step 2] Building flasher scripts...")
 
         update_binary = _build_update_script(
-            num_parts, compress_id, compress_name, partitions_meta, device=device
+            num_parts, compress_id, compress_name, partitions_meta,
+            device=device, skip_verify=skip_verify, backup=backup, compress_level=compress_level
         )
         updater_script = "#Mtk client script\n"
         flash_info = _build_flash_info(
-            "3", compress_name, bundle_size, num_parts, partitions_meta, device=device
+            "3", compress_name, bundle_size, num_parts, partitions_meta,
+            device=device, skip_verify=skip_verify, backup=backup, compress_level=compress_level
         )
 
         lines.append(f"  update-binary: {len(update_binary):,} bytes")

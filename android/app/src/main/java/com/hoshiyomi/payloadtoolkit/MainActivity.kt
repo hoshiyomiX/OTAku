@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     private var selectedCompression: String = "gzip"
+    private var selectedCompressLevel: Int? = null
     private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
     private var isExecuting = false
 
@@ -108,12 +109,14 @@ class MainActivity : AppCompatActivity() {
 
         initializePython()
         setupCompressionSelector()
+        setupCompressLevelSelector()
         setupButtons()
         setupToolbar()
         setupDeviceMetaFields()
         setupOutputField()
         setupCustomFilenameField()
         setupThemeToggle()
+        setupToggles()
 
         requestStoragePermissions()
         handleIncomingIntent(intent)
@@ -249,6 +252,22 @@ class MainActivity : AppCompatActivity() {
         // No extra setup needed here — onCreateOptionsMenu + onOptionsItemSelected handle it.
     }
 
+    private fun setupToggles() {
+        // Skip verification toggle
+        val switchSkipVerify = findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.switchSkipVerify)
+        switchSkipVerify?.isChecked = prefs.getBoolean("pref_skip_verify", false)
+        switchSkipVerify?.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit { putBoolean("pref_skip_verify", isChecked) }
+        }
+
+        // Pre-flash backup toggle
+        val switchBackup = findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.switchBackup)
+        switchBackup?.isChecked = prefs.getBoolean("pref_backup", false)
+        switchBackup?.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit { putBoolean("pref_backup", isChecked) }
+        }
+    }
+
     private fun setupCustomFilenameField() {
         val editFilename = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextCustomFilename)
         // Restore persisted custom filename (or keep empty for auto)
@@ -271,6 +290,14 @@ class MainActivity : AppCompatActivity() {
 
         // Restore persisted value (or keep empty for default)
         editDevice?.setText(prefs.getString("device", ""))
+
+        // Auto-detect button
+        findViewById<View>(R.id.buttonAutoDetect)?.setOnClickListener {
+            val detected = Build.PRODUCT
+            editDevice?.setText(detected)
+            prefs.edit { putString("device", detected) }
+            showLog("Auto-detected device: $detected\n")
+        }
     }
 
     private fun setupOutputField() {
@@ -312,10 +339,63 @@ class MainActivity : AppCompatActivity() {
         spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 selectedCompression = PayloadBridge.COMPRESSION_ALGORITHMS[position]
+                updateCompressLevelSpinner()
                 updateOutputPreview()
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+    }
+
+    private fun setupCompressLevelSelector() {
+        val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompressLevel)
+        spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val range = PayloadBridge.COMPRESS_LEVELS[selectedCompression]
+                if (range != null && range.first != range.second) {
+                    selectedCompressLevel = range.first + position
+                } else {
+                    selectedCompressLevel = null
+                }
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        // Initialize based on current compression selection
+        updateCompressLevelSpinner()
+    }
+
+    private fun updateCompressLevelSpinner() {
+        val layout = findViewById<View>(R.id.layoutCompressLevel)
+        val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompressLevel)
+        val range = PayloadBridge.COMPRESS_LEVELS[selectedCompression]
+
+        if (range == null || range.first == range.second) {
+            // No level selection for 'none'
+            layout?.visibility = View.GONE
+            selectedCompressLevel = null
+            return
+        }
+
+        layout?.visibility = View.VISIBLE
+        val levels = (range.first..range.second).map { level ->
+            val suffix = when {
+                level == range.third -> " (default)"
+                level == range.first -> " (fastest)"
+                level == range.second -> " (best)"
+                else -> ""
+            }
+            "$level$suffix"
+        }
+        val adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            levels
+        ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+        spinner.adapter = adapter
+
+        // Default selection: use algorithm default
+        val defaultIndex = range.third - range.first
+        spinner.setSelection(defaultIndex.coerceIn(0, levels.size - 1))
+        selectedCompressLevel = range.third
     }
 
     private fun setupButtons() {
@@ -579,8 +659,12 @@ class MainActivity : AppCompatActivity() {
             val file = File(path)
             showLog("  $name (${formatFileSize(file.length())})\n")
         }
-        showLog("Compression: $selectedCompression\n")
-        showLog("Output: $outputFileName\n\n")
+        showLog("Compression: $selectedCompression")
+        if (selectedCompressLevel != null && selectedCompression != "none") {
+            showLog(" (level $selectedCompressLevel)")
+        }
+        showLog("\n")
+        showLog("Output: $outputFileName\n")
 
         // Read device metadata from UI field (empty = use default)
         val deviceInput = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
@@ -592,12 +676,22 @@ class MainActivity : AppCompatActivity() {
         // Use non-empty user input, otherwise default applies
         val device = deviceInput.ifEmpty { "generic" }
 
-        showLog("Device: $device\n\n")
+        showLog("Device: $device")
+
+        // Read toggle states
+        val skipVerify = prefs.getBoolean("pref_skip_verify", false)
+        val backup = prefs.getBoolean("pref_backup", false)
+        if (skipVerify) showLog(" | Verification: SKIPPED")
+        if (backup) showLog(" | Backup: ON")
+        showLog("\n\n")
 
         return PayloadBridge.dd(
             images = images,
             device = device,
             compression = selectedCompression,
+            compressionLevel = selectedCompressLevel,
+            skipVerify = skipVerify,
+            backup = backup,
             outputPath = outPath
         )
     }
