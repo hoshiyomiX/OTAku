@@ -96,3 +96,21 @@ Stage Summary:
 - Commit fdcf705 "feat(dd): 4 DD-Mode upgrade features" — 7 files, +462/-96 lines
 - All 4 features implemented and tested: compression level, skip verify, multi-device, pre-flash backup
 - Blocked on push: Git PAT expired, user needs to re-authenticate
+
+---
+Task ID: 4
+Agent: Super Z (main)
+Task: Delete pre-flash backup feature + fix CI build failure
+
+Work Log:
+- Fetched CI logs for run 26124834228: Kotlin compilation error at MainActivity.kt:245
+- Root cause: android.R.drawable.ic_menu_night does not exist in Android SDK
+- Deleted all backup feature code from 6 files (6 files, +8/-94 lines)
+- Fixed theme icon: ic_menu_night → ic_menu_view
+- Committed as 4f80cad, pushed to origin/main
+- CI run 26125205949: PASS (all jobs green)
+
+Stage Summary:
+- Commit 4f80cad "fix: remove pre-flash backup feature + fix ic_menu_night build error"
+- CI: https://github.com/hoshiyomiX/payload-toolkit-android/actions/runs/26125205949
+- Remaining features after cleanup: compression level, skip verify, multi-device target
