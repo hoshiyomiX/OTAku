@@ -227,12 +227,15 @@
                             android:text="@string/label_device"
                             style="@style/TextAppearance.PayloadToolkit.SectionTitle" />
 
-                        <TextView
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonAutoDetect"
+                            style="Widget.Material3.Button.TextButton"
                             android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="@string/hint_device_optional"
+                            android:layout_height="32dp"
+                            android:text="@string/button_auto_detect"
                             android:textSize="11sp"
-                            android:textColor="?attr/colorOnSurfaceVariant" />
+                            android:minWidth="0dp"
+                            android:paddingHorizontal="12dp" />
 
                     </LinearLayout>
 

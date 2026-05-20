@@ -27,6 +27,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import androidx.core.content.edit
+import android.text.SpannableString
+import android.text.style.ForegroundColorSpan
 
 /**
  * MainActivity — Payload Toolkit Android.
@@ -84,7 +86,7 @@ class MainActivity : AppCompatActivity() {
     ) { permissions ->
         val allGranted = permissions.entries.all { it.value }
         if (!allGranted) {
-            showLog("WARNING: Some permissions were denied. File access may be limited.\n")
+            showLog("Some permissions were denied. File access may be limited.\n", LogLevel.WARN)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
@@ -130,7 +132,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun initializePython() {
         lifecycleScope.launch {
-            showLog("Initializing Payload Toolkit...\n")
+            showLog("Initializing Payload Toolkit...\n", LogLevel.INFO)
             withContext(Dispatchers.IO) {
                 val result = PythonBridge.ensureInitialized(this@MainActivity)
                 withContext(Dispatchers.Main) {
@@ -148,24 +150,26 @@ class MainActivity : AppCompatActivity() {
                             } catch (_: Exception) { "unknown" }
                         }
                         val source = if (result.isBundled) "bundled" else "system"
-                        showLog("Python runtime: $pyVer ($source)\n")
+                        showLog("Python runtime: $pyVer ($source)\n", LogLevel.INFO)
 
                         lifecycleScope.launch {
                             val ptVer = withContext(Dispatchers.IO) {
                                 PayloadBridge.getPyzVersion()
                             }
-                            if (ptVer != null) showLog("payload_toolkit $ptVer loaded\n")
+                            if (ptVer != null) showLog("payload_toolkit $ptVer loaded\n", LogLevel.INFO)
 
                             // Run dependency health check
                             val depReport = withContext(Dispatchers.IO) {
                                 PythonBridge.checkDependencies()
                             }
-                            showLog(depReport + "\n")
+                            if (depReport.isNotBlank()) {
+                                showLog(depReport + "\n")
+                            }
                         }
 
                         showLog("\u2550".repeat(50) + "\n\n")
                     } else {
-                        showLog("WARNING: ${result.error}\n\n")
+                        showLog("Initialization failed: ${result.error}\n", LogLevel.ERROR)
                         // Show detailed diagnostics so the user can report them
                         if (result.diagnostics.isNotBlank()) {
                             showLog("[Diagnostics]\n")
@@ -271,6 +275,15 @@ class MainActivity : AppCompatActivity() {
 
         // Restore persisted value (or keep empty for default)
         editDevice?.setText(prefs.getString("device", ""))
+
+        // Auto-detect button: fill device field with Build.PRODUCT
+        findViewById<View>(R.id.buttonAutoDetect)?.setOnClickListener {
+            val deviceName = android.os.Build.PRODUCT
+            editDevice?.setText(deviceName)
+            prefs.edit { putString("device", deviceName) }
+            updateOutputPreview()
+            showLog("Auto-detected device: $deviceName\n", LogLevel.INFO)
+        }
     }
 
     private fun setupOutputField() {
@@ -332,7 +345,7 @@ class MainActivity : AppCompatActivity() {
             copyPendingRemovals()
             updateImageListUI()
             updateOutputPreview()
-            showLog("All images removed.\n")
+            showLog("All images removed.\n", LogLevel.INFO)
         }
 
         findViewById<View>(R.id.buttonExecute).setOnClickListener {
@@ -416,7 +429,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             findViewById<android.widget.EditText>(R.id.editTextOutput)
                 .setText(resolvedPath)
-            showLog("Output directory: $resolvedPath\n")
+            showLog("Output directory: $resolvedPath\n", LogLevel.INFO)
             updateOutputPreview()
         }
     }
@@ -460,7 +473,7 @@ class MainActivity : AppCompatActivity() {
 
                 // Skip if already added
                 if (imageFiles.any { it.first == partitionName }) {
-                    showLog("SKIP: $partitionName already added\n")
+                    showLog("$partitionName already added, skipping.\n", LogLevel.WARN)
                     continue
                 }
 
@@ -518,13 +531,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun onRepackClicked() {
         if (isExecuting) {
-            showLog("WARNING: Operation already in progress. Please wait.\n")
+            showLog("Operation already in progress. Please wait.\n", LogLevel.WARN)
             return
         }
 
         if (!PythonBridge.isReady()) {
-            showLog("ERROR: Python runtime not available.\n")
-            showLog("Restart the app to retry initialization.\n\n")
+            showLog("Python runtime not available.\n", LogLevel.ERROR)
+            showLog("Restart the app to retry initialization.\n\n", LogLevel.WARN)
             return
         }
 
@@ -533,19 +546,19 @@ class MainActivity : AppCompatActivity() {
             setUIExecuting(true)
 
             showLog("\n${"\u2550".repeat(50)}\n")
-            showLog("REPACK: Generate flashable OTA ZIP\n")
-            showLog("Time: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}\n")
+            showLog("Generating flashable OTA ZIP\n", LogLevel.INFO)
+            showLog("${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}\n")
             showLog("\u2500".repeat(50) + "\n\n")
 
             val result = executeRepack()
 
             showLog("\n" + "\u2550".repeat(50) + "\n")
             if (result.success) {
-                showLog("COMPLETED in ${result.durationMs}ms\n")
+                showLog("Completed in ${result.durationMs}ms\n", LogLevel.SUCCESS)
                 if (result.output.isNotBlank()) showLog(result.output)
             } else {
-                showLog("FAILED in ${result.durationMs}ms\n")
-                showLog("Error: ${result.error}\n")
+                showLog("Failed in ${result.durationMs}ms\n", LogLevel.ERROR)
+                showLog("Error: ${result.error}\n", LogLevel.ERROR)
                 if (result.output.isNotBlank()) showLog(result.output)
             }
             showLog("\u2550".repeat(50) + "\n\n")
@@ -574,14 +587,6 @@ class MainActivity : AppCompatActivity() {
         }
         val outPath = File(outDir, outputFileName).absolutePath
 
-        showLog("Partitions (${images.size}):\n")
-        images.entries.sortedBy { it.key }.forEach { (name, path) ->
-            val file = File(path)
-            showLog("  $name (${formatFileSize(file.length())})\n")
-        }
-        showLog("Compression: $selectedCompression\n")
-        showLog("Output: $outputFileName\n\n")
-
         // Read device metadata from UI field (empty = use default)
         val deviceInput = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
             ?.text?.toString()?.trim() ?: ""
@@ -592,7 +597,15 @@ class MainActivity : AppCompatActivity() {
         // Use non-empty user input, otherwise default applies
         val device = deviceInput.ifEmpty { "generic" }
 
-        showLog("Device: $device\n\n")
+        showLog("Partitions (${images.size}):\n", LogLevel.INFO)
+        images.entries.sortedBy { it.key }.forEach { (name, path) ->
+            val file = File(path)
+            showLog("  $name (${formatFileSize(file.length())})\n")
+        }
+        showLog("Compression: $selectedCompression\n", LogLevel.INFO)
+        showLog("Device: $device\n", LogLevel.INFO)
+        showLog("Output file: $outputFileName\n", LogLevel.INFO)
+        showLog("Output path: $outPath\n\n", LogLevel.INFO)
 
         return PayloadBridge.dd(
             images = images,
@@ -664,13 +677,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showLog(text: String) {
-        runOnUiThread {
-            val textView = findViewById<android.widget.TextView>(R.id.textViewLog)
-            textView?.append(text)
+    // ═══════════════════════════════════════════════════════════════
+    //  Log Level System
+    // ═══════════════════════════════════════════════════════════════
 
+    private enum class LogLevel(val tag: String, val colorRes: Int) {
+        INFO("INFO", R.color.log_info),
+        WARN("WARN", R.color.log_warning),
+        ERROR("ERR ", R.color.log_error),
+        SUCCESS("OK  ", R.color.log_success),
+        PLAIN("", 0),
+    }
+
+    private fun showLog(text: String, level: LogLevel = LogLevel.PLAIN) {
+        runOnUiThread {
+            val textView = findViewById<android.widget.TextView>(R.id.textViewLog) ?: return@runOnUiThread
+
+            if (level == LogLevel.PLAIN) {
+                textView.append(text)
+            } else {
+                val prefix = "[${level.tag}] "
+                val colored = SpannableString("$prefix$text")
+                try {
+                    colored.setSpan(
+                        ForegroundColorSpan(ContextCompat.getColor(this, level.colorRes)),
+                        0, prefix.length, SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                } catch (_: Exception) { /* fallback to plain */ }
+                textView.append(colored)
+            }
+
+            // Scroll to bottom WITHOUT triggering parent NestedScrollView
             val scrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
-            scrollView?.post { scrollView.fullScroll(View.FOCUS_DOWN) }
+            scrollView?.post {
+                val child = scrollView.getChildAt(0)
+                if (child != null) {
+                    val target = child.bottom - scrollView.height
+                    scrollView.scrollTo(0, if (target > 0) target else 0)
+                }
+            }
         }
     }
 
