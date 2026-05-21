@@ -51,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     private var selectedCompression: String = "gzip"
+    private var selectedCompressionLevel: Int = 0  // 0 = default (best)
     private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
     private var isExecuting = false
 
@@ -315,10 +316,60 @@ class MainActivity : AppCompatActivity() {
         spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 selectedCompression = PayloadBridge.COMPRESSION_ALGORITHMS[position]
+                updateCompressionLevelSpinner()
                 updateOutputPreview()
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+
+        // Initialize compression level spinner
+        setupCompressionLevelSpinner()
+    }
+
+    // Compression level ranges per algorithm
+    private val COMPRESSION_LEVELS: Map<String, Pair<Int, Int>> = mapOf(
+        "none" to Pair(0, 0),     // no levels for none
+        "gzip" to Pair(1, 9),
+        "bzip2" to Pair(1, 9),
+        "xz" to Pair(0, 9)
+    )
+
+    private fun setupCompressionLevelSpinner() {
+        val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompressionLevel)
+        updateCompressionLevelSpinner()
+
+        spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val items = getCurrentLevelItems()
+                selectedCompressionLevel = if (position < items.size) items[position] else 0
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+    }
+
+    private fun getCurrentLevelItems(): List<Int> {
+        val range = COMPRESSION_LEVELS[selectedCompression] ?: (0 to 0)
+        val (min, max) = range
+        return if (min == 0 && max == 0) {
+            listOf(0)  // "none" → just show "Default"
+        } else {
+            listOf(0) + (min..max).toList()  // 0 (default) + 1..9
+        }
+    }
+
+    private fun updateCompressionLevelSpinner() {
+        val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompressionLevel) ?: return
+        val items = getCurrentLevelItems()
+        val labels = items.map { if (it == 0) "Default (best)" else "$it" }
+        val adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            labels
+        ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+        spinner.adapter = adapter
+        // Reset selection to "Default"
+        spinner.setSelection(0)
+        selectedCompressionLevel = 0
     }
 
     private fun setupButtons() {
@@ -592,7 +643,7 @@ class MainActivity : AppCompatActivity() {
             val file = File(path)
             showLog("  $name (${formatFileSize(file.length())})\n")
         }
-        showLog("Compression: $selectedCompression\n", LogLevel.INFO)
+        showLog("Compression: $selectedCompression (level $selectedCompressionLevel)\n", LogLevel.INFO)
         showLog("Device: $device\n", LogLevel.INFO)
         showLog("Output file: $outputFileName\n", LogLevel.INFO)
         showLog("Output path: $outPath\n\n", LogLevel.INFO)
@@ -601,6 +652,7 @@ class MainActivity : AppCompatActivity() {
             images = images,
             device = device,
             compression = selectedCompression,
+            level = selectedCompressionLevel,
             outputPath = outPath
         )
     }
@@ -631,11 +683,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateOutputPreview() {
-        val textView = findViewById<android.widget.TextView>(R.id.textViewOutputPreview)
+        val textView = findViewById<android.widget.TextView>(R.id.textViewOutputPreview) ?: return
+
         if (imageFiles.isEmpty()) {
-            textView?.text = ""
+            // Show placeholder hint when no images added yet
+            textView.text = getString(R.string.hint_preview_no_images)
             return
         }
+
         // Use custom filename if set, otherwise auto-generate
         val customName = prefs.getString("pref_custom_filename", "")?.trim()
         val fileName = if (!customName.isNullOrEmpty()) {
@@ -645,7 +700,7 @@ class MainActivity : AppCompatActivity() {
             val images = imageFiles.toMap()
             PayloadBridge.buildOutputFileName(images, selectedCompression)
         }
-        textView?.text = fileName
+        textView.text = fileName
     }
 
     private fun copyPendingRemovals() {
