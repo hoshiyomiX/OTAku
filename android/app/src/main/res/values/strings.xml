@@ -14,9 +14,10 @@
     <string name="button_remove_all">Remove All</string>
 
     <!-- Compression section -->
-    <string name="label_compression">COMPRESSION LEVEL</string>
-    <string name="description_compression">Algorithm and compression level for partition data. Higher level = smaller size but slower build.</string>
-    <string name="label_compression_level">Algorithm:</string>
+    <string name="label_compression">COMPRESSION TYPE</string>
+    <string name="description_compression">Algorithm used to compress partition data inside the bundle. gzip offers the best balance of speed and size for TWRP/OrangeFox.</string>
+    <string name="label_compression_level">COMPRESSION LEVEL</string>
+    <string name="description_compression_level">Higher level = smaller size but slower build. Level 0 = default (best).</string>
 
     <!-- Device section -->
     <string name="label_device">DEVICE</string>
@@ -30,6 +31,7 @@
     <string name="hint_output_dir">File output path</string>
     <string name="hint_custom_filename">Custom filename (optional)</string>
     <string name="helper_custom_filename">Leave empty for auto-generated name</string>
+    <string name="hint_preview_no_images">Add partitions to see output filename</string>
     <string name="button_browse">Browse</string>
 
     <!-- Actions -->

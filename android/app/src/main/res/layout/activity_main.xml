@@ -179,7 +179,7 @@
                     android:orientation="vertical"
                     android:padding="16dp">
 
-                    <!-- Compression -->
+                    <!-- Compression Type -->
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -203,6 +203,41 @@
                         android:spinnerMode="dropdown"
                         android:paddingStart="4dp"
                         android:paddingEnd="8dp" />
+
+                    <!-- Compression Level -->
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_compression_level"
+                        android:layout_marginTop="10dp"
+                        style="@style/TextAppearance.PayloadToolkit.SectionTitle"
+                        android:layout_marginBottom="4dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/description_compression_level"
+                        android:textSize="12sp"
+                        android:textColor="?attr/colorOnSurfaceVariant"
+                        android:layout_marginBottom="8dp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <androidx.appcompat.widget.AppCompatSpinner
+                            android:id="@+id/spinnerCompressionLevel"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:background="?attr/selectableItemBackground"
+                            android:spinnerMode="dropdown"
+                            android:paddingStart="4dp"
+                            android:paddingEnd="8dp" />
+
+                    </LinearLayout>
 
                     <!-- Divider -->
                     <View
