@@ -117,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         setupOutputField()
         setupCustomFilenameField()
         setupThemeToggle()
+        updateOutputPreview()  // Show default filename preview on launch
 
         requestStoragePermissions()
         handleIncomingIntent(intent)
@@ -211,6 +212,11 @@ class MainActivity : AppCompatActivity() {
         menuInflater.inflate(R.menu.toolbar_menu, menu)
         updateThemeIcon(menu)
         return true
+    }
+
+    override fun onPrepareOptionsMenu(menu: android.view.Menu): Boolean {
+        updateThemeIcon(menu)
+        return super.onPrepareOptionsMenu(menu)
     }
 
     override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
@@ -685,20 +691,18 @@ class MainActivity : AppCompatActivity() {
     private fun updateOutputPreview() {
         val textView = findViewById<android.widget.TextView>(R.id.textViewOutputPreview) ?: return
 
-        if (imageFiles.isEmpty()) {
-            // Show placeholder hint when no images added yet
-            textView.text = getString(R.string.hint_preview_no_images)
-            return
-        }
-
         // Use custom filename if set, otherwise auto-generate
         val customName = prefs.getString("pref_custom_filename", "")?.trim()
         val fileName = if (!customName.isNullOrEmpty()) {
             // Ensure .zip extension
             if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
-        } else {
+        } else if (imageFiles.isNotEmpty()) {
             val images = imageFiles.toMap()
             PayloadBridge.buildOutputFileName(images, selectedCompression)
+        } else {
+            // Show default preview even when no images are added yet
+            val ts = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date())
+            "flashable_dd_v1_${ts}_${selectedCompression}.zip"
         }
         textView.text = fileName
     }

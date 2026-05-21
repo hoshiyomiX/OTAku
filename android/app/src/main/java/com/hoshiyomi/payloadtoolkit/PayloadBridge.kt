@@ -107,7 +107,7 @@ object PayloadBridge {
             args.add(compression)
         }
         if (level > 0) {
-            args.add("--level")
+            args.add("--compress-level")
             args.add(level.toString())
         }
         if (skipVerify) {

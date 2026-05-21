@@ -31,7 +31,6 @@
     <string name="hint_output_dir">File output path</string>
     <string name="hint_custom_filename">Custom filename (optional)</string>
     <string name="helper_custom_filename">Leave empty for auto-generated name</string>
-    <string name="hint_preview_no_images">Add partitions to see output filename</string>
     <string name="button_browse">Browse</string>
 
     <!-- Actions -->
