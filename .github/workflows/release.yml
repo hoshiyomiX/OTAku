@@ -31,10 +31,21 @@ jobs:
       - name: Build payload_toolkit.pyz
         run: python3 scripts/build_pyz.py
 
-      - name: Copy .pyz to Android assets
+      - name: Prepare Python runtime
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq dpkg zip patchelf 2>/dev/null || true
+          bash scripts/prepare_python_runtime.sh
+
+      - name: Copy assets to Android
         run: |
           mkdir -p android/app/src/main/assets
           cp dist/payload_toolkit.pyz android/app/src/main/assets/
+          cp dist/python-stdlib.zip android/app/src/main/assets/
+          cp dist/native-libs-manifest.txt android/app/src/main/assets/
+          echo "pyz: $(wc -c < dist/payload_toolkit.pyz) bytes"
+          echo "stdlib: $(wc -c < dist/python-stdlib.zip) bytes"
+          echo "manifest: $(wc -c < dist/native-libs-manifest.txt) bytes"
+          echo "jniLibs: $(ls android/app/src/main/jniLibs/arm64-v8a/*.so 2>/dev/null | wc -l) native libs"
 
       - name: Generate signing key for release
         run: |
