@@ -35,6 +35,7 @@ import kotlinx.coroutines.launch
 class PayloadService : Service() {
 
     companion object {
+        private const val TAG = "PayloadService"
         const val NOTIFICATION_ID = 1001
 
         // Intent action broadcast back to MainActivity
