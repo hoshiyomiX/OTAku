@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.BroadcastReceiver
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -21,6 +22,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
+import androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.hoshiyomi.payloadtoolkit.service.PayloadService
@@ -679,12 +681,31 @@ class MainActivity : AppCompatActivity() {
             putExtra("output_path", outputPath)
         }
 
-        try {
+        // Start service first — MUST happen before any receiver registration
+        // so we don't end up with a running service but no receiver on failure.
+        val serviceStarted = try {
             startForegroundService(serviceIntent)
-            registerRepackReceiver()
+            true
         } catch (e: Exception) {
-            // Foreground service failed — fall back to lifecycleScope
-            showLog("[WARN] Service start failed, using direct execution\n", LogLevel.WARN)
+            showLog("[WARN] Service start failed: ${e.message}\n", LogLevel.WARN)
+            false
+        }
+
+        if (serviceStarted) {
+            // Service is running — register receiver to get progress + result broadcasts.
+            // On API 34+ (targetSdk 34), RECEIVER_NOT_EXPORTED flag is mandatory.
+            try {
+                registerRepackReceiver()
+            } catch (e: Exception) {
+                showLog("[WARN] Receiver registration failed: ${e.message}\n", LogLevel.WARN)
+                showLog("[INFO] Service is running but progress updates unavailable.\n", LogLevel.WARN)
+                // Don't fall back — service already started, it will complete independently.
+                // Result won't be shown in UI but output file will still be generated.
+            }
+        } else {
+            // Service failed to start — fall back to direct lifecycleScope execution.
+            // No receiver needed since we handle result inline.
+            showLog("[INFO] Using direct execution fallback.\n", LogLevel.INFO)
             lifecycleScope.launch {
                 val result = executeRepackDirect(images, device, outputPath)
                 handleRepackResult(
@@ -731,7 +752,13 @@ class MainActivity : AppCompatActivity() {
             addAction(PayloadService.ACTION_REPACK_PROGRESS)
             addAction(PayloadService.ACTION_REPACK_RESULT)
         }
-        registerReceiver(repackReceiver, filter)
+        // RECEIVER_NOT_EXPORTED required on API 34+ (targetSdk 34)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(repackReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(repackReceiver, filter)
+        }
     }
 
     /**
@@ -861,7 +888,11 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // If service was running while we were in background, re-register receiver
         if (isExecuting) {
-            registerRepackReceiver()
+            try {
+                registerRepackReceiver()
+            } catch (e: Exception) {
+                showLog("[WARN] Failed to re-register receiver: ${e.message}\n", LogLevel.WARN)
+            }
         }
     }
 

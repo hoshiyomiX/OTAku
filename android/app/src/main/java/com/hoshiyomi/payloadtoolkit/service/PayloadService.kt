@@ -140,11 +140,10 @@ class PayloadService : Service() {
     private fun startForegroundNotification(text: String) {
         val notification = buildNotification(text)
         try {
-            if (Build.VERSION.SDK_INT >= 34) { // Android 14+: specialUse type available
+            if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             } else {
+                // Below API 34: no type required (FOREGROUND_SERVICE permission suffices)
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
