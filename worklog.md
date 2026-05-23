@@ -507,3 +507,27 @@ Stage Summary:
 - Notification uses existing channel from PayloadToolkitApp (CHANNEL_ID = "payload_toolkit_service")
 - Dedup: only updates notification when progress message changes (no spam)
 - All notification ops wrapped in try-catch (graceful degradation)
+---
+last_phase: DELIVER
+task: Verify "80% CPU allocation" feature status — already implemented
+complexity: Minimal
+task_type: Non-Coding (verification)
+files_modified: none
+next_step: IDLE - awaiting input
+
+Work Log:
+- Invoked Skill(command="stellar-frameworks") v5.11.0
+- SSV: merged origin/main (46 commits behind), resolved conflicts (skills submodule + stellar-frameworks files)
+- Merged as efb4e4d
+- Read all relevant source files: PayloadBridge.kt, PythonBridge.kt, MainActivity.kt, compression.py, dd.py
+- Verified 80% CPU allocation already implemented in 2 layers:
+  - Kotlin: Process.setThreadPriority(Process.myTid(), -10) in PayloadBridge.kt:68 (THREAD_PRIORITY_VIDEO)
+  - Python: os.nice(-5) in dd.py:655 (process priority boost for compression)
+- Feature was added in commits cc13605 + dd6eaa0 (from previous sessions)
+- No code changes needed
+
+Stage Summary:
+- Feature "80% CPU allocation" already exists in codebase — dual-layer approach
+- Kotlin side: thread priority -10 (THREAD_PRIORITY_VIDEO) for Dispatchers.IO worker
+- Python side: os.nice(-5) for subprocess compression priority
+- Safe: both wrapped in try-catch/except for graceful degradation
