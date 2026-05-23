@@ -645,8 +645,8 @@ class MainActivity : AppCompatActivity() {
         setUIExecuting(true)
         showLog("[INFO] Starting repack operation...\n", LogLevel.INFO)
         lifecycleScope.launch {
-            acquireRepackWakeLock()
             try {
+                acquireRepackWakeLock()
                 val result = executeRepack(images, deviceValue, outPath)
                 handleRepackResult(
                     success = result.success,
@@ -654,6 +654,9 @@ class MainActivity : AppCompatActivity() {
                     error = result.error,
                     durationMs = result.durationMs
                 )
+            } catch (e: Exception) {
+                showLog("[ERROR] Repack failed: ${e.message}\n", LogLevel.ERROR)
+                showLog("[INFO] Check logcat for details.\n", LogLevel.WARN)
             } finally {
                 releaseRepackWakeLock()
                 isExecuting = false
