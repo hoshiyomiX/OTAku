@@ -82,6 +82,17 @@ class MainActivity : AppCompatActivity() {
         // Track last progress message to avoid spamming the log with duplicates
         @Volatile private var lastProgressMessage: String = ""
 
+        // Track last progress percent to avoid logging on every chunk
+        @Volatile private var lastProgressPercent: Int = -1
+
+        // Persisted log text (survives Activity recreation)
+        @Volatile private var savedLogText: StringBuilder = StringBuilder()
+
+        // Per-partition split progress bar state
+        @Volatile private var partitionCount: Int = 0
+        @Volatile private var partitionProgress: IntArray = IntArray(0)
+        @Volatile private var currentPartitionIndex: Int = -1
+
         // Notification management (survives Activity recreation)
         private const val NOTIFICATION_ID = 1001
         @Volatile private var appContext: Context? = null
@@ -428,10 +439,11 @@ class MainActivity : AppCompatActivity() {
 
     // Compression level ranges per algorithm
     private val COMPRESSION_LEVELS: Map<String, Pair<Int, Int>> = mapOf(
-        "none" to Pair(0, 0),     // no levels for none
-        "gzip" to Pair(1, 9),
-        "bzip2" to Pair(1, 9),
-        "xz" to Pair(0, 6)   // 7-9 are impractically slow on mobile (30-60+ min for large partitions)
+        "none" to Pair(0, 0),     // no compression
+        "gzip" to Pair(1, 9),     // stdlib gzip: levels 1-9
+        "bzip2" to Pair(1, 9),    // stdlib bzip2: levels 1-9
+        "xz" to Pair(0, 6),       // stdlib lzma: 0-6 (7-9 impractically slow on mobile)
+        "brotli" to Pair(0, 11)   // brotli package: quality 0-11
     )
 
     private fun setupCompressionLevelSpinner() {
@@ -499,6 +511,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.buttonClearLog).setOnClickListener {
             findViewById<android.widget.TextView>(R.id.textViewLog).text = ""
+            savedLogText.clear()
         }
     }
 
@@ -732,10 +745,12 @@ class MainActivity : AppCompatActivity() {
         // Store state in companion object (survives Activity recreation)
         lastOutputPath = outPath
         lastProgressMessage = ""
+        lastProgressPercent = -1
         isRepacking = true
         isExecuting = true
         appContext = applicationContext
         setUIExecuting(true)
+        setupSplitProgressBar(images.size)
         showLog("[INFO] Starting repack operation...\n", LogLevel.INFO)
         showProgressNotification("Preparing repack...", 0)
 
@@ -763,25 +778,44 @@ class MainActivity : AppCompatActivity() {
                     outputPath = outPath,
                     onProgress = { progress ->
                         // Update notification (works even when Activity is destroyed)
-                        val msg = "${progress.message} (${progress.percent}%)"
+                        val msg = "${progress.message} — ${progress.percent}%"
                         if (msg != lastProgressMessage) {
                             lastProgressMessage = msg
-                            showProgressNotification("${progress.message} — ${progress.percent}%", progress.percent)
+                            showProgressNotification(msg, progress.percent)
                         }
 
-                        // Safe UI update — only when Activity is available
+                        // Update split progress bars (per-partition)
+                        if (partitionCount > 0 && progress.current >= 1) {
+                            val idx = (progress.current - 1).coerceIn(0, partitionCount - 1)
+                            partitionProgress[idx] = progress.percent
+                            currentPartitionIndex = idx
+                            // Mark all partitions before current as complete
+                            for (j in 0 until idx) {
+                                if (partitionProgress[j] < 100) partitionProgress[j] = 100
+                            }
+                        }
+
+                        // Only log when percent changes (not every chunk)
                         val current = activityRef?.get()
                         if (current != null && !current.isFinishing && !current.isDestroyed) {
                             current.runOnUiThread {
-                                // Update progress bar
-                                val bar = current.findViewById<com.google.android.material.progressindicator.LinearProgressIndicator>(R.id.progressBar)
-                                if (bar != null) {
-                                    bar.isIndeterminate = false
-                                    bar.progress = progress.percent
+                                // Update split progress bars
+                                val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                                if (container != null && container.childCount == partitionCount) {
+                                    for (i in 0 until partitionCount) {
+                                        val bar = container.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                                        if (bar != null) {
+                                            bar.isIndeterminate = false
+                                            bar.progress = partitionProgress[i]
+                                        }
+                                    }
                                 }
                             }
-                            // Log progress message
-                            current.showLog("[PROGRESS] $msg\n", LogLevel.PLAIN)
+                            // Log only when percent changes
+                            if (progress.percent != lastProgressPercent) {
+                                lastProgressPercent = progress.percent
+                                current.showLog("[PROGRESS] ${progress.message} — ${progress.percent}%\n", LogLevel.PLAIN)
+                            }
                         }
                     },
                     onOutputLine = { line ->
@@ -913,11 +947,22 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         activityRef = WeakReference(this)
+        // Restore persisted log text on Activity recreation
+        if (savedLogText.isNotEmpty()) {
+            val textView = findViewById<android.widget.TextView>(R.id.textViewLog)
+            if (textView != null && textView.text.isEmpty()) {
+                textView.text = savedLogText.toString()
+            }
+        }
         // Reconnect UI if repack is still running (e.g. returned from background)
         if (isRepacking) {
             isExecuting = true
             setUIExecuting(true)
             showLog("[INFO] Repack in progress (returned from background)\n", LogLevel.INFO)
+            // Re-create split progress bars with current state
+            if (partitionCount > 0) {
+                setupSplitProgressBar(partitionCount)
+            }
         } else {
             // Repack finished while app was in background — cancel notification
             cancelRepackNotification()
@@ -933,18 +978,40 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun setupSplitProgressBar(count: Int) {
+        partitionCount = count
+        partitionProgress = IntArray(count)
+        currentPartitionIndex = -1
+        val container = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer) ?: return
+        container.removeAllViews()
+        container.visibility = View.VISIBLE
+        for (i in 0 until count) {
+            val bar = com.google.android.material.progressindicator.LinearProgressIndicator(this).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = if (i < count - 1) dpToPx(4) else 0
+                }
+                isIndeterminate = false
+                progress = 0
+                trackColor = ContextCompat.getColor(this@MainActivity, R.color.md_theme_light_surfaceVariant)
+            }
+            container.addView(bar)
+        }
+    }
+
+    private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).toInt()
+
     private fun setUIExecuting(executing: Boolean) {
         runOnUiThread {
             findViewById<View>(R.id.buttonExecute)?.isEnabled = !executing
-            val progressBar = findViewById<com.google.android.material.progressindicator.LinearProgressIndicator>(R.id.progressBar)
+            val container = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
             if (executing) {
-                progressBar?.visibility = View.VISIBLE
-                progressBar?.isIndeterminate = true  // Start indeterminate, will switch to determinate on progress
-                progressBar?.progress = 0
+                container?.visibility = View.VISIBLE
             } else {
-                progressBar?.visibility = View.GONE
-                progressBar?.isIndeterminate = true
-                progressBar?.progress = 0
+                container?.visibility = View.GONE
+                container?.removeAllViews()
+                partitionCount = 0
+                partitionProgress = IntArray(0)
+                currentPartitionIndex = -1
             }
             findViewById<View>(R.id.buttonAddImages)?.isEnabled = !executing
             findViewById<View>(R.id.buttonRemoveAll)?.isEnabled = !executing
@@ -964,6 +1031,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showLog(text: String, level: LogLevel = LogLevel.PLAIN) {
+        // Persist to companion object (survives Activity recreation)
+        savedLogText.append(text)
+
         runOnUiThread {
             val textView = findViewById<android.widget.TextView>(R.id.textViewLog) ?: return@runOnUiThread
 
@@ -987,7 +1057,7 @@ class MainActivity : AppCompatActivity() {
                 val child = scrollView.getChildAt(0)
                 if (child != null) {
                     val target = child.bottom - scrollView.height
-                    scrollView.scrollTo(0, if (target > 0) target else 0)
+                    scrollView.smoothScrollTo(0, if (target > 0) target else 0)
                 }
             }
         }

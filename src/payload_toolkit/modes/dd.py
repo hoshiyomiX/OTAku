@@ -718,7 +718,7 @@ def run(*args, **kwargs):
                     on_progress=lambda done, tot, _n=name, _i=i, _np=total_steps: _report_progress(
                         1 + _i + done / max(tot, 1),
                         _np,
-                        f"Compressing {_n} {done / max(tot, 1) * 100:.0f}%",
+                        f"Compressing {_n}",
                         percent=int(done / max(tot, 1) * 100)
                     )
                 )
