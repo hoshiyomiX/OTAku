@@ -1,16 +1,17 @@
 package com.hoshiyomi.payloadtoolkit
 
+import android.Manifest
 import android.content.ClipData
-import android.provider.DocumentsContract
 import android.content.ClipboardManager
 import android.content.Context
-import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.view.View
 import android.widget.ArrayAdapter
@@ -24,11 +25,17 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import java.lang.ref.WeakReference
 import java.io.File
 import java.io.FileOutputStream
 import androidx.core.content.edit
 import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
+import android.app.NotificationManager
+import android.app.PendingIntent
+import androidx.core.app.NotificationCompat
 
 /**
  * MainActivity — Payload Toolkit Android.
@@ -54,6 +61,93 @@ class MainActivity : AppCompatActivity() {
     private var selectedCompressionLevel: Int = 0  // 0 = default (best)
     private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
     private var isExecuting = false
+    companion object {
+        // Application-scoped coroutine scope for long-running repack operations.
+        // Survives Activity destruction when the user minimizes the app.
+        private val repackScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+        // Whether a repack is currently running (survives Activity recreation)
+        @Volatile var isRepacking = false
+            private set
+
+        // Weak reference to the current Activity for safe UI updates from coroutine
+        @Volatile private var activityRef: WeakReference<MainActivity>? = null
+
+        // WakeLock (survives Activity recreation)
+        @Volatile private var wakeLock: PowerManager.WakeLock? = null
+
+        // Latest output path (survives Activity recreation)
+        @Volatile private var lastOutputPath: String = ""
+
+        // Track last progress message to avoid spamming the log with duplicates
+        @Volatile private var lastProgressMessage: String = ""
+
+        // Notification management (survives Activity recreation)
+        private const val NOTIFICATION_ID = 1001
+        @Volatile private var appContext: Context? = null
+
+        /** Show ongoing progress notification with determinate progress bar. */
+        fun showProgressNotification(message: String, percent: Int) {
+            val ctx = appContext ?: return
+            try {
+                val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val intent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                } ?: return
+                val pi = PendingIntent.getActivity(
+                    ctx, 0, intent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                val notification = NotificationCompat.Builder(ctx, PayloadToolkitApp.CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_media_play)
+                    .setContentTitle("Payload Toolkit")
+                    .setContentText(message)
+                    .setProgress(100, percent.coerceIn(0, 100), percent == 0)
+                    .setOngoing(true)
+                    .setSilent(true)
+                    .setContentIntent(pi)
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .build()
+                nm.notify(NOTIFICATION_ID, notification)
+            } catch (_: Exception) { /* notification is non-critical */ }
+        }
+
+        /** Show completion/failure notification (auto-dismissable). */
+        fun showCompletionNotification(success: Boolean, message: String) {
+            val ctx = appContext ?: return
+            try {
+                val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val intent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                } ?: return
+                val pi = PendingIntent.getActivity(
+                    ctx, 0, intent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                val notification = NotificationCompat.Builder(ctx, PayloadToolkitApp.CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_media_play)
+                    .setContentTitle(if (success) "Repack Completed" else "Repack Failed")
+                    .setContentText(message)
+                    .setOngoing(false)
+                    .setAutoCancel(true)
+                    .setContentIntent(pi)
+                    .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                    .build()
+                nm.notify(NOTIFICATION_ID, notification)
+            } catch (_: Exception) { /* notification is non-critical */ }
+        }
+
+        /** Cancel the repack notification. */
+        fun cancelRepackNotification() {
+            try {
+                appContext?.let {
+                    (it.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                        .cancel(NOTIFICATION_ID)
+                }
+            } catch (_: Exception) { /* notification is non-critical */ }
+            appContext = null
+        }
+    }
 
     // App-internal directories
     private lateinit var inputDir: File
@@ -117,7 +211,7 @@ class MainActivity : AppCompatActivity() {
         setupOutputField()
         setupCustomFilenameField()
         setupThemeToggle()
-        updateOutputPreview()  // Show default filename preview on launch
+        updateOutputPreview()  // Show default filename preview immediately
 
         requestStoragePermissions()
         handleIncomingIntent(intent)
@@ -337,7 +431,7 @@ class MainActivity : AppCompatActivity() {
         "none" to Pair(0, 0),     // no levels for none
         "gzip" to Pair(1, 9),
         "bzip2" to Pair(1, 9),
-        "xz" to Pair(0, 9)
+        "xz" to Pair(0, 6)   // 7-9 are impractically slow on mobile (30-60+ min for large partitions)
     )
 
     private fun setupCompressionLevelSpinner() {
@@ -576,8 +670,21 @@ class MainActivity : AppCompatActivity() {
     //  Execution — Repack to OTA ZIP
     // ═══════════════════════════════════════════════════════════════
 
-    private fun onRepackClicked() {
+    override fun onBackPressed() {
         if (isExecuting) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Repack in progress")
+                .setMessage("The repack operation is running in the background " +
+                    "and will continue even if you leave the app.")
+                .setPositiveButton("Stay", null)
+                .show()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    private fun onRepackClicked() {
+        if (isRepacking) {
             showLog("Operation already in progress. Please wait.\n", LogLevel.WARN)
             return
         }
@@ -588,44 +695,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        lifecycleScope.launch {
-            isExecuting = true
-            setUIExecuting(true)
-
-            showLog("\n${"\u2550".repeat(50)}\n")
-            showLog("Generating flashable OTA ZIP\n", LogLevel.INFO)
-            showLog("${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}\n")
-            showLog("\u2500".repeat(50) + "\n\n")
-
-            val result = executeRepack()
-
-            showLog("\n" + "\u2550".repeat(50) + "\n")
-            if (result.success) {
-                showLog("Completed in ${result.durationMs}ms\n", LogLevel.SUCCESS)
-                if (result.output.isNotBlank()) showLog(result.output)
-            } else {
-                showLog("Failed in ${result.durationMs}ms\n", LogLevel.ERROR)
-                showLog("Error: ${result.error}\n", LogLevel.ERROR)
-                if (result.output.isNotBlank()) showLog(result.output)
-            }
-            showLog("\u2550".repeat(50) + "\n\n")
-
-            isExecuting = false
-            setUIExecuting(false)
-        }
-    }
-
-    private suspend fun executeRepack(): PayloadResult {
-        if (imageFiles.isEmpty()) {
-            return PayloadResult.error("No partition images added. Use 'Add Images' button.")
-        }
+        // Collect parameters for repack
+        val images = imageFiles.toMap()
+        val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
+            ?.text?.toString()?.trim() ?: ""
+        prefs.edit { putString("device", device) }
+        val deviceValue = device.ifEmpty { "generic" }
 
         val outDir = outputDirPath ?: outputDir.absolutePath
         File(outDir).mkdirs()
 
-        val images = imageFiles.toMap()
-
-        // Use custom filename if set, otherwise auto-generate
         val customName = prefs.getString("pref_custom_filename", "")?.trim()
         val outputFileName = if (!customName.isNullOrEmpty()) {
             if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
@@ -634,15 +713,11 @@ class MainActivity : AppCompatActivity() {
         }
         val outPath = File(outDir, outputFileName).absolutePath
 
-        // Read device metadata from UI field (empty = use default)
-        val deviceInput = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-            ?.text?.toString()?.trim() ?: ""
-
-        // Persist value for next launch
-        prefs.edit { putString("device", deviceInput) }
-
-        // Use non-empty user input, otherwise default applies
-        val device = deviceInput.ifEmpty { "generic" }
+        // Log header
+        showLog("\n${"\u2550".repeat(50)}\n")
+        showLog("Generating flashable OTA ZIP\n", LogLevel.INFO)
+        showLog("${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}\n")
+        showLog("\u2500".repeat(50) + "\n\n")
 
         showLog("Partitions (${images.size}):\n", LogLevel.INFO)
         images.entries.sortedBy { it.key }.forEach { (name, path) ->
@@ -650,20 +725,133 @@ class MainActivity : AppCompatActivity() {
             showLog("  $name (${formatFileSize(file.length())})\n")
         }
         showLog("Compression: $selectedCompression (level $selectedCompressionLevel)\n", LogLevel.INFO)
-        showLog("Device: $device\n", LogLevel.INFO)
+        showLog("Device: $deviceValue\n", LogLevel.INFO)
         showLog("Output file: $outputFileName\n", LogLevel.INFO)
         showLog("Output path: $outPath\n\n", LogLevel.INFO)
 
-        return PayloadBridge.dd(
-            images = images,
-            device = device,
-            compression = selectedCompression,
-            level = selectedCompressionLevel,
-            outputPath = outPath
-        )
+        // Store state in companion object (survives Activity recreation)
+        lastOutputPath = outPath
+        lastProgressMessage = ""
+        isRepacking = true
+        isExecuting = true
+        appContext = applicationContext
+        setUIExecuting(true)
+        showLog("[INFO] Starting repack operation...\n", LogLevel.INFO)
+        showProgressNotification("Preparing repack...", 0)
+
+        // Execute in application-scoped scope (survives Activity destruction)
+        repackScope.launch {
+            try {
+                // Acquire WakeLock with application context
+                val act = activityRef?.get()
+                if (act != null) {
+                    val pm = act.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    wakeLock = pm.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "PayloadToolkit::RepackWakeLock"
+                    ).apply {
+                        setReferenceCounted(false)
+                        acquire(30 * 60 * 1000L)
+                    }
+                }
+
+                val result = PayloadBridge.dd(
+                    images = images,
+                    device = deviceValue,
+                    compression = selectedCompression,
+                    level = selectedCompressionLevel,
+                    outputPath = outPath,
+                    onProgress = { progress ->
+                        // Update notification (works even when Activity is destroyed)
+                        val msg = "${progress.message} (${progress.percent}%)"
+                        if (msg != lastProgressMessage) {
+                            lastProgressMessage = msg
+                            showProgressNotification("${progress.message} — ${progress.percent}%", progress.percent)
+                        }
+
+                        // Safe UI update — only when Activity is available
+                        val current = activityRef?.get()
+                        if (current != null && !current.isFinishing && !current.isDestroyed) {
+                            current.runOnUiThread {
+                                // Update progress bar
+                                val bar = current.findViewById<com.google.android.material.progressindicator.LinearProgressIndicator>(R.id.progressBar)
+                                if (bar != null) {
+                                    bar.isIndeterminate = false
+                                    bar.progress = progress.percent
+                                }
+                            }
+                            // Log progress message
+                            current.showLog("[PROGRESS] $msg\n", LogLevel.PLAIN)
+                        }
+                    },
+                    onOutputLine = { line ->
+                        // Stream Python stdout to log in real-time
+                        val current = activityRef?.get()
+                        if (current != null && !current.isFinishing && !current.isDestroyed) {
+                            current.showLog("$line\n")
+                        }
+                    }
+                )
+
+                // Handle result on current Activity instance
+                val current = activityRef?.get()
+                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    current.handleRepackResult(
+                        success = result.success,
+                        output = result.output,
+                        error = result.error,
+                        durationMs = result.durationMs
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                showCompletionNotification(false, "Repack cancelled")
+                throw e  // Don't swallow coroutine cancellation
+            } catch (e: Exception) {
+                val current = activityRef?.get()
+                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    current.showLog("[ERROR] Repack failed: ${e.message}\n", LogLevel.ERROR)
+                    current.showLog("[INFO] Check logcat for details.\n", LogLevel.WARN)
+                }
+                showCompletionNotification(false, "${e.message}")
+            } finally {
+                // Release WakeLock
+                try { wakeLock?.release() } catch (_: Exception) {}
+                wakeLock = null
+                isRepacking = false
+
+                val current = activityRef?.get()
+                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    current.isExecuting = false
+                    current.setUIExecuting(false)
+                }
+            }
+        }
     }
 
-    // ═══════════════════════════════════════════════════════════════
+    /**
+     * Handle repack result — updates UI with success/failure status.
+     */
+    private fun handleRepackResult(success: Boolean, output: String, error: String?, durationMs: Long) {
+        isExecuting = false
+        setUIExecuting(false)
+
+        showLog("\n" + "\u2550".repeat(50) + "\n")
+        if (success) {
+            val duration = if (durationMs < 60000) "${durationMs / 1000}s"
+                else "${durationMs / 60000}m ${durationMs % 60000}"
+            showLog("Completed in ${durationMs}ms\n", LogLevel.SUCCESS)
+            showLog("Output: $lastOutputPath\n", LogLevel.INFO)
+            showCompletionNotification(true, "Completed in $duration")
+        } else {
+            showLog("Failed in ${durationMs}ms\n", LogLevel.ERROR)
+            showLog("Error: $error\n", LogLevel.ERROR)
+            showCompletionNotification(false, error ?: "Unknown error")
+        }
+        showLog("\u2550".repeat(50) + "\n\n")
+        showLog("[INFO] Repack finished\n", LogLevel.INFO)
+    }
+
+    // ═══════════════════════════════════════════════════
     //  UI Updates
     // ═══════════════════════════════════════════════════════════════
 
@@ -689,7 +877,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateOutputPreview() {
-        val textView = findViewById<android.widget.TextView>(R.id.textViewOutputPreview) ?: return
 
         // Use custom filename if set, otherwise auto-generate
         val customName = prefs.getString("pref_custom_filename", "")?.trim()
@@ -704,7 +891,10 @@ class MainActivity : AppCompatActivity() {
             val ts = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date())
             "flashable_dd_v1_${ts}_${selectedCompression}.zip"
         }
-        textView.text = fileName
+
+        // Show preview as helper text below the custom filename input field
+        val layout = findViewById<com.google.android.material.textfield.TextInputLayout>(R.id.layoutCustomFilename)
+        layout?.helperText = fileName
     }
 
     private fun copyPendingRemovals() {
@@ -716,11 +906,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    //  Lifecycle
+    // ═══════════════════════════════════════════════════════════════
+
+    override fun onResume() {
+        super.onResume()
+        activityRef = WeakReference(this)
+        // Reconnect UI if repack is still running (e.g. returned from background)
+        if (isRepacking) {
+            isExecuting = true
+            setUIExecuting(true)
+            showLog("[INFO] Repack in progress (returned from background)\n", LogLevel.INFO)
+        } else {
+            // Repack finished while app was in background — cancel notification
+            cancelRepackNotification()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        activityRef = null
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+    }
+
     private fun setUIExecuting(executing: Boolean) {
         runOnUiThread {
             findViewById<View>(R.id.buttonExecute)?.isEnabled = !executing
-            findViewById<View>(R.id.progressBar)?.visibility =
-                if (executing) View.VISIBLE else View.GONE
+            val progressBar = findViewById<com.google.android.material.progressindicator.LinearProgressIndicator>(R.id.progressBar)
+            if (executing) {
+                progressBar?.visibility = View.VISIBLE
+                progressBar?.isIndeterminate = true  // Start indeterminate, will switch to determinate on progress
+                progressBar?.progress = 0
+            } else {
+                progressBar?.visibility = View.GONE
+                progressBar?.isIndeterminate = true
+                progressBar?.progress = 0
+            }
             findViewById<View>(R.id.buttonAddImages)?.isEnabled = !executing
             findViewById<View>(R.id.buttonRemoveAll)?.isEnabled = !executing
         }
