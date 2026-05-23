@@ -37,6 +37,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- WakeLock — prevent CPU sleep during heavy compression I/O -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- Notification permission (Android 13+ for foreground service notification) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
