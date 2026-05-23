@@ -420,15 +420,13 @@
                 app:icon="@android:drawable/ic_media_play"
                 app:iconGravity="textStart" />
 
-            <com.google.android.material.progressindicator.LinearProgressIndicator
-                android:id="@+id/progressBar"
+            <LinearLayout
+                android:id="@+id/progressBarContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:indeterminate="true"
+                android:orientation="horizontal"
                 android:visibility="gone"
-                android:layout_marginBottom="10dp"
-                app:indicatorColor="?attr/colorPrimary"
-                app:trackColor="?attr/colorSurfaceVariant" />
+                android:layout_marginBottom="10dp" />
 
             <!-- ═══════════════════════════════════════════════════ -->
             <!-- Log Output (terminal-style)                         -->
@@ -475,8 +473,7 @@
                             android:text="@string/button_copy_log"
                             android:textSize="12sp"
                             android:minWidth="0dp"
-                            android:paddingHorizontal="12dp"
-                            android:textColor="@color/log_info" />
+                            android:paddingHorizontal="12dp" />
 
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/buttonClearLog"
@@ -486,8 +483,7 @@
                             android:text="@string/button_clear_log"
                             android:textSize="12sp"
                             android:minWidth="0dp"
-                            android:paddingHorizontal="12dp"
-                            android:textColor="@color/log_info" />
+                            android:paddingHorizontal="12dp" />
 
                     </LinearLayout>
 
@@ -503,6 +499,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="300dp"
                         android:fillViewport="true"
+                        android:nestedScrollingEnabled="false"
                         android:scrollbars="vertical"
                         android:fadeScrollbars="true"
                         android:scrollbarThumbVertical="@android:color/darker_gray"
