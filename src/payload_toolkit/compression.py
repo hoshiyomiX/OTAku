@@ -55,6 +55,33 @@ ALG_AUTO = "auto"
 ALL_ALGORITHMS = (ALG_NONE, ALG_BZIP2, ALG_GZIP, ALG_XZ, ALG_BROTLI)
 
 
+
+# Default compression levels per algorithm
+# Sources:
+#   gzip  — Python docs: compresslevel 1-9, default 9; we use 6 (balanced)
+#   bzip2 — Python docs: compresslevel 1-9, default 9
+#   xz    — Python docs: preset 0-9, default 6
+#   brotli — brotli docs: quality 0-11, default 11; we use 6 (balanced)
+DEFAULT_LEVELS = {
+    ALG_NONE: None,   # No compression
+    ALG_BZIP2: 9,
+    ALG_GZIP: 6,      # Balanced (Python default is 9)
+    ALG_XZ: 6,        # Matches Python default
+    ALG_BROTLI: 6,    # Balanced (brotli default is 11)
+}
+
+# Valid level ranges per algorithm (min, max)
+# Sources: Python stdlib docs + brotli docs
+LEVEL_RANGES = {
+    ALG_NONE: (0, 0),
+    ALG_BZIP2: (1, 9),
+    ALG_GZIP: (1, 9),
+    ALG_XZ: (0, 9),
+    ALG_BROTLI: (0, 11),
+}
+
+
+
 def compress(data, algorithm="gzip", level=None):
     """Compress *data* with the specified algorithm.
 
@@ -65,11 +92,9 @@ def compress(data, algorithm="gzip", level=None):
     algorithm : str
         One of "none", "bzip2", "gzip", "xz", "brotli".
     level : int or None
-        Compression level. None uses the algorithm default (best compression).
-        - gzip: 1-9 (default 9)
-        - bzip2: 1-9 (default 9)
-        - xz: 0-9 (default 9, uses PRESET_EXTREME)
-        - brotli: 0-11 (default 11)
+        Compression level. If None, uses the algorithm's balanced default.
+        Ranges: gzip 1-9, bzip2 1-9, xz 0-9, brotli 0-11.
+        Defaults: gzip=6, bzip2=9, xz=6, brotli=6.
 
     Returns
     -------
@@ -91,15 +116,20 @@ def compress(data, algorithm="gzip", level=None):
     if alg == ALG_NONE:
         return data
 
-    # Use level if provided, otherwise use algorithm defaults (best compression)
+    # Resolve level: explicit > DEFAULT_LEVELS dict (single source of truth)
+    if level is None:
+        level = DEFAULT_LEVELS.get(alg)
+
+    # Clamp to valid range (handles any int, including 0 for xz/brotli)
+    rng = LEVEL_RANGES.get(alg, (0, 0))
+    level = max(rng[0], min(rng[1], int(level)))
+
     if alg == ALG_BZIP2:
-        lvl = level if level is not None else 9
-        return bz2.compress(data, compresslevel=max(1, min(9, int(lvl))))
+        return bz2.compress(data, compresslevel=level)
 
     if alg == ALG_GZIP:
-        lvl = level if level is not None else 9
         buf = io.BytesIO()
-        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=max(1, min(9, int(lvl))), mtime=0) as f:
+        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=level, mtime=0) as f:
             f.write(data)
         return buf.getvalue()
 
@@ -110,9 +140,7 @@ def compress(data, algorithm="gzip", level=None):
                 "On Termux: pkg install python  (includes liblzma).  "
                 "On Linux: apt install liblzma-dev && reinstall Python."
             )
-        lvl = level if level is not None else 9
-        preset = max(0, min(9, int(lvl))) | _lzma_mod.PRESET_EXTREME
-        return _lzma_mod.compress(data, format=_lzma_mod.FORMAT_XZ, preset=preset)
+        return _lzma_mod.compress(data, format=_lzma_mod.FORMAT_XZ, preset=level)
 
     if alg == ALG_BROTLI:
         if not _HAS_BROTLI:
@@ -120,8 +148,133 @@ def compress(data, algorithm="gzip", level=None):
                 "brotli compression requires the 'brotli' Python package.  "
                 "Install it via pip:  pip install brotli"
             )
-        lvl = level if level is not None else 11
-        return _brotli_mod.compress(data, quality=max(0, min(11, int(lvl))))
+        return _brotli_mod.compress(data, quality=level)
+
+    raise ValueError(f"Unknown compression algorithm: {algorithm!r}")
+
+
+def compress_streaming(data, algorithm="gzip", level=None, chunk_size=1 << 20,
+                       on_progress=None):
+    """Compress *data* in chunks, reporting progress via *on_progress* callback.
+
+    Unlike :func:`compress` which is a single blocking call, this function feeds
+    data to an incremental compressor in chunks of *chunk_size* bytes, calling
+    *on_progress(bytes_compressed, total_bytes)* after each chunk.
+
+    This is critical on Android where compressing 2+ GB partitions with xz-9
+    can take 30-60+ minutes — without progress, the user sees a frozen UI.
+
+    Parameters
+    ----------
+    data : bytes
+        Raw data to compress.
+    algorithm : str
+        Compression algorithm name (same as :func:`compress`).
+    level : int or None
+        Compression level (same as :func:`compress`).
+    chunk_size : int
+        Size of each chunk fed to the compressor (default 1 MB).
+    on_progress : callable(bytes_done, total_bytes) or None
+        Progress callback invoked after each chunk.
+
+    Returns
+    -------
+    bytes
+        Compressed data.
+    """
+    if not isinstance(data, bytes):
+        data = bytes(data)
+
+    alg = _normalise(algorithm)
+    total = len(data)
+
+    if alg == ALG_NONE:
+        # Still report progress for consistency (fast path)
+        if on_progress:
+            on_progress(total, total)
+        return data
+
+    # Resolve level
+    if level is None:
+        level = DEFAULT_LEVELS.get(alg)
+    rng = LEVEL_RANGES.get(alg, (0, 0))
+    level = max(rng[0], min(rng[1], int(level)))
+
+    done = 0
+    result_parts = []
+
+    def _progress():
+        if on_progress:
+            on_progress(done, total)
+
+    # -- Bzip2: incremental via bz2.BZ2Compressor --
+    if alg == ALG_BZIP2:
+        comp = bz2.BZ2Compressor(compresslevel=level)
+        offset = 0
+        while offset < total:
+            chunk = data[offset:offset + chunk_size]
+            result_parts.append(comp.compress(chunk))
+            offset += len(chunk)
+            done = offset
+            _progress()
+        result_parts.append(comp.flush())
+        return b"".join(result_parts)
+
+    # -- Gzip: incremental via gzip.GzipFile writing chunk by chunk --
+    if alg == ALG_GZIP:
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=level,
+                           mtime=0) as f:
+            offset = 0
+            while offset < total:
+                f.write(data[offset:offset + chunk_size])
+                offset += chunk_size
+                done = min(offset, total)
+                _progress()
+        return buf.getvalue()
+
+    # -- XZ: incremental via lzma.LZMACompressor --
+    if alg == ALG_XZ:
+        if not _HAS_LZMA:
+            raise RuntimeError(
+                "XZ compression requires the 'lzma' module (liblzma).  "
+                "On Termux: pkg install python  (includes liblzma).  "
+                "On Linux: apt install liblzma-dev && reinstall Python."
+            )
+        # Use larger chunks for xz since LZMACompressor has internal
+        # dictionary sizes; 4 MB chunks give better throughput.
+        xz_chunk = max(chunk_size, 4 << 20)
+        comp = _lzma_mod.LZMACompressor(
+            format=_lzma_mod.FORMAT_XZ,
+            preset=level,
+        )
+        offset = 0
+        while offset < total:
+            chunk = data[offset:offset + xz_chunk]
+            result_parts.append(comp.compress(chunk))
+            offset += len(chunk)
+            done = offset
+            _progress()
+        result_parts.append(comp.flush())
+        return b"".join(result_parts)
+
+    # -- Brotli: incremental via brotli.Compressor --
+    if alg == ALG_BROTLI:
+        if not _HAS_BROTLI:
+            raise RuntimeError(
+                "brotli compression requires the 'brotli' Python package.  "
+                "Install it via pip:  pip install brotli"
+            )
+        comp = _brotli_mod.Compressor(quality=level)
+        offset = 0
+        while offset < total:
+            chunk = data[offset:offset + chunk_size]
+            result_parts.append(comp.process(chunk))
+            offset += len(chunk)
+            done = offset
+            _progress()
+        result_parts.append(comp.finish())
+        return b"".join(result_parts)
 
     raise ValueError(f"Unknown compression algorithm: {algorithm!r}")
 

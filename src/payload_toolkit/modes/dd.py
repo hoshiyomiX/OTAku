@@ -21,7 +21,7 @@ ddbundle format:
     META-INF/com/google/android/updater-script — Stub ("#Mtk client script")
 
 Compress IDs (stored in header + used by flasher):
-    0 = none,  1 = gzip,  2 = bzip2,  3 = xz
+    0 = none,  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli
 """
 
 import hashlib
@@ -33,7 +33,7 @@ import time
 import zipfile
 
 from .. import _report_progress
-from ..compression import compress
+from ..compression import compress, compress_streaming, DEFAULT_LEVELS
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -48,6 +48,7 @@ COMPRESS_ID_MAP = {
     "gzip": 1,
     "bzip2": 2,
     "xz": 3,
+    "brotli": 4,
 }
 
 # ddbundle numeric ID -> shell decompressor command
@@ -56,6 +57,7 @@ COMPRESS_CMD_MAP = {
     1: "gzip",
     2: "bzip2",
     3: "xz",
+    4: "brotli",
 }
 
 # ddbundle numeric ID -> file extension for temp files
@@ -64,6 +66,7 @@ COMPRESS_EXT_MAP = {
     1: ".gz",
     2: ".bz2",
     3: ".xz",
+    4: ".br",
 }
 
 # Slant ASCII art for "Renuked v3" — TWRP console banner
@@ -310,7 +313,7 @@ check_decompressor() {{
 if ! check_decompressor "{decomp_cmd}"; then
     ui_print "! ABORT: {decomp_cmd} not found."
     ui_print "! Available tools:"
-    which gzip bzip2 xz 2>/dev/null || echo "  (none found)"
+    which gzip bzip2 xz brotli 2>/dev/null || echo "  (none found)"
     busybox --list 2>/dev/null | head -5
     ui_print "! Rebuild bundle with a available compressor."
     ui_print "! Recommended: --compress gzip"
@@ -584,12 +587,13 @@ def run(*args, **kwargs):
 
     Parameters (via dict or kwargs)
     -------------------------------
-    images       : dict  — {partition_name: image_file_path, ...}
-    compress     : str   — Compression algorithm (default "gzip")
-    output_path  : str   — Path for output .zip file
-    device       : str   — Device codename (optional, comma-separated for multi)
-    level        : int   — Compression level (0=default/best, 1-9 for gzip/bzip2/xz)
-    skip_verify  : str   — "true"/"false" — skip post-flash hash verification
+    images          : dict  — {partition_name: image_file_path, ...}
+    compress        : str   — Compression algorithm (default "gzip")
+    compress_level  : int   — Compression level (None=default per algorithm: gzip=6, bzip2=9, xz=6)
+    output_path     : str   — Path for output .zip file
+    device          : str   — Device codename(s), comma-separated (optional)
+    skip_verify     : bool  — Skip post-flash SHA-256 verification (default False)
+    backup          : bool  — Dump current partitions before flashing (default False)
 
     Returns
     -------
@@ -604,7 +608,9 @@ def run(*args, **kwargs):
     compress_alg = str(params.get("compress", "gzip")).lower()
     output_path = str(params.get("output_path", "flashable_dd.zip"))
     device = str(params.get("device", ""))
-    level = int(params.get("level", 0)) or None  # 0 means use default
+    # Accept both 'level' and 'compress_level' keys (CLI sends 'compress_level')
+    level_raw = params.get("compress_level") or params.get("level")
+    level = int(level_raw) if level_raw is not None else 6  # default to 6 (balanced)
     skip_verify = str(params.get("skip_verify", "false")).lower() in ("true", "1", "yes")
 
     lines = []
@@ -639,6 +645,16 @@ def run(*args, **kwargs):
         compress_name = compress_alg
         decomp_cmd = COMPRESS_CMD_MAP[compress_id]
         num_parts = len(images)
+        total_steps = 2 + num_parts  # Step 1 (compression) + Step 2 (scripts) + Step 3 (ZIP)
+
+        # Boost process priority for CPU-intensive compression.
+        # os.nice(-5) lowers the nice value (higher priority) without requiring root.
+        # On Android, regular apps can typically nice down to -5 or -10.
+        try:
+            import os as _os
+            _os.nice(-5)
+        except Exception:
+            pass  # Non-critical: some Android builds restrict nice()
 
         lines.append("\u2550" * 50)
         lines.append("REPACK: Generate flashable OTA ZIP")
@@ -649,7 +665,7 @@ def run(*args, **kwargs):
         for name, path in images.items():
             size = os.path.getsize(path)
             lines.append(f"  {name} ({_human_size(size)})")
-        level_display = f" (level {level})" if level else ""
+        level_display = f" (level {level})"
         lines.append(f"Compression: {compress_name}{level_display}")
         if skip_verify:
             lines.append("Verification: disabled")
@@ -659,9 +675,14 @@ def run(*args, **kwargs):
         lines.append("")
 
         # ── Step 1: Build ddbundle.bin ──
-        _report_progress(1, 3, "Building ddbundle.bin")
+        _report_progress(1, total_steps, "Building ddbundle.bin", percent=0)
         lines.append(f"[Step 1] Building ddbundle.bin...")
         lines.append(f"  Compressing {num_parts} partition(s) with {compress_name}{level_display}...")
+
+        # Warn about high compression levels on mobile
+        if compress_alg in ("xz", "brotli") and level and level >= 7:
+            lines.append(f"  [!] WARNING: {compress_name} level {level} is very slow on Android.")
+            lines.append(f"      Level 6 is recommended for a good size/speed balance.")
 
         header = _build_header(compress_id, num_parts)
 
@@ -669,16 +690,39 @@ def run(*args, **kwargs):
         data_blobs = bytearray()
 
         for i, (name, path) in enumerate(images.items()):
-            _report_progress(1 + i, 2 + num_parts, f"Compressing {name}")
+            _report_progress(1 + i, total_steps, f"Compressing {name}", percent=0)
 
-            raw_data = open(path, "rb").read()
+            # Stream-read file: hash while reading to avoid double pass
+            sha = hashlib.sha256()
+            raw_chunks = []
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 20)  # 1 MB chunks
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+                    raw_chunks.append(chunk)
+            raw_data = b"".join(raw_chunks)
+            del raw_chunks  # free chunk list
             unc_size = len(raw_data)
-            hash_hex = hashlib.sha256(raw_data).hexdigest()
+            hash_hex = sha.hexdigest()
 
             if compress_id == 0:
                 comp_data = raw_data
             else:
-                comp_data = compress(raw_data, compress_alg, level=level)
+                # Use streaming compression for progress reporting.
+                # Without this, xz-9 on large partitions shows no progress
+                # for 30-60+ minutes on mobile.
+                comp_data = compress_streaming(
+                    raw_data, compress_alg, level=level,
+                    on_progress=lambda done, tot, _n=name, _i=i, _np=total_steps: _report_progress(
+                        1 + _i + done / max(tot, 1),
+                        _np,
+                        f"Compressing {_n} {done / max(tot, 1) * 100:.0f}%",
+                        percent=int(done / max(tot, 1) * 100)
+                    )
+                )
+            del raw_data  # free raw data after compression
 
             comp_size = len(comp_data)
             data_offset = len(data_blobs)
@@ -692,6 +736,7 @@ def run(*args, **kwargs):
             })
 
             data_blobs.extend(comp_data)
+            del comp_data  # free compressed data after appending
 
             aligned = _align_up(len(data_blobs), ALIGN)
             if aligned > len(data_blobs):
@@ -700,13 +745,13 @@ def run(*args, **kwargs):
             lines.append(f"    {name}: {unc_size:,} -> {comp_size:,} bytes "
                          f"({100 * comp_size / max(unc_size, 1):.1f}%)")
 
-        bundle_data = header + bytes(data_blobs)
+        bundle_data = header + data_blobs
         bundle_size = len(bundle_data)
         lines.append(f"  Bundle size: {_human_size(bundle_size)}")
         lines.append("")
 
         # ── Step 2: Build flasher scripts ──
-        _report_progress(1 + num_parts, 2 + num_parts, "Building flasher scripts")
+        _report_progress(1 + num_parts, total_steps, "Building flasher scripts", percent=0)
         lines.append("[Step 2] Building flasher scripts...")
 
         update_binary = _build_update_script(
@@ -724,16 +769,42 @@ def run(*args, **kwargs):
         lines.append("")
 
         # ── Step 3: Write output ZIP ──
-        _report_progress(2 + num_parts, 2 + num_parts, "Writing output ZIP")
+        _report_progress(2 + num_parts, total_steps, "Writing output ZIP", percent=0)
         lines.append(f"[Step 3] Writing {os.path.basename(output_path)}...")
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_STORED) as zf:
-            zf.writestr("ddbundle.bin", bundle_data)
-            zf.writestr("flash_info.txt", flash_info)
-            zf.writestr("META-INF/com/google/android/update-binary", update_binary)
-            zf.writestr("META-INF/com/google/android/updater-script", updater_script)
+        # Write ddbundle.bin to temp file to avoid double-copying in memory
+        # Defensive: ensure TMPDIR exists (Android has no /tmp by default).
+        # We set TMPDIR in pybridge.c / PythonBridge.kt, but create it here
+        # as a safety net. Avoid tempfile.gettempdir() — it also throws
+        # FileNotFoundError if TMPDIR is missing; compute from env directly.
+        _tmpdir = os.environ.get("TMPDIR", "")
+        if _tmpdir and not os.path.isdir(_tmpdir):
+            try:
+                os.makedirs(_tmpdir, exist_ok=True)
+            except OSError:
+                pass
+        if not _tmpdir or not os.path.isdir(_tmpdir):
+            # Last resort: use output directory as temp dir
+            _tmpdir = os.path.dirname(os.path.abspath(output_path))
+            os.makedirs(_tmpdir, exist_ok=True)
+        bundle_tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False, dir=_tmpdir)
+        try:
+            bundle_tmp.write(bundle_data)
+            bundle_tmp.close()
+            del bundle_data  # free memory before ZIP creation
+
+            with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_STORED) as zf:
+                zf.write(bundle_tmp.name, "ddbundle.bin")
+                zf.writestr("flash_info.txt", flash_info)
+                zf.writestr("META-INF/com/google/android/update-binary", update_binary)
+                zf.writestr("META-INF/com/google/android/updater-script", updater_script)
+        finally:
+            try:
+                os.unlink(bundle_tmp.name)
+            except OSError:
+                pass
 
         zip_size = os.path.getsize(output_path)
         lines.append(f"  ZIP size: {_human_size(zip_size)}")
