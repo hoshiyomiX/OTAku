@@ -391,3 +391,41 @@ Stage Summary:
 - UI reconnects automatically when user returns to app
 - WakeLock held via application context, released in coroutine finally block
 - Net: +102/-71 lines (cleaner, more resilient architecture)
+
+---
+last_phase: DELIVER
+task: Add file size monitor to confirm repack is alive while running
+complexity: Simple
+task_type: Coding
+files_modified: MainActivity.kt
+traceability: N/A
+pivot: NONE
+scope_drift: NONE
+next_step: IDLE - awaiting input
+
+Work Log:
+- Invoked Stellar Frameworks v5.11.0, followed protocol (SSV PASS)
+- Continuation: user wants APK to monitor file size changes during repack
+- Analyzed repack flow: Python writes ddbundle.bin (Step 1) then final ZIP (Step 3)
+- Identified monitoring points:
+  - ddbundle.bin in output directory (intermediate, grows during compression)
+  - Final output ZIP at lastOutputPath (written in Step 3)
+- Implementation:
+  - Added companion object fields: monitorJob (Job?), lastSeenSize (Long)
+  - startFileMonitor(outputPath): launches polling coroutine in repackScope
+    - Polls every 2 seconds via delay(2000)
+    - Checks output ZIP first, falls back to ddbundle.bin if ZIP doesn't exist yet
+    - Only logs when size CHANGED (file is growing = process alive)
+    - Uses WeakReference for safe UI updates
+  - stopFileMonitor(): cancels job, resets state
+  - Called startFileMonitor() before repack execution
+  - Called stopFileMonitor() in finally block after repack completes
+  - Enhanced onResume: immediately shows current output file size on return
+- Committed as 3a386ac, pushed (67d6fbf..3a386ac)
+- Net change: +69 lines (1 file)
+
+Stage Summary:
+- Commit 3a386ac "feat: file size monitor — poll output size to confirm repack is alive"
+- User sees "Compressing: XXX MB" during Step 1 and "Writing: XXX MB" during Step 3
+- Only logs on size CHANGE — no spam when file is static
+- Instant feedback on resume: shows current file size immediately
