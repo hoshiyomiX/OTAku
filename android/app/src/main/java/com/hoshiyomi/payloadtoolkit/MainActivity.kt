@@ -451,13 +451,24 @@ class MainActivity : AppCompatActivity() {
         setupCompressionLevelSpinner()
     }
 
-    // Compression level ranges per algorithm
+    // Compression level ranges per algorithm (matches Python LEVEL_RANGES)
+    // Default level per algorithm (matches Python DEFAULT_LEVELS):
+    //   gzip=6, bzip2=9, xz=6, brotli=6
     private val COMPRESSION_LEVELS: Map<String, Pair<Int, Int>> = mapOf(
         "none" to Pair(0, 0),     // no compression
-        "gzip" to Pair(1, 9),     // stdlib gzip: levels 1-9
-        "bzip2" to Pair(1, 9),    // stdlib bzip2: levels 1-9
-        "xz" to Pair(0, 6),       // stdlib lzma: 0-6 (7-9 impractically slow on mobile)
-        "brotli" to Pair(0, 11)   // brotli package: quality 0-11
+        "gzip" to Pair(1, 9),     // stdlib gzip: levels 1-9, default 6
+        "bzip2" to Pair(1, 9),    // stdlib bzip2: levels 1-9, default 9
+        "xz" to Pair(0, 9),       // stdlib lzma: levels 0-9, default 6
+        "brotli" to Pair(0, 11)   // brotli: quality 0-11, default 6
+    )
+
+    // Default compression level per algorithm (single source of truth for UI labels)
+    private val DEFAULT_COMPRESSION_LEVELS: Map<String, Int> = mapOf(
+        "none" to 0,
+        "gzip" to 6,
+        "bzip2" to 9,
+        "xz" to 6,
+        "brotli" to 6
     )
 
     private fun setupCompressionLevelSpinner() {
@@ -486,7 +497,8 @@ class MainActivity : AppCompatActivity() {
     private fun updateCompressionLevelSpinner() {
         val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompressionLevel) ?: return
         val items = getCurrentLevelItems()
-        val labels = items.map { if (it == 0) "Default (best)" else "$it" }
+        val defaultLevel = DEFAULT_COMPRESSION_LEVELS[selectedCompression] ?: 0
+        val labels = items.map { if (it == 0) "Default ($defaultLevel)" else "$it" }
         val adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
