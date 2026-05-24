@@ -525,7 +525,6 @@ print(fix_needed_all('$so_file', '$JNI_DIR'))")
         "$ZIG_BIN" cc \
             -target "$ZIG_TARGET" \
             -shared -fPIC \
-            -Wl,--no-undefined \
             -I"$JAVA_INCLUDE" \
             -I"$JAVA_INCLUDE_LINUX" \
             -O2 \
