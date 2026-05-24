@@ -50,8 +50,8 @@ PACKAGES=(
 
 # -- Architecture configurations: termux_arch|android_abi|zig_target -------
 ARCH_CONFIGS=(
-    "aarch64|arm64-v8a|aarch64-linux-musl"
-    "arm|armeabi-v7a|arm-linux-musleabihf"
+    "aarch64|arm64-v8a|aarch64-linux-android"
+    "arm|armeabi-v7a|arm-linux-androideabi"
 )
 
 mkdir -p "$DIST_DIR"
