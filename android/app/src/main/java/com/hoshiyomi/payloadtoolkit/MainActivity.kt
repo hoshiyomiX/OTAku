@@ -88,6 +88,11 @@ class MainActivity : AppCompatActivity() {
         // Persisted log text (survives Activity recreation)
         @Volatile private var savedLogText: StringBuilder = StringBuilder()
 
+        // Heartbeat: last time a progress update was received (epoch millis)
+        @Volatile private var lastProgressTime: Long = 0L
+        // Threshold: if no progress for this long (ms), process is assumed dead
+        private const val DEAD_PROCESS_THRESHOLD_MS = 120_000L  // 2 minutes
+
         // Per-partition split progress bar state
         @Volatile private var partitionCount: Int = 0
         @Volatile private var partitionProgress: IntArray = IntArray(0)
@@ -685,7 +690,7 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     override fun onBackPressed() {
-        if (isExecuting) {
+        if (isRepacking) {
             MaterialAlertDialogBuilder(this)
                 .setTitle("Repack in progress")
                 .setMessage("The repack operation is running in the background " +
@@ -747,6 +752,7 @@ class MainActivity : AppCompatActivity() {
         lastOutputPath = outPath
         lastProgressMessage = ""
         lastProgressPercent = -1
+        lastProgressTime = System.currentTimeMillis()  // Start heartbeat
         isRepacking = true
         isExecuting = true
         appContext = applicationContext
@@ -769,7 +775,7 @@ class MainActivity : AppCompatActivity() {
                         "PayloadToolkit::RepackWakeLock"
                     ).apply {
                         setReferenceCounted(false)
-                        acquire(30 * 60 * 1000L)
+                        acquire(3 * 60 * 60 * 1000L)  // 3 hours — enough for any compression job
                     }
                 }
 
@@ -780,6 +786,9 @@ class MainActivity : AppCompatActivity() {
                     level = selectedCompressionLevel,
                     outputPath = outPath,
                     onProgress = { progress ->
+                        // Update heartbeat timestamp (survives Activity recreation)
+                        lastProgressTime = System.currentTimeMillis()
+
                         // Update notification (works even when Activity is destroyed)
                         val msg = "${progress.message} — ${progress.percent}%"
                         if (msg != lastProgressMessage) {
@@ -991,27 +1000,39 @@ class MainActivity : AppCompatActivity() {
                 textView.text = savedLogText.toString()
             }
         }
-        // Reconnect UI if repack is still running (e.g. returned from background)
+        // Check if repack process is actually alive
         if (isRepacking) {
-            isExecuting = true
-            setUIExecuting(true)
-            showLog("[INFO] Repack in progress (returned from background)\n", LogLevel.INFO)
-            // Re-create split progress bars with current state
-            if (partitionCount > 0) {
-                val savedProgress = partitionProgress.copyOf()
-                val savedIndex = currentPartitionIndex
-                setupSplitProgressBar(partitionNames)
-                // Restore progress state so bars reflect current position immediately
-                savedProgress.copyInto(partitionProgress)
-                currentPartitionIndex = savedIndex
-                val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                    ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
-                if (barRow != null) {
-                    for (i in 0 until partitionCount) {
-                        val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                        if (bar != null) {
-                            bar.isIndeterminate = false
-                            bar.progress = partitionProgress[i]
+            val elapsed = System.currentTimeMillis() - lastProgressTime
+            if (lastProgressTime > 0 && elapsed > DEAD_PROCESS_THRESHOLD_MS) {
+                // No progress for > 2 minutes — process was killed by OS
+                isRepacking = false
+                isExecuting = false
+                cancelRepackNotification()
+                showLog("\n[ERROR] Repack was interrupted — process killed (idle timeout).\n", LogLevel.ERROR)
+                showLog("The device may have entered Doze mode and killed the background process.\n", LogLevel.WARN)
+                showLog("Tip: go to Settings → Apps → Payload Toolkit → Battery → Unrestricted.\n", LogLevel.INFO)
+                setUIExecuting(false)
+            } else {
+                // Process still alive — reconnect UI
+                isExecuting = true
+                setUIExecuting(true)
+                showLog("[INFO] Repack in progress (returned from background)\n", LogLevel.INFO)
+                // Re-create split progress bars with current state
+                if (partitionCount > 0) {
+                    val savedProgress = partitionProgress.copyOf()
+                    val savedIndex = currentPartitionIndex
+                    setupSplitProgressBar(partitionNames)
+                    savedProgress.copyInto(partitionProgress)
+                    currentPartitionIndex = savedIndex
+                    val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                        ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
+                    if (barRow != null) {
+                        for (i in 0 until partitionCount) {
+                            val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                            if (bar != null) {
+                                bar.isIndeterminate = false
+                                bar.progress = partitionProgress[i]
+                            }
                         }
                     }
                 }
