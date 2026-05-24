@@ -865,7 +865,7 @@ object PythonBridge {
              * stripped version numbers causing mismatch (libcrypto.so.3
              * was resolved to libcrypto.so which doesn't exist).
              */
-            val preloadLibs = nativeDir.listFiles()
+            val preloadLibs = File(nativeLibDir!!).listFiles()
                 ?.filter { it.name.endsWith(".so") || it.name.contains(".so.") }
                 ?.filter { !it.name.contains("pybridge") }
                 ?.sortedBy { it.name }
