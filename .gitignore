@@ -173,3 +173,17 @@ $RECYCLE.BIN/
 
 # CI temporary files
 ci-keystore.jks
+
+# ═══════════════════════════════════════════════════════════════
+#  Build caches / toolchains (local only, never commit)
+# ═══════════════════════════════════════════════════════════════
+.zig-cache/
+
+# ═══════════════════════════════════════════════════════════════
+#  z.ai platform (local development only, never commit)
+# ═══════════════════════════════════════════════════════════════
+skills/
+memory/
+worklog.md
+.zscripts/
+download/
