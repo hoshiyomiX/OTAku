@@ -116,7 +116,7 @@ fi
 JAVA_INCLUDE="${JAVA_HOME:-/usr/lib/jvm/default-java}/include"
 JAVA_INCLUDE_LINUX="$JAVA_INCLUDE/linux"
 if [ ! -f "$JAVA_INCLUDE/jni.h" ]; then
-    for jdk in "$JAVA_HOME" /usr/lib/jvm/java-17-openjdk-amd64 /usr/lib/jvm/default-java; do
+    for jdk in "${JAVA_HOME:-}" /usr/lib/jvm/java-17-openjdk-amd64 /usr/lib/jvm/default-java; do
         if [ -f "$jdk/include/jni.h" ]; then
             JAVA_INCLUDE="$jdk/include"
             JAVA_INCLUDE_LINUX="$jdk/include/linux"
