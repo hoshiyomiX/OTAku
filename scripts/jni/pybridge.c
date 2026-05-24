@@ -10,8 +10,13 @@
  *   All dependencies (libandroid-support.so, libz.so, etc.) are found there.
  *   No LD_PRELOAD, no LD_LIBRARY_PATH hacks, no linker warnings.
  *
- * Build: zig cc -target aarch64-linux-android26 -shared -fPIC -I$JAVA_HOME/include
+ * Build: zig cc -target aarch64-linux-android -shared -fPIC -I$JAVA_HOME/include
  *        -I$JAVA_HOME/include/linux -o libpybridge.so pybridge.c
+ *
+ * IMPORTANT: Must use Android target (aarch64-linux-android), NOT musl
+ * (aarch64-linux-musl).  The musl target statically links its own dlopen()
+ * implementation, but Android's bionic linker expects dlopen in libdl.so.
+ * Using musl causes: "cannot locate symbol dlopen referenced by libpybridge.so"
  *
  * No NDK, no Python headers, no libpython linking at compile time.
  * Everything resolved at runtime via dlopen/dlsym.

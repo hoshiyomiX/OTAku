@@ -409,9 +409,17 @@ object PythonBridge {
             for (line in content.lines()) {
                 if (line.startsWith("#") || line.isBlank()) continue
                 val parts = line.split(" | ")
-                if (parts.size >= 2 && parts[0].trim() == BUNDLED_PYTHON_LIB) {
-                    if (parts.size >= 3 && parts[2].trim().isNotEmpty()) {
-                        result = parts[2].trim().split(",")
+                /*
+                 * 4-col: abi | filename | size | deps  →  filename at [1], deps at [3]
+                 * 3-col: filename | size | deps          →  filename at [0], deps at [2]
+                 */
+                val is4col = parts.size >= 4 && parts[0].trim() in setOf(
+                    "arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+                val nameIdx = if (is4col) 1 else 0
+                val depsIdx = if (is4col) 3 else 2
+                if (parts.size > nameIdx && parts[nameIdx].trim() == BUNDLED_PYTHON_LIB) {
+                    if (parts.size > depsIdx && parts[depsIdx].trim().isNotEmpty()) {
+                        result = parts[depsIdx].trim().split(",")
                             .map { it.trim() }
                             .filter { it.isNotEmpty() }
                     }
@@ -539,11 +547,23 @@ object PythonBridge {
             for (line in content.lines()) {
                 if (line.startsWith("#") || line.isBlank()) continue
                 val parts = line.split(" | ")
-                if (parts.size >= 2) {
-                    val name = parts[0].trim()
-                    val size = parts[1].trim().toLongOrNull() ?: continue
-                    map[name] = size
-                }
+                /*
+                 * Manifest format (since multi-arch refactor):
+                 *   abi | filename | size_bytes | DT_NEEDED
+                 * Legacy format (single-arch):
+                 *   filename | size_bytes | DT_NEEDED
+                 *
+                 * Detect format: if parts[0] is a known ABI name, use 4-col;
+                 * otherwise fall back to 3-col (legacy).
+                 */
+                val (name, sizeStr) = if (parts.size >= 4 && parts[0].trim() in setOf(
+                        "arm64-v8a", "armeabi-v7a", "x86_64", "x86")) {
+                    Pair(parts[1].trim(), parts[2].trim())
+                } else if (parts.size >= 2) {
+                    Pair(parts[0].trim(), parts[1].trim())
+                } else continue
+                val size = sizeStr.toLongOrNull() ?: continue
+                map[name] = size
             }
             diag("[Manifest] Parsed ${map.size} entries")
             map
@@ -867,7 +887,13 @@ object PythonBridge {
              */
             val preloadLibs = File(nativeLibDir!!).listFiles()
                 ?.filter { it.name.endsWith(".so") || it.name.contains(".so.") }
-                ?.filter { !it.name.contains("pybridge") }
+                /*
+                 * Exclude:
+                 *   - libpybridge.so  (JNI bridge, not needed for exec mode)
+                 *   - libpython3exec.so (the binary being executed — preloading it
+                 *     causes a linker conflict on Android bionic)
+                 */
+                ?.filter { !it.name.contains("pybridge") && it.name != BUNDLED_PYTHON_LIB }
                 ?.sortedBy { it.name }
                 ?: emptyList()
             if (preloadLibs.isNotEmpty()) {
