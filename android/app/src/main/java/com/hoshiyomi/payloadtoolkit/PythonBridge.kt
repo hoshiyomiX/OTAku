@@ -45,6 +45,41 @@ object PythonBridge {
         "libc.so", "libm.so", "libdl.so", "libpthread.so", "librt.so"
     )
 
+    /** Known Android ABI names used in native-libs-manifest.txt 4-col format. */
+    private val KNOWN_ABI_SET = setOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+
+    /**
+     * Map Android's nativeLibraryDir path suffix to manifest ABI name.
+     * nativeLibraryDir typically ends with .../lib/arm64 or .../lib/arm.
+     */
+    private val DIR_SUFFIX_TO_ABI = mapOf(
+        "arm64" to "arm64-v8a",
+        "arm" to "armeabi-v7a",
+        "x86_64" to "x86_64",
+        "x86" to "x86"
+    )
+
+    /**
+     * Detect the device's ABI from nativeLibraryDir path.
+     *
+     * Android's nativeLibraryDir format:
+     *   /data/app/.../com.hoshiyomi.payloadtoolkit-.../lib/arm64
+     *
+     * Returns the ABI string (e.g. "arm64-v8a") or null if detection fails.
+     */
+    private fun detectDeviceAbi(nativeLibraryDir: String): String? {
+        // Try matching the last path component (e.g. "arm64" from "/lib/arm64")
+        val lastSegment = nativeLibraryDir.substringAfterLast("/")
+        DIR_SUFFIX_TO_ABI[lastSegment]?.let { return it }
+
+        // Try matching common path patterns
+        for ((suffix, abi) in DIR_SUFFIX_TO_ABI) {
+            if (nativeLibraryDir.endsWith("/lib/$suffix")) return abi
+        }
+
+        return null
+    }
+
     /**
      * System Python paths — fallback when bundled runtime is unavailable.
      */
@@ -172,9 +207,13 @@ object PythonBridge {
                 diag("libpython3.13.so size: ${formatBytes(pythonSo.length())}")
             }
 
+            // -- Detect device ABI for manifest filtering --
+            val deviceAbi = nativeLibDir?.let { detectDeviceAbi(it) }
+            diag("[ABI] Device ABI: ${deviceAbi ?: "unknown (path: $nativeLibDir)"}")
+
             // -- Manifest cross-check --
             if (soFiles != null && soFiles.isNotEmpty()) {
-                val manifestIssues = crossCheckManifest(ctx, nativeLibDir!!, soFiles)
+                val manifestIssues = crossCheckManifest(ctx, nativeLibDir!!, soFiles, deviceAbi)
                 if (manifestIssues.isNotEmpty()) {
                     diag("--- MANIFEST MISMATCH ---")
                     manifestIssues.forEach { diag("  $it") }
@@ -185,7 +224,7 @@ object PythonBridge {
             }
 
             // Extract Python executable's direct dependencies for exec fallback
-            execDirectDeps = parseExecDeps(ctx)
+            execDirectDeps = parseExecDeps(ctx, deviceAbi)
             if (execDirectDeps.isNotEmpty()) {
                 diag("[Manifest] $BUNDLED_PYTHON_LIB direct deps: ${execDirectDeps.joinToString(", ")}")
             } else {
@@ -401,7 +440,7 @@ object PythonBridge {
         }
     }
 
-    private fun parseExecDeps(context: Context): List<String> {
+    private fun parseExecDeps(context: Context, deviceAbi: String? = null): List<String> {
         return try {
             val content = context.assets.open(MANIFEST_ASSET_NAME)
                 .bufferedReader().readText()
@@ -413,8 +452,9 @@ object PythonBridge {
                  * 4-col: abi | filename | size | deps  →  filename at [1], deps at [3]
                  * 3-col: filename | size | deps          →  filename at [0], deps at [2]
                  */
-                val is4col = parts.size >= 4 && parts[0].trim() in setOf(
-                    "arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+                val is4col = parts.size >= 4 && parts[0].trim() in KNOWN_ABI_SET
+                // Skip entries from other ABIs when device ABI is known
+                if (is4col && deviceAbi != null && parts[0].trim() != deviceAbi) continue
                 val nameIdx = if (is4col) 1 else 0
                 val depsIdx = if (is4col) 3 else 2
                 if (parts.size > nameIdx && parts[nameIdx].trim() == BUNDLED_PYTHON_LIB) {
@@ -515,10 +555,11 @@ object PythonBridge {
     private fun crossCheckManifest(
         context: Context,
         nativeLibDir: String,
-        deviceSoFiles: List<File>
+        deviceSoFiles: List<File>,
+        deviceAbi: String? = null
     ): List<String> {
         val issues = mutableListOf<String>()
-        val manifestMap = parseManifest(context) ?: run {
+        val manifestMap = parseManifest(context, deviceAbi) ?: run {
             issues.add("WARNING: manifest asset not found — cannot cross-check")
             return issues
         }
@@ -539,11 +580,22 @@ object PythonBridge {
         return issues
     }
 
-    private fun parseManifest(context: Context): Map<String, Long>? {
+    /**
+     * Parse native-libs-manifest.txt, optionally filtered by device ABI.
+     *
+     * In multi-arch manifests (4-col format), entries from other ABIs are
+     * skipped. This prevents false SIZE MISMATCH (arm32 size overwriting
+     * arm64 size in flat Map) and false MISSING (arm32 extension modules
+     * not present on arm64 device).
+     *
+     * @param deviceAbi Device ABI (e.g. "arm64-v8a"), or null to include all.
+     */
+    private fun parseManifest(context: Context, deviceAbi: String? = null): Map<String, Long>? {
         return try {
             val content = context.assets.open(MANIFEST_ASSET_NAME)
                 .bufferedReader().readText()
             val map = mutableMapOf<String, Long>()
+            var skippedOtherAbi = 0
             for (line in content.lines()) {
                 if (line.startsWith("#") || line.isBlank()) continue
                 val parts = line.split(" | ")
@@ -556,8 +608,13 @@ object PythonBridge {
                  * Detect format: if parts[0] is a known ABI name, use 4-col;
                  * otherwise fall back to 3-col (legacy).
                  */
-                val (name, sizeStr) = if (parts.size >= 4 && parts[0].trim() in setOf(
-                        "arm64-v8a", "armeabi-v7a", "x86_64", "x86")) {
+                val is4col = parts.size >= 4 && parts[0].trim() in KNOWN_ABI_SET
+                // Skip entries from other ABIs when device ABI is known
+                if (is4col && deviceAbi != null && parts[0].trim() != deviceAbi) {
+                    skippedOtherAbi++
+                    continue
+                }
+                val (name, sizeStr) = if (is4col) {
                     Pair(parts[1].trim(), parts[2].trim())
                 } else if (parts.size >= 2) {
                     Pair(parts[0].trim(), parts[1].trim())
@@ -565,7 +622,9 @@ object PythonBridge {
                 val size = sizeStr.toLongOrNull() ?: continue
                 map[name] = size
             }
-            diag("[Manifest] Parsed ${map.size} entries")
+            diag("[Manifest] Parsed ${map.size} entries" +
+                (if (skippedOtherAbi > 0) " (skipped $skippedOtherAbi from other ABI)" else "") +
+                (if (deviceAbi != null) " for ABI: $deviceAbi" else ""))
             map
         } catch (e: Exception) {
             diag("[Manifest] Could not read: ${e.message}")
@@ -673,13 +732,28 @@ object PythonBridge {
         }
 
         return try {
-            val pb = ProcessBuilder(py, pyz, "--version")
+            /*
+             * Smoke test: run Python directly to verify the interpreter works.
+             * Tests Python itself (not the .pyz app) so we can see real errors.
+             * Uses -c "import sys; print(sys.version)" instead of passing the .pyz.
+             */
+            val pb = ProcessBuilder(py, "-c", "import sys; print(sys.version)")
                 .redirectErrorStream(true)
             configureEnvironment(pb)
-            Log.d(TAG, "Verify (exec): $py $pyz --version")
+            Log.d(TAG, "Verify (exec): $py -c 'import sys; print(sys.version)'")
             val process = pb.start()
             val rawOutput = process.inputStream.bufferedReader().readText().trim()
             val exitCode = process.waitFor()
+            /*
+             * Log raw output BEFORE filtering for full diagnostics.
+             * filterLinkerWarnings removes CANNOT LINK lines which may be
+             * the only output when exec fails.
+             */
+            if (rawOutput.isNotEmpty()) {
+                diag("[exec raw] ${rawOutput.take(1000)}")
+            } else {
+                diag("[exec raw] (empty — process produced no output)")
+            }
             val output = filterLinkerWarnings(rawOutput)
             if (exitCode == 0 && output.isNotEmpty()) {
                 Log.d(TAG, "Exec verify OK: $output")

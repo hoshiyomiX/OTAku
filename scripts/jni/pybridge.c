@@ -18,6 +18,9 @@
  * implementation, but Android's bionic linker expects dlopen in libdl.so.
  * Using musl causes: "cannot locate symbol dlopen referenced by libpybridge.so"
  *
+ * Do NOT use -Wl,--no-undefined: zig's Android target may not resolve dlopen
+ * and dlsym at link time, but they ARE available at runtime via bionic.
+ *
  * No NDK, no Python headers, no libpython linking at compile time.
  * Everything resolved at runtime via dlopen/dlsym.
  */
