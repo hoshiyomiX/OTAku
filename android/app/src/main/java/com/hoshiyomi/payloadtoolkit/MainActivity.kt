@@ -956,9 +956,9 @@ class MainActivity : AppCompatActivity() {
             val emptyText = android.widget.TextView(this).apply {
                 text = getString(R.string.hint_no_images)
                 textSize = 13f
-                setTextColor(android.content.res.TypedValue().let {
-                    context.theme.resolveAttribute(android.R.attr.textColorSecondary, it, true)
-                    it.data
+                setTextColor(android.util.TypedValue().let { tv ->
+                    context.theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
+                    tv.data
                 })
                 typeface = android.graphics.Typeface.MONOSPACE
             }
