@@ -556,7 +556,6 @@ def hash_and_compress_file(file_path, algorithm="gzip", level=None,
                     on_progress(done, total)
         comp_buf.write(comp.finish())
         return (comp_buf.getvalue(), sha.hexdigest())
->>>>>>> a315940 (fix: arm64 hashlib/bz2 module unavailability + pure-Python SHA-256 fallback)
 
     raise ValueError(f"Unknown compression algorithm: {algorithm!r}")
 
