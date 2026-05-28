@@ -416,10 +416,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupCompressionSelector() {
         val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompression)
+        val displayLabels = listOf(
+            "none — no compression (100%)",
+            "gzip — standard (~60%)",
+            "bzip2 — high (~50%)",
+            "xz — ultra (~45%)",
+            "brotli — best (~40%)"
+        )
         val adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
-            PayloadBridge.COMPRESSION_ALGORITHMS
+            displayLabels
         ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
         spinner.adapter = adapter
 
@@ -940,18 +947,76 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     private fun updateImageListUI() {
-        val textView = findViewById<android.widget.TextView>(R.id.textViewImageList)
+        val container = findViewById<android.widget.LinearLayout>(R.id.containerImageList)
         val removeButton = findViewById<View>(R.id.buttonRemoveAll)
 
+        container?.removeAllViews()
+
         if (imageFiles.isEmpty()) {
-            textView?.text = getString(R.string.hint_no_images)
+            val emptyText = android.widget.TextView(this).apply {
+                text = getString(R.string.hint_no_images)
+                textSize = 13f
+                setTextColor(android.content.res.TypedValue().let {
+                    context.theme.resolveAttribute(android.R.attr.textColorSecondary, it, true)
+                    it.data
+                })
+                typeface = android.graphics.Typeface.MONOSPACE
+            }
+            container?.addView(emptyText)
             removeButton?.visibility = View.GONE
         } else {
-            val lines = imageFiles.sortedBy { it.first }.mapIndexed { idx, (name, path) ->
-                val file = File(path)
-                "  ${idx + 1}. $name  (${formatFileSize(file.length())})"
+            val sorted = imageFiles.sortedBy { it.first }
+            sorted.forEachIndexed { idx, (name, path) ->
+                val file = java.io.File(path)
+
+                val row = android.widget.LinearLayout(this).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(8, 4, 4, 4)
+                }
+
+                val label = android.widget.TextView(this).apply {
+                    text = "  ${idx + 1}. $name  (${formatFileSize(file.length())})"
+                    textSize = 13f
+                    setTextColor(android.content.res.TypedValue().let {
+                        context.theme.resolveAttribute(android.R.attr.textColorSecondary, it, true)
+                        it.data
+                    })
+                    typeface = android.graphics.Typeface.MONOSPACE
+                    layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                }
+
+                val removeBtn = com.google.android.material.button.MaterialButton(this).apply {
+                    text = "x"
+                    textSize = 14f
+                    setTextColor(android.content.res.TypedValue().let {
+                        context.theme.resolveAttribute(android.R.attr.colorError, it, true)
+                        it.data
+                    })
+                    iconPadding = 0
+                    insetTop = 0
+                    insetBottom = 0
+                    minimumWidth = 0
+                    minWidth = 0
+                    setPadding(8, 0, 8, 0)
+                    background = null
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                    setOnClickListener {
+                        imageFiles.removeAll { it.first == name && it.second == path }
+                        copyPendingRemovals()
+                        updateImageListUI()
+                        updateOutputPreview()
+                        showLog("Removed: $name")
+                    }
+                }
+
+                row.addView(label)
+                row.addView(removeBtn)
+                container?.addView(row)
             }
-            textView?.text = lines.joinToString("\n")
             removeButton?.visibility = View.VISIBLE
         }
 

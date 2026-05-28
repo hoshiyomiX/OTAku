@@ -14,7 +14,7 @@
     <string name="button_remove_all">Remove All</string>
 
     <!-- Compression section -->
-    <string name="label_compression">COMPRESSION</string>
+    <string name="label_compression">COMPRESSION FORMAT</string>
     <string name="description_compression">Compression algorithm used to reduce the output file size.</string>
     <string name="label_compression_level">COMPRESSION LEVEL</string>
     <string name="description_compression_level">Higher values produce smaller files with longer processing time. Default uses the recommended setting.</string>
