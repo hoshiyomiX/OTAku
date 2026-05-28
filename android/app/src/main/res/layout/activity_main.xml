@@ -199,7 +199,7 @@
 
                     </LinearLayout>
 
-                    <!-- Image list -->
+                    <!-- Image list container (populated programmatically) -->
                     <com.google.android.material.card.MaterialCardView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -209,15 +209,12 @@
                         app:strokeColor="?attr/colorOutlineVariant"
                         app:cardBackgroundColor="?attr/colorSurfaceContainerLowest">
 
-                        <TextView
-                            android:id="@+id/textViewImageList"
+                        <LinearLayout
+                            android:id="@+id/containerImageList"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="@string/hint_no_images"
-                            android:textSize="13sp"
-                            android:textColor="?attr/colorOnSurfaceVariant"
-                            android:fontFamily="monospace"
-                            android:padding="12dp"
+                            android:orientation="vertical"
+                            android:padding="8dp"
                             android:minHeight="48dp" />
 
                     </com.google.android.material.card.MaterialCardView>

@@ -5,10 +5,9 @@
     android:viewportHeight="24"
     android:tint="?attr/colorOnSurfaceVariant">
 
-    <!-- Material Symbols Rounded: dark_mode (crescent moon) -->
-    <!-- Source: https://api.iconify.design/material-symbols/dark-mode-rounded.svg -->
+    <!-- Android system icon: dark_mode (moon) -->
     <path
         android:fillColor="@android:color/white"
-        android:pathData="M12,21q-3.775,0 -6.387,-2.613T3,12q0,-3.45 2.25,-5.988T11,3.05q0.325,-0.05 0.575,0.088t0.4,0.362t0.163,0.525t-0.188,0.575q-0.425,0.65 -0.638,1.375T11.1,7.5q0,2.25 1.575,3.825T16.5,12.9q0.775,0 1.538,-0.225t1.362,-0.625q0.275,-0.175 0.563,-0.162t0.512,0.137q0.25,0.125 0.388,0.375t0.087,0.6q-0.35,3.45 -2.937,5.725T12,21" />
+        android:pathData="M12,3A9,9 0,0 0,3 12A9,9 0,0 0,12 21A1.5,1.5 0,0 0,13.5 19.5C13.5,19.11 13.35,18.76 13.11,18.5C12.88,18.23 12.73,17.88 12.73,17.5A1.5,1.5 0,0 1,14.23 16H16A6,6 0,0 0,22 10C22,5.97 17.5,2.73 12,3Z" />
 
 </vector>
