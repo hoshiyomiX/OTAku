@@ -75,6 +75,7 @@ def _parse_phdr(data, elf_class, entry_off):
             return None
         p_type = struct.unpack_from('<I', data, entry_off)[0]
         p_offset = struct.unpack_from('<Q', data, entry_off + 8)[0]
+        p_vaddr = struct.unpack_from('<Q', data, entry_off + 16)[0]
         p_filesz = struct.unpack_from('<Q', data, entry_off + 32)[0]
     else:  # ELFCLASS32
         # ELF32 Phdr layout (32 bytes each):
@@ -85,8 +86,36 @@ def _parse_phdr(data, elf_class, entry_off):
             return None
         p_type = struct.unpack_from('<I', data, entry_off)[0]
         p_offset = struct.unpack_from('<I', data, entry_off + 4)[0]
+        p_vaddr = struct.unpack_from('<I', data, entry_off + 8)[0]
         p_filesz = struct.unpack_from('<I', data, entry_off + 16)[0]
-    return {'p_type': p_type, 'p_offset': p_offset, 'p_filesz': p_filesz}
+    return {'p_type': p_type, 'p_offset': p_offset, 'p_vaddr': p_vaddr, 'p_filesz': p_filesz}
+
+
+
+def _vaddr_to_offset(data, vaddr):
+    """Convert a virtual address to a file offset using PT_LOAD segments.
+    
+    Some Termux .so files have non-zero p_vaddr in their first PT_LOAD
+    segment, which means DT_STRTAB vaddr != file offset.  This function
+    maps vaddr -> file offset by scanning all PT_LOAD segments.
+    """
+    elf_class = _get_elf_class(data)
+    if elf_class is None:
+        return vaddr  # Fallback: assume vaddr == file offset
+    hdr = _parse_ehdr(data, elf_class)
+    if hdr is None:
+        return vaddr
+    e_phoff, e_phentsize, e_phnum = hdr
+    for i in range(e_phnum):
+        entry_off = e_phoff + i * e_phentsize
+        phdr = _parse_phdr(data, elf_class, entry_off)
+        if phdr is None:
+            continue
+        if phdr['p_type'] == PT_LOAD:
+            seg_vaddr = phdr['p_vaddr']
+            if seg_vaddr <= vaddr < seg_vaddr + phdr['p_filesz']:
+                return phdr['p_offset'] + (vaddr - seg_vaddr)
+    return vaddr  # Fallback
 
 
 def _find_dynamic_and_strtab(data):
@@ -137,7 +166,7 @@ def _find_dynamic_and_strtab(data):
         if d_tag == DT_NULL:
             break
         if d_tag == DT_STRTAB:
-            strtab_off = d_val
+            strtab_off = _vaddr_to_offset(data, d_val)
         elif d_tag == DT_STRSZ:
             strsz = d_val
         pos += dyn_entry_size

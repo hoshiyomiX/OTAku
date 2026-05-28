@@ -58,7 +58,9 @@ mkdir -p "$DIST_DIR"
 # These are always available on Android (provided by bionic / platform).
 # DO NOT bundle them — the linker resolves them from the system namespace.
 is_android_system_lib() {
-    case "$1" in
+    # Strip version suffix: libc.so.6 -> libc.so, libdl.so.2 -> libdl.so
+    local base="${1%%.so.*}"
+    case "$base" in
         libc.so|libm.so|libdl.so|libpthread.so|librt.so|liblog.so) return 0 ;;
         *) return 1 ;;
     esac
