@@ -363,7 +363,9 @@ for arch_config in "${ARCH_CONFIGS[@]}"; do
     done
 
     # -- Unused math/misc modules (pure-Python fallbacks exist) --
-    for ext in cmath _bisect _heapq _opcode _random mmap fcntl resource grp syslog _zoneinfo _lsprof array; do
+    # NOTE: _random CANNOT be stripped — Python's tempfile module (used by dd mode)
+    # imports random → _random.  Many stdlib modules transitively depend on it.
+    for ext in cmath _bisect _heapq _opcode mmap fcntl resource grp syslog _zoneinfo _lsprof array; do
         find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
     done
 
