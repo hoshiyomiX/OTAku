@@ -948,6 +948,16 @@ object PythonBridge {
             env["PYTHONUNBUFFERED"] = "1"
 
             /*
+             * Clear OpenSSL environment variables to prevent device-specific
+             * configs from interfering with provider loading.
+             * On some Android devices, these vars point to non-existent paths
+             * causing OpenSSL 3.x to fail to load the default provider,
+             * which makes all hash algorithms (md5, sha1, etc.) unavailable.
+             */
+            env.remove("OPENSSL_CONF")
+            env.remove("OPENSSL_MODULES")
+
+            /*
              * Preload ALL .so files from nativeLibraryDir via LD_PRELOAD.
              * This ensures dependency libraries (libcrypto.so.3, libbz2.so.1.0.8,
              * libz.so.1.3.2, etc.) are available when Python's C extensions
@@ -958,17 +968,22 @@ object PythonBridge {
              * not by libpython3exec.so directly).  Also, resolveLibName()
              * stripped version numbers causing mismatch (libcrypto.so.3
              * was resolved to libcrypto.so which doesn't exist).
+             *
+             * ORDERING: Sort so lib*.so (deps) load before _*.cpython-*.so (exts).
+             * This ensures libcrypto.so is loaded before _hashlib.cpython-*.so.
              */
             val preloadLibs = File(nativeLibDir!!).listFiles()
                 ?.filter { it.name.endsWith(".so") || it.name.contains(".so.") }
-                /*
-                 * Exclude:
-                 *   - libpybridge.so  (JNI bridge, not needed for exec mode)
-                 *   - libpython3exec.so (the binary being executed — preloading it
-                 *     causes a linker conflict on Android bionic)
-                 */
                 ?.filter { !it.name.contains("pybridge") && it.name != BUNDLED_PYTHON_LIB }
-                ?.sortedBy { it.name }
+                ?.sortedWith(
+                    compareBy<String> { name ->
+                        /* lib*.so deps first (priority 0), then extensions (priority 1) */
+                        when {
+                            name.startsWith("lib") && !name.contains("cpython") -> 0
+                            else -> 1
+                        }
+                    }.thenBy { it }  /* Within each group, alphabetical */
+                )
                 ?: emptyList()
             if (preloadLibs.isNotEmpty()) {
                 val preloadString = preloadLibs.joinToString(":", transform = { it.absolutePath })
