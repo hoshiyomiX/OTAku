@@ -148,30 +148,55 @@ static wchar_t *utf8_to_wcs(const char *utf8)
 /* ═══════════════════════════════════════════════════════════════
  *  Pre-load all .so files from nativeLibraryDir
  *
- *  Before loading Python, dlopen every .so in nativeLibraryDir
- *  with RTLD_GLOBAL.  This ensures all dependency libraries are
- *  loaded into the process before Python's extension modules
- *  request them.  Prevents "dlopen failed: cannot find libz.so"
- *  errors when extension modules have DT_NEEDED for deps whose
- *  DT_SONAME doesn't match the expected name.
+ *  Two-phase loading to ensure correct dependency order:
+ *    Phase 1 — Load dependency libraries (lib*.so, not libpython3.13.so)
+ *    Phase 2 — Load Python extension modules (_*.cpython-*.so)
  *
- *  Python C extension modules (*.cpython-*.so) ARE preloaded here
- *  so their transitive dependencies (e.g. libcrypto.so for
- *  _hashlib.so) are resolved into the global symbol scope before
- *  Python's import machinery loads them.  Without preloading,
- *  Python's dlopen on ARM32 can fail because the older bionic
- *  linker cannot resolve DT_NEEDED via PYTHONPATH alone.
+ *  This ordering is critical because _hashlib.cpython-313.so has
+ *  DT_NEEDED for libcrypto.so.  While the linker resolves transitive
+ *  deps from nativeLibraryDir, some Android bionic versions (especially
+ *  older ARM32 linkers) handle transitive dependency symbol visibility
+ *  differently.  Loading deps explicitly first with RTLD_GLOBAL
+ *  guarantees their symbols are available globally.
  *
- *  RPATH/RUNPATH is stripped at build time by prepare_python_runtime.sh
- *  to prevent the linker from searching non-existent Termux paths.
+ *  After preloading, we explicitly call OPENSSL_init_crypto() to
+ *  force OpenSSL 3.x provider initialization.  On some devices,
+ *  OpenSSL's constructor (__attribute__((constructor))) does not
+ *  properly load the default provider, causing EVP_MD_fetch() to
+ *  return NULL for all algorithms (md5, sha1, sha256, etc.).
+ *  Explicit initialization ensures the default provider is loaded.
  *
- *  Uses RTLD_NOW to ensure all symbols are resolved immediately,
- *  catching missing deps early rather than at first use.
+ *  We also clear OPENSSL_CONF and OPENSSL_MODULES environment
+ *  variables to prevent device-specific configs from interfering.
+ *
+ *  RPATH/RUNPATH is stripped at build time by prepare_python_runtime.sh.
+ *  Uses RTLD_NOW to resolve all symbols immediately.
  * ═══════════════════════════════════════════════════════════════ */
 
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
+
+/* Check if a filename is a Python C extension module (*cpython-*.so) */
+static int is_cpython_ext(const char *name) {
+    return (strstr(name, "cpython-") != NULL);
+}
+
+/* Check if a filename is libpython3.13.so or libpython3exec.so */
+static int is_python_runtime(const char *name) {
+    return (strcmp(name, "libpython3.13.so") == 0 ||
+            strcmp(name, "libpython3exec.so") == 0);
+}
+
+/* Check if a filename is the bridge itself */
+static int is_bridge(const char *name) {
+    return (strstr(name, "pybridge") != NULL);
+}
+
+/* Check if a filename ends with .so */
+static int is_so_file(const char *name) {
+    return (strstr(name, ".so") != NULL);
+}
 
 static void preload_native_libs(const char *lib_dir) {
     DIR *dir = opendir(lib_dir);
@@ -181,38 +206,105 @@ static void preload_native_libs(const char *lib_dir) {
     }
 
     int loaded = 0, failed = 0;
+    char path[1024];
+
+    /*
+     * Phase 1: Load dependency libraries first.
+     * These are lib*.so files that are NOT Python runtime or extensions.
+     * Examples: libcrypto.so, libssl.so, libz.so, libbz2.so, liblzma.so
+     *
+     * Loading them first with RTLD_GLOBAL ensures their symbols are globally
+     * visible before Python extension modules are loaded in Phase 2.
+     */
     struct dirent *entry;
+    rewinddir(dir);
     while ((entry = readdir(dir)) != NULL) {
         const char *name = entry->d_name;
         size_t len = strlen(name);
-        /*
-         * Must end with ".so" or ".so.N" (versioned like .so.3, .so.1.0.8)
-         * and not be the bridge itself.
-         */
-        if (len < 4) continue;
-        if (strstr(name, ".so") == NULL) continue;
-        if (strstr(name, "pybridge")) continue;
+        if (len < 4 || !is_so_file(name)) continue;
+        if (is_bridge(name) || is_python_runtime(name)) continue;
+        if (strncmp(name, "lib", 3) != 0) continue;  /* Only lib*.so */
+        if (is_cpython_ext(name)) continue;  /* Skip ext modules (lib_brotli etc handled in Phase 2) */
 
-        char path[1024];
         snprintf(path, sizeof(path), "%s/%s", lib_dir, name);
-        /*
-         * RTLD_NOW: resolve all symbols immediately.
-         * On ARM32, RTLD_LAZY can mask missing dependency errors
-         * until the extension module is actually used by Python,
-         * producing confusing "unsupported hash type" errors instead
-         * of clear "cannot find libcrypto.so" messages.
-         */
         void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
         if (h) {
             loaded++;
         } else {
-            fprintf(stderr, "[pybridge] preload FAIL: %s: %s\n", name, dlerror());
+            fprintf(stderr, "[pybridge] preload FAIL (lib): %s: %s\n", name, dlerror());
+            failed++;
+        }
+    }
+
+    /*
+     * Phase 2: Load Python extension modules and remaining .so files.
+     * These include _hashlib.cpython-313-*.so, _bz2.cpython-313-*.so, etc.
+     * Their DT_NEEDED deps (libcrypto.so, etc.) are already loaded.
+     */
+    rewinddir(dir);
+    while ((entry = readdir(dir)) != NULL) {
+        const char *name = entry->d_name;
+        size_t len = strlen(name);
+        if (len < 4 || !is_so_file(name)) continue;
+        if (is_bridge(name) || is_python_runtime(name)) continue;
+        if (strncmp(name, "lib", 3) == 0 && !is_cpython_ext(name)) continue;  /* Already loaded in Phase 1 */
+
+        snprintf(path, sizeof(path), "%s/%s", lib_dir, name);
+        void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+        if (h) {
+            loaded++;
+        } else {
+            fprintf(stderr, "[pybridge] preload FAIL (ext): %s: %s\n", name, dlerror());
             failed++;
         }
     }
     closedir(dir);
     fprintf(stderr, "[pybridge] preload: %d loaded, %d failed\n",
             loaded, failed);
+
+    /*
+     * Phase 3: Explicit OpenSSL 3.x initialization.
+     *
+     * ROOT CAUSE FIX: On certain Android devices (regardless of architecture),
+     * OpenSSL 3.x's default provider fails to load during the library's
+     * constructor (__attribute__((constructor))).  This causes:
+     *   - _hashlib IS importable (module loads successfully)
+     *   - _hashlib.new('md5') raises ValueError (EVP_MD_fetch returns NULL)
+     *   - All 14 hash algorithms fail: md5, sha1, sha224..sha512, blake2b/s, sha3_*, shake_*
+     *
+     * The failure is device-specific: same APK works on Device B but fails on Device A.
+     * The difference is in how each device's bionic linker handles OpenSSL's constructor
+     * and the subsequent provider initialization via dlopen of provider .so files.
+     *
+     * Explicit OPENSSL_init_crypto(0, NULL) forces initialization of the default
+     * provider, ensuring EVP_MD_fetch() works for all standard algorithms.
+     *
+     * We also clear OPENSSL_CONF and OPENSSL_MODULES to prevent any device-specific
+     * configuration from interfering with provider loading.
+     */
+    unsetenv("OPENSSL_CONF");
+    unsetenv("OPENSSL_MODULES");
+
+    snprintf(path, sizeof(path), "%s/libcrypto.so", lib_dir);
+    void *libcrypto = dlopen(path, RTLD_NOW | RTLD_NOLOAD | RTLD_GLOBAL);
+    if (libcrypto) {
+        /* OPENSSL_init_crypto(uint64_t opts, const void *settings)
+         * opts = 0 means use all defaults (loads default provider) */
+        typedef void (*init_crypto_fn)(unsigned long long, const void *);
+        init_crypto_fn init = (init_crypto_fn)dlsym(libcrypto, "OPENSSL_init_crypto");
+        if (init) {
+            init(0, NULL);
+            fprintf(stderr, "[pybridge] OpenSSL: OPENSSL_init_crypto() called\n");
+        }
+        /* Print OpenSSL version for diagnostics */
+        typedef const char *(*version_fn)(void);
+        version_fn ver = (version_fn)dlsym(libcrypto, "OpenSSL_version");
+        if (ver) {
+            fprintf(stderr, "[pybridge] OpenSSL: %s\n", ver());
+        }
+    } else {
+        fprintf(stderr, "[pybridge] OpenSSL: libcrypto.so not loaded\n");
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════
