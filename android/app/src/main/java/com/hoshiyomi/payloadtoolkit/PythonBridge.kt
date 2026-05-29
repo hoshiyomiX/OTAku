@@ -976,13 +976,13 @@ object PythonBridge {
                 ?.filter { it.name.endsWith(".so") || it.name.contains(".so.") }
                 ?.filter { !it.name.contains("pybridge") && it.name != BUNDLED_PYTHON_LIB }
                 ?.sortedWith(
-                    compareBy<String> { name ->
+                    compareBy<File> {
                         /* lib*.so deps first (priority 0), then extensions (priority 1) */
                         when {
-                            name.startsWith("lib") && !name.contains("cpython") -> 0
+                            it.name.startsWith("lib") && !it.name.contains("cpython") -> 0
                             else -> 1
                         }
-                    }.thenBy { it }  /* Within each group, alphabetical */
+                    }.thenBy { it.name }  /* Within each group, alphabetical */
                 )
                 ?: emptyList()
             if (preloadLibs.isNotEmpty()) {
