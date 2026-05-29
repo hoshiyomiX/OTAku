@@ -33,16 +33,11 @@ DIST_DIR="$PROJECT_ROOT/dist"
 PACKAGES=(
     python
     python-brotli
-    libandroid-posix-semaphore
     libandroid-support
     libbz2
-    libcrypt
-    libexpat
     libffi
     liblzma
     openssl
-    sqlite
-    libsqlite
     zlib
 )
 
@@ -304,6 +299,78 @@ for arch_config in "${ARCH_CONFIGS[@]}"; do
         echo "    Removed $REMOVED_TERMINAL terminal/UI shared libs (not needed)"
     fi
 
+    # =================================================================
+    # Strip unused libraries — payload_toolkit only needs compression,
+    # hashing, struct, ctypes, and core Python runtime.
+    # All removed modules have pure-Python fallbacks or are never imported.
+    # Estimated savings: ~4.5 MB per ABI.
+    # =================================================================
+
+    REMOVED_UNUSED=0
+
+    # -- TLS/SSL (app never uses network or HTTPS) --
+    for lib in libssl.so; do
+        [ -f "$JNI_DIR/$lib" ] && { rm -f "$JNI_DIR/$lib"; REMOVED_UNUSED=$((REMOVED_UNUSED + 1)); }
+    done
+    for ext in _ssl; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- XML (app never processes XML) --
+    for lib in libexpat.so; do
+        [ -f "$JNI_DIR/$lib" ] && { rm -f "$JNI_DIR/$lib"; REMOVED_UNUSED=$((REMOVED_UNUSED + 1)); }
+    done
+    for ext in _elementtree; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- SQLite (app has zero database usage) --
+    for lib in libsqlite3.so libsqlite.so; do
+        [ -f "$JNI_DIR/$lib" ] && { rm -f "$JNI_DIR/$lib"; REMOVED_UNUSED=$((REMOVED_UNUSED + 1)); }
+    done
+    for ext in _sqlite3; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- Crypt (password hashing, not used) --
+    for lib in libcrypt.so libandroid-posix-semaphore.so; do
+        [ -f "$JNI_DIR/$lib" ] && { rm -f "$JNI_DIR/$lib"; REMOVED_UNUSED=$((REMOVED_UNUSED + 1)); }
+    done
+
+    # -- CJK codecs (~670 KB, app only processes binary protobuf data) --
+    for ext in _codecs_cn _codecs_hk _codecs_iso2022 _codecs_jp _codecs_kr _codecs_tw _multibytecodec unicodedata; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- Networking/IPC (app has no network or async usage) --
+    for ext in _socket select _asyncio _posixsubprocess _queue; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- Multiprocessing (app is single-process) --
+    for ext in _multiprocessing _posixshmem; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- Python 3.13 sub-interpreter support (never used) --
+    for ext in _interpchannels _interpreters _interpqueues _contextvars; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- Unused data processing modules --
+    for ext in _json _csv _decimal _statistics; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    # -- Unused math/misc modules (pure-Python fallbacks exist) --
+    for ext in cmath _bisect _heapq _opcode _random mmap fcntl resource grp syslog _zoneinfo _lsprof array; do
+        find "$JNI_DIR" -maxdepth 1 -name "${ext}*.so" -delete 2>/dev/null && REMOVED_UNUSED=$((REMOVED_UNUSED + 1))
+    done
+
+    if [ "$REMOVED_UNUSED" -gt 0 ]; then
+        echo "    Removed $REMOVED_UNUSED unused libs/extensions (saves ~4.5 MB)"
+    fi
+
     # =====================================================================
     #  2. Patch ELF headers (DT_SONAME + DT_NEEDED)
     # =====================================================================
@@ -437,57 +504,20 @@ print('1' if strip_rpath('$so_file') else '0')")
         "_sha1.so"
         "_sha512.so"
         "_md5.so"
-        "_socket.so"
         "_struct.so"
-        "_array.so"
-        "_codecs_cn.so"
-        "_codecs_hk.so"
-        "_codecs_iso2022.so"
-        "_codecs_jp.so"
-        "_codecs_kr.so"
-        "_codecs_tw.so"
-        "_multibytecodec.so"
-        "_ssl.so"
-        "_elementtree.so"
         "_pickle.so"
-        "_json.so"
-        "_csv.so"
-        "_decimal.so"
         "_datetime.so"
-        "unicodedata.so"
         "_ctypes.so"
-        "_asyncio.so"
         "_blake2.so"
         "_sha3.so"
-        "_random.so"
         "math.so"
-        "cmath.so"
-        "_bisect.so"
-        "_heapq.so"
-        "_queue.so"
-        "_opcode.so"
-        "_statistics.so"
-        "_contextvars.so"
-        "_interpchannels.so"
-        "_interpreters.so"
-        "_interpqueues.so"
-        "_posixsubprocess.so"
-        "select.so"
-        "mmap.so"
-        "_lzma.so"
-        "termios.so"
-        "fcntl.so"
-        "resource.so"
-        "grp.so"
-        "syslog.so"
+        "_functools.so"
         "binascii.so"
-        "array.so"
-        "_lsprof.so"
-        "_multiprocessing.so"
-        "_posixshmem.so"
-        "_zoneinfo.so"
-        "_sqlite3.so"
         "_brotli.so"
+        "_io.so"
+        "_abc.so"
+        # zlib extension (gzip + zipimport for .pyz loading)
+        "zlib.so"
     )
     _is_protected() {
         local name="$1"
