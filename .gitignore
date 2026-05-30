@@ -180,6 +180,16 @@ ci-keystore.jks
 .zig-cache/
 
 # ═══════════════════════════════════════════════════════════════
+#  Development debris (not needed for build or runtime)
+# ═══════════════════════════════════════════════════════════════
+python.deb
+build_job.json
+build_log.json
+data/
+extracted2/
+termux-inspect/
+
+# ═══════════════════════════════════════════════════════════════
 #  z.ai platform (local development only, never commit)
 # ═══════════════════════════════════════════════════════════════
 skills/
