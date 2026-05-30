@@ -86,7 +86,7 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var lastProgressPercent: Int = -1
 
         // Persisted log text (survives Activity recreation)
-        @Volatile private var savedLogText: StringBuilder = StringBuilder()
+        @Volatile private var savedLogText: StringBuffer = StringBuffer()
 
         // Heartbeat: last time a progress update was received (epoch millis)
         @Volatile private var lastProgressTime: Long = 0L
