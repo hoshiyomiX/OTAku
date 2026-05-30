@@ -1,8 +1,8 @@
 """
 modes/dd.py — Generate a otaku-format flashable ZIP from partition images.
 
-Called from Kotlin via Chaquopy:
-    payload_toolkit.modes.dd.run(
+Called from Kotlin via JNI bridge:
+    otaku.modes.dd.run(
         images={"odm_dlkm": "/path/to/odm_dlkm.img"},
         compress="gzip",
         output_path="/path/to/flashable_dd.zip",
@@ -587,7 +587,7 @@ def _build_flash_info(version, compress_name, bundle_size, num_parts, partitions
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def _parse_args(args, kwargs):
-    """Normalise Chaquopy dict-arg vs direct keyword-arg calling convention."""
+    """Normalise dict-arg vs direct keyword-arg calling convention."""
     if args and isinstance(args[0], dict):
         return args[0]
     return kwargs

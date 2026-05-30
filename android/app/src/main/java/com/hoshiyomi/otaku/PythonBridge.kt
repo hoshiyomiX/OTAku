@@ -1,8 +1,8 @@
-package com.hoshiyomi.payloadtoolkit
+package com.hoshiyomi.otaku
 
 import android.content.Context
 import android.util.Log
-import com.hoshiyomi.payloadtoolkit.BuildConfig
+import com.hoshiyomi.otaku.BuildConfig
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -33,7 +33,7 @@ import java.util.zip.ZipInputStream
 object PythonBridge {
 
     private const val TAG = "PythonBridge"
-    private const val PYZ_ASSET_NAME = "payload_toolkit.pyz"
+    private const val PYZ_ASSET_NAME = "otaku.pyz"
     private const val STDLIB_ASSET_NAME = "python-stdlib.zip"
     private const val MANIFEST_ASSET_NAME = "native-libs-manifest.txt"
     private const val PYTHON_DIR_NAME = "python"
@@ -63,7 +63,7 @@ object PythonBridge {
      * Detect the device's ABI from nativeLibraryDir path.
      *
      * Android's nativeLibraryDir format:
-     *   /data/app/.../com.hoshiyomi.payloadtoolkit-.../lib/arm64
+     *   /data/app/.../com.hoshiyomi.otaku-.../lib/arm64
      *
      * Returns the ABI string (e.g. "arm64-v8a") or null if detection fails.
      */

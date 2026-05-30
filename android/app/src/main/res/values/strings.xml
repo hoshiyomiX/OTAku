@@ -50,14 +50,14 @@
     <string name="label_output_log">Logs</string>
 
     <!-- Status messages -->
-    <string name="log_init_success">payload_toolkit %1$s loaded — Python %2$s (%3$s)</string>
+    <string name="log_init_success">otaku %1$s loaded — Python %2$s (%3$s)</string>
     <string name="status_initializing">Initializing Python runtime…</string>
     <string name="status_executing">Building partitions…</string>
 
     <!-- About dialog -->
     <string name="about_title">About OTAku</string>
     <string name="about_version">Version %1$s</string>
-    <string name="about_description">A non-root Android tool for building partition images into flashable OTA ZIP packages.\n\nBuilt on payload_toolkit, an AOSP-compliant OTA toolkit.</string>
+    <string name="about_description">A non-root Android tool for building partition images into flashable OTA ZIP packages.\n\nBuilt on otaku, an AOSP-compliant OTA toolkit.</string>
     <string name="about_ok">OK</string>
 
     <!-- Theme -->

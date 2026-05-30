@@ -42,7 +42,7 @@
             app:titleTextColor="?attr/colorOnSurface"
             app:subtitleTextColor="?attr/colorOnSurfaceVariant"
             app:menu="@menu/toolbar_menu"
-            style="@style/Widget.PayloadToolkit.Toolbar" />
+            style="@style/Widget.OTAku.Toolbar" />
 
     </com.google.android.material.appbar.AppBarLayout>
 
@@ -108,7 +108,7 @@
                                 android:layout_height="wrap_content"
                                 android:layout_weight="1"
                                 android:text="@string/label_device"
-                                style="@style/TextAppearance.PayloadToolkit.SectionTitle" />
+                                style="@style/TextAppearance.OTAku.SectionTitle" />
 
                             <com.google.android.material.button.MaterialButton
                                 android:id="@+id/buttonAutoDetect"
@@ -167,7 +167,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/label_partitions"
-                            style="@style/TextAppearance.PayloadToolkit.SectionTitle"
+                            style="@style/TextAppearance.OTAku.SectionTitle"
                             android:layout_marginBottom="4dp" />
 
                         <TextView
@@ -242,7 +242,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/label_compression"
-                            style="@style/TextAppearance.PayloadToolkit.SectionTitle"
+                            style="@style/TextAppearance.OTAku.SectionTitle"
                             android:layout_marginBottom="4dp" />
 
                         <TextView
@@ -275,7 +275,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/label_compression_level"
-                            style="@style/TextAppearance.PayloadToolkit.SectionTitle"
+                            style="@style/TextAppearance.OTAku.SectionTitle"
                             android:layout_marginBottom="4dp" />
 
                         <TextView
@@ -308,7 +308,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/label_output"
-                            style="@style/TextAppearance.PayloadToolkit.SectionTitle"
+                            style="@style/TextAppearance.OTAku.SectionTitle"
                             android:layout_marginBottom="6dp" />
 
                         <!-- Custom filename input -->

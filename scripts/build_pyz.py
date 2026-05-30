@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_pyz.py — Build payload_toolkit.pyz (architecture-independent zipapp).
+build_pyz.py — Build otaku.pyz (architecture-independent zipapp).
 
 Produces a single-file Python application that runs on ANY platform
 with Python 3.8+, including Android (Termux), Linux, macOS, and Windows.
@@ -13,11 +13,11 @@ a runtime dependency on libz.so.1 on Android, where the dynamic linker
 cannot always resolve transitive shared library dependencies.
 
 Usage:
-    python3 scripts/build_pyz.py              # Build to dist/payload_toolkit.pyz
+    python3 scripts/build_pyz.py              # Build to dist/otaku.pyz
     python3 scripts/build_pyz.py -o out.pyz   # Custom output path
 
 Output:
-    dist/payload_toolkit.pyz  (~80 KB, uncompressed)
+    dist/otaku.pyz  (~80 KB, uncompressed)
 """
 import os
 import sys
@@ -32,7 +32,7 @@ import zipapp
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
-DEFAULT_OUTPUT = os.path.join(PROJECT_ROOT, "dist", "payload_toolkit.pyz")
+DEFAULT_OUTPUT = os.path.join(PROJECT_ROOT, "dist", "otaku.pyz")
 ENTRY_POINT_NAME = "__main__.py"
 
 
@@ -40,7 +40,7 @@ ENTRY_POINT_NAME = "__main__.py"
 
 ENTRY_POINT = '''#!/usr/bin/env python3
 """
-payload_toolkit.pyz -- AOSP OTA payload.bin manipulation toolkit.
+otaku.pyz -- AOSP OTA payload.bin manipulation toolkit.
 Architecture-independent zipapp. Requires Python 3.8+.
 Works on Android (Termux), Linux, macOS, Windows.
 """
@@ -61,9 +61,9 @@ def scan_images_dir(images_dir):
 
 
 def _print_help(version):
-    print("payload_toolkit v%s -- AOSP OTA payload.bin manipulation toolkit" % version)
+    print("otaku v%s -- AOSP OTA payload.bin manipulation toolkit" % version)
     print()
-    print("Usage: python3 payload_toolkit.pyz <mode> [options]")
+    print("Usage: python3 otaku.pyz <mode> [options]")
     print()
     print("Modes:")
     print("  info       -i <payload.bin>                       Parse payload.bin metadata")
@@ -90,7 +90,7 @@ def _print_help(version):
 
 
 def main():
-    from payload_toolkit import __version__, main as pt_main
+    from otaku import __version__, main as pt_main
 
     args = sys.argv[1:]
 
@@ -99,11 +99,11 @@ def main():
         sys.exit(0)
 
     if args[0] in ("--version", "-V"):
-        print("payload_toolkit v%s" % __version__)
+        print("otaku v%s" % __version__)
         sys.exit(0)
 
     if args[0] in ("--check-deps", "check-deps"):
-        from payload_toolkit import check_dependencies_text
+        from otaku import check_dependencies_text
         print(check_dependencies_text())
         sys.exit(0)
 
@@ -259,10 +259,10 @@ if __name__ == "__main__":
 # ── Build logic ──────────────────────────────────────────────────────────
 
 def collect_source_files(src_dir):
-    """Collect all .py files from payload_toolkit package."""
-    pkg_dir = os.path.join(src_dir, "payload_toolkit")
+    """Collect all .py files from otaku package."""
+    pkg_dir = os.path.join(src_dir, "otaku")
     if not os.path.isdir(pkg_dir):
-        print("Error: payload_toolkit package not found at %s" % pkg_dir)
+        print("Error: otaku package not found at %s" % pkg_dir)
         sys.exit(1)
 
     files = []
@@ -337,7 +337,7 @@ def build_pyz(output_path=DEFAULT_OUTPUT):
     print()
     print("  Deploy to Android:")
     print("    adb push %s /data/local/tmp/" % output_path)
-    print("    adb shell python3 /data/local/tmp/payload_toolkit.pyz info -i /sdcard/payload.bin")
+    print("    adb shell python3 /data/local/tmp/otaku.pyz info -i /sdcard/payload.bin")
 
 
 def main():
@@ -352,7 +352,7 @@ def main():
             sys.exit(0)
 
     print("=" * 60)
-    print("  payload_toolkit.pyz builder")
+    print("  otaku.pyz builder")
     print("=" * 60)
     print()
 

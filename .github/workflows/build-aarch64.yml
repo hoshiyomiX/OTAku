@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build-pyz:
-    name: Build payload_toolkit.pyz
+    name: Build otaku.pyz
     runs-on: ubuntu-latest
 
     steps:
@@ -32,21 +32,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build payload_toolkit.pyz
+      - name: Build otaku.pyz
         run: python3 scripts/build_pyz.py
 
       - name: Verify .pyz
         run: |
           echo "=== .pyz details ==="
-          ls -lh dist/payload_toolkit.pyz
-          file dist/payload_toolkit.pyz
-          python3 dist/payload_toolkit.pyz --version
-          python3 dist/payload_toolkit.pyz --help
+          ls -lh dist/otaku.pyz
+          file dist/otaku.pyz
+          python3 dist/otaku.pyz --version
+          python3 dist/otaku.pyz --help
 
       - name: Upload .pyz artifact
         uses: actions/upload-artifact@v4
         with:
-          name: payload-toolkit-pyz
-          path: dist/payload_toolkit.pyz
+          name: otaku-pyz
+          path: dist/otaku.pyz
           if-no-files-found: error
           retention-days: 30

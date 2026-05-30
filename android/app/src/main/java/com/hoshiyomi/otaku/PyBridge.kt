@@ -1,4 +1,4 @@
-package com.hoshiyomi.payloadtoolkit
+package com.hoshiyomi.otaku
 
 import android.util.Log
 import java.io.FileInputStream
@@ -78,7 +78,7 @@ class PyBridge {
      * Run Python with the given .pyz file and arguments.
      *
      * @param libDir    nativeLibraryDir (contains all .so files including libpython3.13.so)
-     * @param pyzPath   absolute path to payload_toolkit.pyz
+     * @param pyzPath   absolute path to otaku.pyz
      * @param stdlibDir PYTHONHOME directory (extracted stdlib)
      * @param args      command-line arguments for the .pyz
      * @return PyResult with captured output, exit code, and duration

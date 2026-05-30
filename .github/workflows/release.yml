@@ -36,7 +36,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Build payload_toolkit.pyz
+      - name: Build otaku.pyz
         run: python3 scripts/build_pyz.py
 
       - name: Prepare Python runtime
@@ -47,7 +47,7 @@ jobs:
       - name: Copy assets to Android
         run: |
           mkdir -p android/app/src/main/assets
-          cp dist/payload_toolkit.pyz android/app/src/main/assets/
+          cp dist/otaku.pyz android/app/src/main/assets/
           cp dist/python-stdlib.zip android/app/src/main/assets/
           cp dist/native-libs-manifest.txt android/app/src/main/assets/
 
@@ -61,7 +61,7 @@ jobs:
             -alias release-key \
             -storepass release-store-pass \
             -keypass release-key-pass \
-            -dname "CN=PayloadToolkit, OU=Release, O=PayloadToolkit, L=CI, ST=CI, C=US"
+            -dname "CN=OTAku, OU=Release, O=OTAku, L=CI, ST=CI, C=US"
 
       - name: Build release APK (signed)
         working-directory: android

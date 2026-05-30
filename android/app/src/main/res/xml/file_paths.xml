@@ -10,5 +10,5 @@
     <cache-path name="tmp" path="tmp/" />
 
     <!-- External storage (for Android 10 and below) -->
-    <external-files-path name="downloads" path="Download/PayloadToolkit/" />
+    <external-files-path name="downloads" path="Download/OTAku/" />
 </paths>

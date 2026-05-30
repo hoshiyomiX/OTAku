@@ -1,4 +1,4 @@
-package com.hoshiyomi.payloadtoolkit
+package com.hoshiyomi.otaku
 
 import android.Manifest
 import android.content.ClipData
@@ -49,7 +49,7 @@ import androidx.core.app.NotificationCompat
  *   4. Tap "Build" to generate flashable OTA ZIP
  *
  * Python runtime: external Python (Termux recommended).
- * payload_toolkit.pyz is bundled as an asset and extracted at first launch.
+ * otaku.pyz is bundled as an asset and extracted at first launch.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -119,7 +119,7 @@ class MainActivity : AppCompatActivity() {
                     ctx, 0, intent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
-                val notification = NotificationCompat.Builder(ctx, PayloadToolkitApp.CHANNEL_ID)
+                val notification = NotificationCompat.Builder(ctx, OTAkuApp.CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_media_play)
                     .setContentTitle("OTAku")
                     .setContentText(message)
@@ -145,7 +145,7 @@ class MainActivity : AppCompatActivity() {
                     ctx, 0, intent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
-                val notification = NotificationCompat.Builder(ctx, PayloadToolkitApp.CHANNEL_ID)
+                val notification = NotificationCompat.Builder(ctx, OTAkuApp.CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_media_play)
                     .setContentTitle(if (success) "Build Complete" else "Build Failed")
                     .setContentText(message)
@@ -175,7 +175,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var outputDir: File
 
     // SharedPreferences for persisting user settings
-    private val prefs by lazy { getSharedPreferences("payload_toolkit", Context.MODE_PRIVATE) }
+    private val prefs by lazy { getSharedPreferences("otaku", Context.MODE_PRIVATE) }
 
     // ═══════════════════════════════════════════════════════════════
     //  Activity Result Launchers
@@ -432,7 +432,7 @@ class MainActivity : AppCompatActivity() {
 
         spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                selectedCompression = PayloadBridge.COMPRESSION_ALGORITHMS[position]
+                selectedCompression = OTABridge.COMPRESSION_ALGORITHMS[position]
                 updateCompressionLevelSpinner()
                 updateOutputPreview()
             }
@@ -762,7 +762,7 @@ class MainActivity : AppCompatActivity() {
         val outputFileName = if (!customName.isNullOrEmpty()) {
             if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
         } else {
-            PayloadBridge.buildOutputFileName(deviceValue)
+            OTABridge.buildOutputFileName(deviceValue)
         }
         val outPath = File(outDir, outputFileName).absolutePath
 
@@ -789,14 +789,14 @@ class MainActivity : AppCompatActivity() {
                     val pm = act.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
                     wakeLock = pm.newWakeLock(
                         PowerManager.PARTIAL_WAKE_LOCK,
-                        "PayloadToolkit::BuildWakeLock"
+                        "OTAku::BuildWakeLock"
                     ).apply {
                         setReferenceCounted(false)
                         acquire(3 * 60 * 60 * 1000L)  // 3 hours — enough for any compression job
                     }
                 }
 
-                val result = PayloadBridge.dd(
+                val result = OTABridge.dd(
                     images = images,
                     device = deviceValue,
                     compression = selectedCompression,
@@ -1275,7 +1275,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("PayloadToolkit Log", logText)
+        val clip = ClipData.newPlainText("OTAku Log", logText)
         clipboard.setPrimaryClip(clip)
         Toast.makeText(this, getString(R.string.log_copied), Toast.LENGTH_SHORT).show()
     }

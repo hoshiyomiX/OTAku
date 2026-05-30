@@ -1,6 +1,6 @@
-// Top-level build file for payload-toolkit-android
+// Top-level build file for OTAku
 // Configures plugins used across all subprojects
-// NOTE: Chaquopy removed — uses ProcessBuilder + external Python (e.g. Termux)
+// NOTE: Chaquopy removed — uses ProcessBuilder/JNI + bundled Python
 
 buildscript {
     repositories {
