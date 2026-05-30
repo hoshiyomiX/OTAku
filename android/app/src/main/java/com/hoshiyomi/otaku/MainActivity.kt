@@ -529,7 +529,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.buttonClearLog).setOnClickListener {
             findViewById<android.widget.TextView>(R.id.textViewLog).text = ""
-            savedLogText.clear()
+            savedLogText.setLength(0)
         }
     }
 
@@ -1034,7 +1034,7 @@ class MainActivity : AppCompatActivity() {
             if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
         } else if (imageFiles.isNotEmpty()) {
             val device = prefs.getString("device", "")?.trim()
-            PayloadBridge.buildOutputFileName(device ?: "generic")
+            OTABridge.buildOutputFileName(device ?: "generic")
         } else {
             "flashable_generic.zip"
         }
