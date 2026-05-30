@@ -37,18 +37,15 @@ android {
         }
     }
 
-    applicationVariants.all { variant ->
-        variant.outputs.all {
-            outputFileName = "OTAku-${variant.versionName}-${variant.flavorName}-${variant.buildType.name}.apk"
-        }
-    }
+    // APK output renaming moved to CI workflow (applicationVariants.all
+    // interferes with R8 shrinking in AGP 8.4+)
 
     buildTypes {
         release {
             minifyEnabled true
             shrinkResources true
             signingConfig signingConfigs.debug // Use debug key for CI
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
         debug {
             minifyEnabled false
