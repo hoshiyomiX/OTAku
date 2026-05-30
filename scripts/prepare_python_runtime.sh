@@ -129,7 +129,7 @@ BRIDGE_SRC="$SCRIPT_DIR/jni/pybridge.c"
 # -- Manifest header (appended to per-architecture) -----------------------
 MANIFEST="$DIST_DIR/native-libs-manifest.txt"
 {
-    echo "# payload-toolkit native libs manifest"
+    echo "# OTAku native libs manifest"
     echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "# Architectures: $(printf '%s, ' "${ARCH_CONFIGS[@]}" | sed 's/, $//')"
     echo "# FORMAT: abi | filename | size_bytes | DT_NEEDED (comma-separated)"
@@ -259,20 +259,20 @@ for arch_config in "${ARCH_CONFIGS[@]}"; do
         done
     fi
 
-    # Strip test extension modules (saves ~1 MB, not needed for payload_toolkit)
+    # Strip test extension modules (saves ~1 MB, not needed for otaku)
     find "$JNI_DIR" -maxdepth 1 -name "_test*.so" -delete 2>/dev/null || true
     find "$JNI_DIR" -maxdepth 1 -name "_xxtestfuzz*.so" -delete 2>/dev/null || true
     find "$JNI_DIR" -maxdepth 1 -name "xxlimited*.so" -delete 2>/dev/null || true
     find "$JNI_DIR" -maxdepth 1 -name "xxsubtype*.so" -delete 2>/dev/null || true
     find "$JNI_DIR" -maxdepth 1 -name "_ctypes_test*.so" -delete 2>/dev/null || true
 
-    # Strip UI/database extension modules not needed for payload_toolkit.
+    # Strip UI/database extension modules not needed for otaku.
     find "$JNI_DIR" -maxdepth 1 -name "_curses*.so" -delete 2>/dev/null || true
     find "$JNI_DIR" -maxdepth 1 -name "readline*.so" -delete 2>/dev/null || true
     find "$JNI_DIR" -maxdepth 1 -name "_gdbm*.so" -delete 2>/dev/null || true
     find "$JNI_DIR" -maxdepth 1 -name "_dbm*.so" -delete 2>/dev/null || true
 
-    # Strip terminal/UI shared libraries not needed for payload_toolkit.
+    # Strip terminal/UI shared libraries not needed for otaku.
     # These are transitive deps of the stripped extension modules above.
     # No remaining .so (libpython3.13.so, extension modules) depends on them.
     # Keeping them causes DT_NEEDED resolution failures at runtime:
@@ -300,7 +300,7 @@ for arch_config in "${ARCH_CONFIGS[@]}"; do
     fi
 
     # =================================================================
-    # Strip unused libraries — payload_toolkit only needs compression,
+    # Strip unused libraries — otaku only needs compression,
     # hashing, struct, ctypes, and core Python runtime.
     # All removed modules have pure-Python fallbacks or are never imported.
     # Estimated savings: ~4.5 MB per ABI.

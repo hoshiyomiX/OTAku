@@ -1,5 +1,5 @@
 """
-payload_toolkit — AOSP OTA payload.bin manipulation toolkit.
+otaku — AOSP OTA payload.bin manipulation toolkit.
 
 Designed for Android APK via zipapp (.pyz) + Termux Python.
 Core uses only Python stdlib.  Optional: brotli (pip install).
@@ -14,10 +14,10 @@ Modes:
 """
 
 __version__ = "3.1.0"
-__author__ = "PayloadToolkit"
+__author__ = "OTAku"
 
 # ---------------------------------------------------------------------------
-# Progress callback — can be set from Kotlin via Chaquopy
+# Progress callback — can be set from Kotlin via JNI bridge
 # ---------------------------------------------------------------------------
 _progress_callback = None
 
@@ -29,7 +29,7 @@ def set_progress_callback(callback):
         callback(current: int, total: int, message: str)
 
     Example (from Kotlin):
-        payload_toolkit.set_progress_callback(lambda c, t, m: ...)
+        otaku.set_progress_callback(lambda c, t, m: ...)
     """
     global _progress_callback
     _progress_callback = callback
@@ -180,8 +180,8 @@ def check_dependencies_text():
 def main(*args, **kwargs):
     """CLI-like main entry point.
 
-    Can be called from Kotlin via Chaquopy or from a Python REPL.
-    Accepts a dict of parameters (Chaquopy style) or keyword arguments.
+    Can be called from Kotlin via JNI bridge or from a Python REPL.
+    Accepts a dict of parameters or keyword arguments.
 
     Parameters
     ----------
@@ -211,7 +211,7 @@ def main(*args, **kwargs):
         }
 
     try:
-        mod = __import__(f"payload_toolkit.modes.{mode}", fromlist=["run"])
+        mod = __import__(f"otaku.modes.{mode}", fromlist=["run"])
         result = mod.run(params)
         if not isinstance(result, dict):
             result = {"success": True, "output": str(result)}

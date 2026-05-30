@@ -8,7 +8,7 @@
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Base application theme (light)                                -->
     <!-- ═══════════════════════════════════════════════════════════════ -->
-    <style name="Theme.PayloadToolkit" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.OTAku" parent="Theme.Material3.DayNight.NoActionBar">
         <!-- Primary brand color -->
         <item name="colorPrimary">@color/md_theme_light_primary</item>
         <item name="colorOnPrimary">@color/md_theme_light_onPrimary</item>
@@ -56,9 +56,9 @@
         <item name="android:textColorSecondary">@color/md_theme_light_onSurfaceVariant</item>
 
         <!-- Material components -->
-        <item name="toolbarStyle">@style/Widget.PayloadToolkit.Toolbar</item>
-        <item name="chipStyle">@style/Widget.PayloadToolkit.Chip</item>
-        <item name="materialButtonStyle">@style/Widget.PayloadToolkit.Button</item>
+        <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
+        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
+        <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
         <!-- Toolbar icon tinting -->
         <item name="colorControlNormal">@color/md_theme_light_onSurfaceVariant</item>
@@ -67,7 +67,7 @@
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Dark theme override                                           -->
     <!-- ═══════════════════════════════════════════════════════════════ -->
-    <style name="Theme.PayloadToolkit.Dark" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="Theme.OTAku.Dark" parent="Theme.Material3.Dark.NoActionBar">
         <!-- Primary brand color -->
         <item name="colorPrimary">@color/md_theme_dark_primary</item>
         <item name="colorOnPrimary">@color/md_theme_dark_onPrimary</item>
@@ -119,7 +119,7 @@
     <!-- ═══════════════════════════════════════════════════════════════ -->
 
     <!-- Toolbar style -->
-    <style name="Widget.PayloadToolkit.Toolbar" parent="Widget.Material3.Toolbar.Surface">
+    <style name="Widget.OTAku.Toolbar" parent="Widget.Material3.Toolbar.Surface">
         <item name="titleTextColor">?attr/colorOnSurface</item>
         <item name="subtitleTextColor">?attr/colorOnSurfaceVariant</item>
         <item name="android:background">?attr/colorSurface</item>
@@ -127,7 +127,7 @@
     </style>
 
     <!-- Chip style -->
-    <style name="Widget.PayloadToolkit.Chip" parent="Widget.Material3.Chip.Filter">
+    <style name="Widget.OTAku.Chip" parent="Widget.Material3.Chip.Filter">
         <item name="chipBackgroundColor">@color/chip_default_bg</item>
         <item name="chipStrokeColor">?attr/colorOutlineVariant</item>
         <item name="chipStrokeWidth">1dp</item>
@@ -135,14 +135,14 @@
     </style>
 
     <!-- Primary button style -->
-    <style name="Widget.PayloadToolkit.Button" parent="Widget.Material3.Button">
+    <style name="Widget.OTAku.Button" parent="Widget.Material3.Button">
         <item name="cornerRadius">12dp</item>
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.05</item>
     </style>
 
     <!-- Log output text view style -->
-    <style name="TextAppearance.PayloadToolkit.Log" parent="TextAppearance.Material3.BodySmall">
+    <style name="TextAppearance.OTAku.Log" parent="TextAppearance.Material3.BodySmall">
         <item name="android:fontFamily">monospace</item>
         <item name="android:textSize">12sp</item>
         <item name="android:textColor">@color/log_text</item>
@@ -150,25 +150,25 @@
     </style>
 
     <!-- Section title style -->
-    <style name="TextAppearance.PayloadToolkit.SectionTitle" parent="TextAppearance.Material3.TitleSmall">
+    <style name="TextAppearance.OTAku.SectionTitle" parent="TextAppearance.Material3.TitleSmall">
         <item name="android:textColor">?attr/colorPrimary</item>
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.08</item>
     </style>
 
     <!-- Body description text -->
-    <style name="TextAppearance.PayloadToolkit.BodyDescription" parent="TextAppearance.Material3.BodySmall">
+    <style name="TextAppearance.OTAku.BodyDescription" parent="TextAppearance.Material3.BodySmall">
         <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
         <item name="android:lineSpacingMultiplier">1.3</item>
     </style>
 
     <!-- Helper/caption text (smaller, muted) -->
-    <style name="TextAppearance.PayloadToolkit.Caption" parent="TextAppearance.Material3.LabelSmall">
+    <style name="TextAppearance.OTAku.Caption" parent="TextAppearance.Material3.LabelSmall">
         <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
     </style>
 
     <!-- Label for form fields -->
-    <style name="TextAppearance.PayloadToolkit.InputLabel" parent="TextAppearance.Material3.BodyMedium">
+    <style name="TextAppearance.OTAku.InputLabel" parent="TextAppearance.Material3.BodyMedium">
         <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
     </style>
 </resources>

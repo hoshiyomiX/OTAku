@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-        Night-mode override for Theme.PayloadToolkit.
+        Night-mode override for Theme.OTAku.
         Same theme name, different parent and color palette.
         Android automatically picks values-night/ when night mode is active.
     -->
-    <style name="Theme.PayloadToolkit" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="Theme.OTAku" parent="Theme.Material3.Dark.NoActionBar">
         <!-- Primary brand color -->
         <item name="colorPrimary">@color/md_theme_dark_primary</item>
         <item name="colorOnPrimary">@color/md_theme_dark_onPrimary</item>
@@ -53,8 +53,8 @@
         <item name="android:textColorSecondary">@color/md_theme_dark_onSurfaceVariant</item>
 
         <!-- Material components -->
-        <item name="toolbarStyle">@style/Widget.PayloadToolkit.Toolbar</item>
-        <item name="chipStyle">@style/Widget.PayloadToolkit.Chip</item>
-        <item name="materialButtonStyle">@style/Widget.PayloadToolkit.Button</item>
+        <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
+        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
+        <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
     </style>
 </resources>

@@ -1,16 +1,16 @@
-package com.hoshiyomi.payloadtoolkit
+package com.hoshiyomi.otaku
 
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 
-class PayloadToolkitApp : Application() {
+class OTAkuApp : Application() {
     companion object {
-        const val CHANNEL_ID = "payload_toolkit_service"
-        const val CHANNEL_NAME = "Payload Operations"
-        const val CHANNEL_DESC = "Background payload processing notifications"
-        lateinit var instance: PayloadToolkitApp
+        const val CHANNEL_ID = "otaku_service"
+        const val CHANNEL_NAME = "OTAku Operations"
+        const val CHANNEL_DESC = "Background OTAku processing notifications"
+        lateinit var instance: OTAkuApp
             private set
     }
 

@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "payload-toolkit-android"
+rootProject.name = "OTAku"
 include(":app")

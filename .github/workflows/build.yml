@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build payload_toolkit.pyz
+      - name: Build otaku.pyz
         run: python3 scripts/build_pyz.py
 
       - name: Prepare Python runtime
@@ -40,10 +40,10 @@ jobs:
       - name: Copy assets to Android
         run: |
           mkdir -p android/app/src/main/assets
-          cp dist/payload_toolkit.pyz android/app/src/main/assets/
+          cp dist/otaku.pyz android/app/src/main/assets/
           cp dist/python-stdlib.zip android/app/src/main/assets/
           cp dist/native-libs-manifest.txt android/app/src/main/assets/
-          echo "pyz: $(wc -c < dist/payload_toolkit.pyz) bytes"
+          echo "pyz: $(wc -c < dist/otaku.pyz) bytes"
           echo "stdlib: $(wc -c < dist/python-stdlib.zip) bytes"
           echo "manifest: $(wc -c < dist/native-libs-manifest.txt) bytes"
           echo "jniLibs/arm64-v8a:  $(ls android/app/src/main/jniLibs/arm64-v8a/*.so 2>/dev/null | wc -l) native libs"

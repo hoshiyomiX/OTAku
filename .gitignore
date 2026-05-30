@@ -84,7 +84,7 @@ MANIFEST
 build_aarch64/
 
 # Generated assets (built by CI before Gradle)
-android/app/src/main/assets/payload_toolkit.pyz
+android/app/src/main/assets/otaku.pyz
 
 # Unit test / coverage reports
 htmlcov/
@@ -187,4 +187,4 @@ memory/
 worklog.md
 .zscripts/
 download/
-payload-toolkit/
+# otaku/ — removed: was too broad, matched src/otaku/ source code

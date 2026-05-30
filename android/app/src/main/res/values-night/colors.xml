@@ -3,7 +3,7 @@
     <!--
         Dark mode overrides for utility colors.
         Theme color attributes (colorSurface, etc.) are handled via
-        values-night/themes.xml inheriting Theme.PayloadToolkit.Dark.
+        values-night/themes.xml inheriting Theme.OTAku.Dark.
     -->
 
     <!-- Chip backgrounds -->

@@ -1,4 +1,4 @@
-package com.hoshiyomi.payloadtoolkit
+package com.hoshiyomi.otaku
 
 import android.os.Process
 import kotlinx.coroutines.Dispatchers
@@ -6,9 +6,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * PayloadResult — structured result from a payload_toolkit operation.
+ * OTAResult — structured result from an OTAku operation.
  */
-data class PayloadResult(
+data class OTAResult(
     val success: Boolean,
     val output: String,
     val error: String? = null,
@@ -18,24 +18,24 @@ data class PayloadResult(
     val hasError: Boolean get() = !success || !error.isNullOrBlank()
 
     companion object {
-        fun error(message: String, durationMs: Long = 0) = PayloadResult(
+        fun error(message: String, durationMs: Long = 0) = OTAResult(
             success = false, output = "", error = message, exitCode = -1, durationMs = durationMs
         )
-        fun success(output: String, durationMs: Long = 0) = PayloadResult(
+        fun success(output: String, durationMs: Long = 0) = OTAResult(
             success = true, output = output, error = null, exitCode = 0, durationMs = durationMs
         )
     }
 }
 
 /**
- * PayloadBridge — Kotlin singleton that bridges the Android UI to payload_toolkit.pyz.
+ * OTABridge — Kotlin singleton that bridges the Android UI to otaku.pyz.
  *
  * This app is DD-mode only: generates otaku-format flashable ZIPs
  * from partition images (.img) for TWRP/OrangeFox recovery flashing.
  *
  * Supported compression: none, gzip, bzip2, xz, brotli
  */
-object PayloadBridge {
+object OTABridge {
 
     // Compression algorithm choices exposed in the UI spinner
     // Ordered by compression ratio: worst (none) → best (brotli)
@@ -57,11 +57,11 @@ object PayloadBridge {
 
 
     /**
-     * Execute payload_toolkit.pyz with the given CLI arguments.
+     * Execute otaku.pyz with the given CLI arguments.
      * PythonBridge.executePyz auto-configures the environment based on
      * whether Python is bundled or system (Termux).
      */
-    private suspend fun executePyz(args: List<String>, onProgress: ((ProgressUpdate) -> Unit)? = null, onOutputLine: ((String) -> Unit)? = null): PayloadResult {
+    private suspend fun executePyz(args: List<String>, onProgress: ((ProgressUpdate) -> Unit)? = null, onOutputLine: ((String) -> Unit)? = null): OTAResult {
         return withContext(Dispatchers.IO) {
             // Boost thread priority for CPU-intensive build operations.
             // THREAD_PRIORITY_DEFAULT=0, negative = higher priority.
@@ -73,9 +73,9 @@ object PayloadBridge {
             val execResult = PythonBridge.executePyz(args, onProgress, onOutputLine)
 
             if (execResult.success) {
-                PayloadResult.success(execResult.output, execResult.durationMs)
+                OTAResult.success(execResult.output, execResult.durationMs)
             } else {
-                PayloadResult.error(
+                OTAResult.error(
                     message = execResult.error ?: "Exit code ${execResult.exitCode}",
                     durationMs = execResult.durationMs
                 ).copy(output = execResult.output)
@@ -113,10 +113,10 @@ object PayloadBridge {
         outputPath: String,
         onProgress: ((ProgressUpdate) -> Unit)? = null,
         onOutputLine: ((String) -> Unit)? = null
-    ): PayloadResult {
-        if (images.isEmpty()) return PayloadResult.error("No images specified for DD ZIP")
+    ): OTAResult {
+        if (images.isEmpty()) return OTAResult.error("No images specified for DD ZIP")
         if (compression !in ALL_COMPRESSION)
-            return PayloadResult.error("Invalid compression: '$compression'")
+            return OTAResult.error("Invalid compression: '$compression'")
 
         // dd mode uses --image (repeatable) + --partition (repeatable)
         val args = mutableListOf("dd")

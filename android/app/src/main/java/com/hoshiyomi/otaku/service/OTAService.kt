@@ -1,4 +1,4 @@
-package com.hoshiyomi.payloadtoolkit.service
+package com.hoshiyomi.otaku.service
 
 import android.app.NotificationManager
 import android.app.Service
@@ -9,10 +9,10 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.hoshiyomi.payloadtoolkit.PayloadBridge
-import com.hoshiyomi.payloadtoolkit.PayloadResult
-import com.hoshiyomi.payloadtoolkit.PayloadToolkitApp
-import com.hoshiyomi.payloadtoolkit.ProgressUpdate
+import com.hoshiyomi.otaku.OTABridge
+import com.hoshiyomi.otaku.OTAResult
+import com.hoshiyomi.otaku.OTAkuApp
+import com.hoshiyomi.otaku.ProgressUpdate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,26 +21,26 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * PayloadService — Foreground service that keeps the build process alive.
+ * OTAService — Foreground service that keeps the build process alive.
  *
  * Android can kill background coroutines (lifecycleScope) under memory pressure,
  * especially during long compression operations. This service:
  *   1. Runs as a foreground service with a persistent notification
  *   2. Holds a WakeLock to prevent CPU sleep during heavy I/O
- *   3. Executes the build via PayloadBridge.dd() and updates notification status
+ *   3. Executes the build via OTABridge.dd() and updates notification status
  *   4. Broadcasts results back to MainActivity via LocalBroadcastManager-style intent extras
  *
  * The service is started by MainActivity and stops itself when the operation completes.
  */
-class PayloadService : Service() {
+class OTAService : Service() {
 
     companion object {
-        private const val TAG = "PayloadService"
+        private const val TAG = "OTAService"
         const val NOTIFICATION_ID = 1001
 
         // Intent action broadcast back to MainActivity
-        const val ACTION_BUILD_RESULT = "com.hoshiyomi.payloadtoolkit.ACTION_BUILD_RESULT"
-        const val ACTION_BUILD_PROGRESS = "com.hoshiyomi.payloadtoolkit.ACTION_BUILD_PROGRESS"
+        const val ACTION_BUILD_RESULT = "com.hoshiyomi.otaku.ACTION_BUILD_RESULT"
+        const val ACTION_BUILD_PROGRESS = "com.hoshiyomi.otaku.ACTION_BUILD_PROGRESS"
         const val EXTRA_SUCCESS = "success"
         const val EXTRA_OUTPUT = "output"
         const val EXTRA_ERROR = "error"
@@ -93,7 +93,7 @@ class PayloadService : Service() {
 
         if (images.isEmpty() || outputPath.isBlank()) {
             updateNotification("Build failed: missing parameters", isError = true)
-            broadcastResult(PayloadResult.error("Missing images or output path"))
+            broadcastResult(OTAResult.error("Missing images or output path"))
             stopSelf()
             return
         }
@@ -101,7 +101,7 @@ class PayloadService : Service() {
         val partitionInfo = images.keys.sorted().joinToString(", ")
         updateNotification("Building: $partitionInfo [$compression]...")
 
-        val result = PayloadBridge.dd(
+        val result = OTABridge.dd(
             images = images,
             device = device,
             compression = compression,
@@ -166,7 +166,7 @@ class PayloadService : Service() {
         isSuccess: Boolean = false,
         isError: Boolean = false
     ): android.app.Notification {
-        return NotificationCompat.Builder(this, PayloadToolkitApp.CHANNEL_ID)
+        return NotificationCompat.Builder(this, OTAkuApp.CHANNEL_ID)
             .setContentTitle(NOTIFICATION_TITLE)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
@@ -188,7 +188,7 @@ class PayloadService : Service() {
     //  Result broadcast
     // ═══════════════════════════════════════════════════════════════
 
-    private fun broadcastResult(result: PayloadResult) {
+    private fun broadcastResult(result: OTAResult) {
         val broadcast = Intent(ACTION_BUILD_RESULT).apply {
             putExtra(EXTRA_SUCCESS, result.success)
             putExtra(EXTRA_OUTPUT, result.output)
@@ -216,7 +216,7 @@ class PayloadService : Service() {
         val powerManager = getSystemService(PowerManager::class.java)
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
-            "PayloadToolkit::BuildWakeLock"
+            "OTAku::BuildWakeLock"
         ).apply {
             setReferenceCounted(false)
             acquire(30 * 60 * 1000L) // 30 minute max timeout safety

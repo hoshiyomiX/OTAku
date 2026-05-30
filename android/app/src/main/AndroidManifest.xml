@@ -2,7 +2,7 @@
 <!--
     AndroidManifest.xml — OTAku
 
-    Package: com.hoshiyomi.payloadtoolkit
+    Package: com.hoshiyomi.otaku
     Min SDK: 26 (Android 8.0 Oreo)
     Target SDK: 34 (Android 14)
 
@@ -44,7 +44,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:name=".PayloadToolkitApp"
+        android:name=".OTAkuApp"
         android:allowBackup="true"
         android:backupAgent=".data.BackupAgent"
         android:extractNativeLibs="true"
@@ -52,7 +52,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.PayloadToolkit"
+        android:theme="@style/Theme.OTAku"
         android:requestLegacyExternalStorage="true"
         tools:targetApi="34">
 
@@ -101,7 +101,7 @@
 
         <!-- Foreground service for long-running local operations -->
         <service
-            android:name=".service.PayloadService"
+            android:name=".service.OTAService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property

@@ -1,17 +1,17 @@
 // OTAku Android — app module build.gradle (Groovy DSL)
 // Pure Android/Kotlin — no Chaquopy.
 // Python runtime (Termux 3.13) native libs in jniLibs (executable via nativeLibraryDir).
-// Python stdlib (.py) in assets. payload_toolkit.pyz in assets.
+// Python stdlib (.py) in assets. otaku.pyz in assets.
 
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
-    namespace 'com.hoshiyomi.payloadtoolkit'
+    namespace 'com.hoshiyomi.otaku'
     compileSdk 34
 
     defaultConfig {
-        applicationId 'com.hoshiyomi.payloadtoolkit'
+        applicationId 'com.hoshiyomi.otaku'
         minSdk 26
         targetSdk 34
         versionCode 26

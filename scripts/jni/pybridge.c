@@ -47,7 +47,7 @@ static int g_saved_stdout = -1;
 static int g_saved_stderr = -1;
 
 JNIEXPORT jint JNICALL
-Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeSetupOutput(
+Java_com_hoshiyomi_otaku_PyBridge_nativeSetupOutput(
     JNIEnv *env, jobject thiz)
 {
     (void)env; (void)thiz;
@@ -58,7 +58,7 @@ Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeSetupOutput(
 }
 
 JNIEXPORT void JNICALL
-Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeRedirectOutput(
+Java_com_hoshiyomi_otaku_PyBridge_nativeRedirectOutput(
     JNIEnv *env, jobject thiz)
 {
     (void)env; (void)thiz;
@@ -69,7 +69,7 @@ Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeRedirectOutput(
 }
 
 JNIEXPORT void JNICALL
-Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeFlushOutput(
+Java_com_hoshiyomi_otaku_PyBridge_nativeFlushOutput(
     JNIEnv *env, jobject thiz)
 {
     (void)env; (void)thiz;
@@ -78,7 +78,7 @@ Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeFlushOutput(
 }
 
 JNIEXPORT void JNICALL
-Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeRestoreOutput(
+Java_com_hoshiyomi_otaku_PyBridge_nativeRestoreOutput(
     JNIEnv *env, jobject thiz)
 {
     (void)env; (void)thiz;
@@ -90,7 +90,7 @@ Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeRestoreOutput(
 }
 
 JNIEXPORT void JNICALL
-Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeCloseReadFd(
+Java_com_hoshiyomi_otaku_PyBridge_nativeCloseReadFd(
     JNIEnv *env, jobject thiz)
 {
     (void)env; (void)thiz;
@@ -319,10 +319,10 @@ static void preload_native_libs(const char *lib_dir) {
  * ═══════════════════════════════════════════════════════════════ */
 
 JNIEXPORT jint JNICALL
-Java_com_hoshiyomi_payloadtoolkit_PyBridge_nativeRunPython(
+Java_com_hoshiyomi_otaku_PyBridge_nativeRunPython(
     JNIEnv *env, jobject thiz,
     jstring j_lib_dir,     /* nativeLibraryDir (contains all .so files) */
-    jstring j_pyz_path,    /* absolute path to payload_toolkit.pyz */
+    jstring j_pyz_path,    /* absolute path to otaku.pyz */
     jstring j_stdlib_dir,  /* PYTHONHOME (extracted stdlib directory) */
     jobjectArray j_args    /* String[] arguments to pass */
 ) {

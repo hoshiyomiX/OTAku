@@ -1,37 +1,29 @@
-# Payload Toolkit Android
+# OTAku
 
-A **non-root** Android APK that brings the full power of [`payload_toolkit.py`](src/payload_toolkit/) to your device — inspect, extract, generate, package, and sign AOSP OTA `payload.bin` files directly on your phone, no PC required.
+A **non-root** Android app for building flashable OTA ZIP packages from partition images — directly on your phone, no PC required.
 
-> **No root. No Termux. No PC.** Just an APK and a `payload.bin`.
+> **No root. No Termux. No PC.** Just an APK and your partition images.
 
 ---
 
 ## Features
 
-| Mode   | Command     | Description                                                        | Root Required |
-|--------|-------------|--------------------------------------------------------------------|:-------------:|
-| **INFO**  | `info`  | Parse and display payload.bin metadata (partitions, sizes, ops, signatures) | No |
-| **DUMP**  | `dump`  | Extract partition images (`.img`) from an existing `payload.bin`   | No |
-| **GEN**   | `gen`   | Generate a partial `payload.bin` from one or more `.img` files     | No |
-| **ZIP**   | `zip`   | Generate a flashable OTA ZIP (AOSP format) from partition images  | No |
-| **SIGN**  | `sign`  | Sign an existing `payload.bin` with RSA key (adds Signatures block) | No |
-| ~~DD~~  | ~~dd~~  | ~~Generate dd-based flashable ZIP~~ *(requires block device access)* | **Yes** |
-
-### Non-Root Limitations
-
-- **DD/flash mode is disabled** — writing directly to block devices (`/dev/block/by-name/*`) requires root privileges
-- All file I/O is constrained to app-specific storage (`/data/data/com.hoshiyomi.payloadtoolkit/`) and user-selected shared storage (via SAF/SAF picker)
-- No access to `/system`, `/vendor`, or other protected partitions for reading
+- **DD-mode flashable ZIP generation** — Build otaku-format flashable ZIPs that work with TWRP/OrangeFox recovery
+- **Multiple compression algorithms** — none, gzip, bzip2, xz, brotli
+- **Per-partition progress tracking** — Real-time compression progress for each partition
+- **Device safety check** — Prevents flashing on wrong device models
+- **SHA-256 verification** — Post-flash integrity verification (optional)
+- **Dark/Light/System theme** — Material Design 3 with theme toggle
 
 ### Compression Support
 
-| Algorithm | InstallOperation | Notes |
-|-----------|-----------------|-------|
-| `none`    | REPLACE          | No compression, fastest generation |
-| `bzip2`   | REPLACE_BZ       | Standard OTA, best compatibility |
-| `gzip`    | REPLACE_BZ       | Non-standard but works everywhere |
-| `xz`      | REPLACE_XZ       | Smallest output, slower |
-| `brotli`  | BROTLI_BZ        | Fast decompress, Android 11+ |
+| Algorithm | Ratio | Speed | Notes |
+|-----------|-------|-------|-------|
+| `none`    | 100%  | Fastest | No compression |
+| `gzip`    | ~60%  | Fast    | Best balance |
+| `bzip2`   | ~50%  | Medium  | Requires libbz2 |
+| `xz`      | ~45%  | Slow    | Smallest output |
+| `brotli`  | ~40%  | Slow    | Best ratio, requires brotli package |
 
 ---
 
@@ -43,53 +35,50 @@ A **non-root** Android APK that brings the full power of [`payload_toolkit.py`](
 │  ┌───────────────────────────────────────────────────┐  │
 │  │              Kotlin UI Layer                      │  │
 │  │  MainActivity (Material Design 3)                  │  │
-│  │  ├─ File picker (payload.bin / .img)               │  │
-│  │  ├─ Mode selector (info/dump/gen/zip/sign)         │  │
-│  │  ├─ Options panel (compression, partitions, etc.)   │  │
-│  │  ├─ Progress bar + log output                      │  │
-│  │  └─ Output file picker                             │  │
+│  │  ├─ Device codename + Auto-detect                 │  │
+│  │  ├─ Partition image picker (SAF)                   │  │
+│  │  ├─ Compression selector + level                   │  │
+│  │  ├─ Per-partition progress bars                    │  │
+│  │  └─ Log output + Copy/Clear                        │  │
 │  └───────────────────────┬───────────────────────────┘  │
 │                          │                              │
 │  ┌───────────────────────▼───────────────────────────┐  │
-│  │           PayloadBridge.kt                        │  │
+│  │           OTABridge.kt                            │  │
 │  │  Translates UI actions → Python function calls     │  │
 │  └───────────────────────┬───────────────────────────┘  │
 │                          │                              │
 │  ┌───────────────────────▼───────────────────────────┐  │
-│  │           Chaquopy Bridge (PythonBridge.kt)       │  │
-│  │  Python.startModule() / callModuleFunc()           │  │
+│  │           PythonBridge.kt                         │  │
+│  │  JNI (PyBridge) or ProcessBuilder execution        │  │
 │  └───────────────────────┬───────────────────────────┘  │
 │                          │                              │
 │  ┌───────────────────────▼───────────────────────────┐  │
-│  │        Python Runtime (CPython 3.12)              │  │
-│  │  payload_toolkit/                                   │  │
+│  │        Python Runtime (CPython 3.13)              │  │
+│  │  otaku/                                           │  │
 │  │  ├─ __init__.py (CLI bridge)                       │  │
 │  │  ├─ protobuf.py (minimal PB encoder/decoder)       │  │
 │  │  ├─ compression.py (gzip/bz2/xz/brotli)           │  │
 │  │  ├─ payload.py (read/write payload.bin)            │  │
 │  │  ├─ ota_metadata.py (OTA ZIP metadata gen)         │  │
-│  │  └─ modes/                                          │  │
-│  │      ├─ info.py                                     │  │
-│  │      ├─ dump.py                                     │  │
-│  │      ├─ gen.py                                      │  │
-│  │      ├─ zip.py                                      │  │
-│  │      └─ sign.py                                     │  │
+│  │  └─ modes/                                        │  │
+│  │      └─ dd.py (dd-based flashable ZIP generator)   │  │
 │  └───────────────────────────────────────────────────┘  │
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │        Android Storage                             │  │
 │  │  ├─ App-internal: /data/data/.../files/            │  │
-│  │  └─ Shared (SAF): user-selected via picker         │  │
+│  │  └─ Shared: /storage/emulated/0/OTAku/             │  │
 │  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### Key Components
 
-- **Chaquopy** embeds CPython 3.12 inside the APK — no external Python runtime needed
-- **payload_toolkit.py** is refactored into a Python package (`src/payload_toolkit/`) for clean module imports
-- **Zero external Python dependencies** — the tool implements a minimal protobuf encoder/decoder from scratch, using only Python stdlib modules (`gzip`, `bz2`, `lzma`, `zipfile`, `hashlib`)
-- **PayloadBridge.kt** provides a type-safe Kotlin API that serializes arguments and return values across the Python/Kotlin boundary
+- **Bundled Python** — CPython 3.13 embedded in the APK via jniLibs, no external Python runtime needed
+- **otaku** Python package (`src/otaku/`) implements DD-mode flashable ZIP generation with streaming compression
+- **Zero external Python dependencies** — implements minimal protobuf encoder/decoder from scratch, using only Python stdlib modules
+- **OTABridge.kt** provides a type-safe Kotlin API that bridges UI actions to Python execution
+- **PyBridge.kt + pybridge.c** — JNI bridge using dlopen() + Py_Main() for in-process Python execution (no execve, no linker issues)
 
 ---
 
@@ -99,11 +88,9 @@ A **non-root** Android APK that brings the full power of [`payload_toolkit.py`](
 |------|---------|-------|
 | Android Studio | Hedgehog (2023.1.1)+ | Or IntelliJ IDEA with Android plugin |
 | Android SDK | API 34 | compileSdk |
-| Android NDK | 26.1+ | For native build if needed |
-| Gradle | 8.4+ | Via Android Gradle Plugin 8.2+ |
-| Kotlin | 1.9.22+ | |
-| Chaquopy | 15.0.1+ | Python integration plugin |
 | JDK | 17 | |
+| Python | 3.12+ | For build scripts only (not embedded in APK) |
+| Gradle | 8.4+ | Via Android Gradle Plugin 8.2+ |
 
 ---
 
@@ -112,71 +99,30 @@ A **non-root** Android APK that brings the full power of [`payload_toolkit.py`](
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/hoshiyomiX/payload-toolkit-android.git
-cd payload-toolkit-android
+git clone https://github.com/hoshiyomiX/OTAku.git
+cd OTAku
 ```
 
-### 2. Install the Chaquopy plugin (local)
-
-```bash
-# Option A: Use the setup script
-./scripts/setup_chaquopy.sh
-
-# Option B: Manually download the plugin JAR
-mkdir -p android/chaquopy_plugin
-curl -L -o android/chaquopy_plugin/chaquopy-gradle-plugin.jar \
-  https://github.com/nicholasgasior/chaquopy/releases/download/v15.0.1/chaquopy-gradle-plugin-15.0.1.jar
-```
-
-### 3. Build the APK
+### 2. Build the APK
 
 ```bash
 cd android
-./gradlew assembleDebug
+./gradlew assembleArm8Debug
 ```
 
 The debug APK will be at:
 ```
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/arm8/debug/OTAku-3.18.0-arm8-debug.apk
 ```
 
-### 4. Build a release APK (signed)
+### 3. Build a release APK (signed)
 
 ```bash
 cd android
-./gradlew assembleRelease
+./gradlew assembleArm8Release
 ```
 
-Configure signing in `android/app/build.gradle.kts` under `signingConfigs`.
-
----
-
-## Cross-Compilation (Alternative to Chaquopy)
-
-If you prefer a standalone Python binary instead of Chaquopy:
-
-```bash
-# Cross-compile payload_toolkit.py to aarch64 Android binary
-./scripts/build_aarch64.sh
-
-# Output: dist/payload_toolkit-aarch64
-# Copy to device and run via ProcessBuilder from Kotlin
-```
-
-See [`scripts/build_aarch64.sh`](scripts/build_aarch64.sh) for requirements (PyInstaller + Android NDK).
-
----
-
-## Screenshots
-
-<!-- TODO: Add screenshots after initial release -->
-
-| Screen | Description |
-|--------|-------------|
-| Main screen | Mode selector, file picker, options |
-| INFO output | Parsed payload.bin metadata with partition table |
-| DUMP progress | Real-time extraction progress with SHA-256 verification |
-| GEN options | Image selection, compression algorithm, output settings |
+Configure signing in `android/app/build.gradle` under `signingConfigs`.
 
 ---
 
@@ -189,44 +135,40 @@ See [`scripts/build_aarch64.sh`](scripts/build_aarch64.sh) for requirements (PyI
 | Google Pixel 7 | Tensor G2 | 14 (Upside Down Cake) | Planned |
 | Xiaomi Redmi Note 12 | Snapdragon 685 | 13 (Tiramisu) | Planned |
 
-> **minSdk 26** (Android 8.0 Oreo) — Chaquopy requires API 26+ for native library loading.
+> **minSdk 26** (Android 8.0 Oreo)
 
 ---
 
 ## Project Structure
 
 ```
-payload-toolkit-android/
-├── src/payload_toolkit/               # Standalone Python package (reference copy)
-│   └── ...                            # Same files as below
-├── android/                           # Android project
-│   ├── build.gradle.kts               # Project-level build config
-│   ├── settings.gradle.kts            # Plugin management + project includes
-│   ├── gradle.properties              # Gradle properties
+OTAku/
+├── src/otaku/                        # Standalone Python package
+│   ├── __init__.py                   # Main entry point, argument parsing
+│   ├── protobuf.py                   # Minimal PB encoder/decoder
+│   ├── compression.py                # gzip, bz2, xz, brotli + pure-Python SHA-256 fallback
+│   ├── payload.py                    # AOSP payload.bin read/write
+│   ├── ota_metadata.py               # OTA ZIP metadata generation
+│   └── modes/
+│       ├── __init__.py
+│       └── dd.py                     # DD-mode flashable ZIP generator
+├── android/                          # Android project
+│   ├── settings.gradle.kts           # Plugin management + project includes
 │   └── app/
-│       ├── build.gradle.kts           # App-level build config (Chaquopy, deps)
+│       ├── build.gradle              # App-level build config
 │       └── src/main/
 │           ├── AndroidManifest.xml
-│           ├── python/payload_toolkit/ # ← Chaquopy Python source (auto-discovered)
-│           │   ├── __init__.py
-│           │   ├── protobuf.py
-│           │   ├── compression.py
-│           │   ├── payload.py
-│           │   ├── ota_metadata.py
-│           │   └── modes/
-│           │       ├── __init__.py
-│           │       ├── info.py
-│           │       ├── dump.py
-│           │       ├── gen.py
-│           │       ├── zip.py
-│           │       └── sign.py
-│           ├── java/com/hoshiyomi/payloadtoolkit/
-│           │   ├── MainActivity.kt
-│           │   ├── PayloadBridge.kt
-│           │   ├── PythonBridge.kt
-│           │   ├── PayloadToolkitApp.kt
-│           │   ├── service/PayloadService.kt
-│           │   └── data/BackupAgent.kt
+│           ├── java/com/hoshiyomi/otaku/
+│           │   ├── MainActivity.kt    # Main UI activity
+│           │   ├── OTABridge.kt       # Kotlin→Python bridge
+│           │   ├── OTAResult.kt       # (embedded in OTABridge.kt)
+│           │   ├── PythonBridge.kt    # Python runtime manager
+│           │   ├── PyBridge.kt        # JNI wrapper (dlopen + Py_Main)
+│           │   ├── OTAkuApp.kt        # Application class + notification channel
+│           │   ├── service/
+│           │   │   └── OTAService.kt  # Foreground service for builds
+│           │   └── data/
+│           │       └── BackupAgent.kt # Backup helper
 │           └── res/
 │               ├── values/
 │               ├── layout/
@@ -235,10 +177,15 @@ payload-toolkit-android/
 │               └── xml/
 ├── .github/workflows/
 │   ├── build.yml                     # CI: debug + release APK on push/PR
-│   └── release.yml                   # Tag-triggered GitHub Release
+│   ├── release.yml                   # Tag-triggered GitHub Release
+│   ├── build-aarch64.yml             # .pyz-only CI
+│   └── release-aarch64.yml           # .pyz-only release
 ├── scripts/
-│   ├── build_aarch64.sh
-│   └── setup_chaquopy.sh
+│   ├── build_pyz.py                  # Build otaku.pyz zipapp
+│   ├── prepare_python_runtime.sh     # Package Termux Python for jniLibs
+│   ├── validate_elf.py               # ELF validation utility
+│   └── jni/
+│       └── pybridge.c                # JNI bridge (dlopen + Py_Main)
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── .gitignore
@@ -249,12 +196,11 @@ payload-toolkit-android/
 
 ## License
 
-This project is provided as-is for educational and personal use. The underlying `payload_toolkit.py` implements the AOSP payload.bin v2 (Brillo) format specification.
+This project is provided as-is for educational and personal use. The underlying `otaku` package implements the AOSP payload.bin v2 (Brillo) format specification and the otaku dd-based flashable ZIP format.
 
 ---
 
 ## Acknowledgments
 
 - [AOSP update_engine](https://android.googlesource.com/platform/system/update_engine/) — payload.bin format specification
-- [Chaquopy](https://chaquo.com/chaquopy/) — Python integration for Android
 - [payload_dumper](https://github.com/nicholasgasior/payload-dumper) — reference implementation
