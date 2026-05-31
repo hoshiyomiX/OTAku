@@ -771,11 +771,13 @@ object PythonBridge {
      * Execute the .pyz file with the given arguments.
      *
      * JNI mode (preferred): dlopen + Py_Main — no subprocess, no linker issues.
+     *   Progress is streamed in real-time via the pipe reader's onLine callback.
      * Exec mode (fallback): ProcessBuilder + LD_PRELOAD — may show linker warnings.
+     *   Progress is streamed line-by-line from the subprocess stdout.
      *
      * @param onProgress Optional callback invoked when a __PROGRESS__ marker is
-     *                   parsed from stdout. Only effective in exec mode (JNI returns
-     *                   output after completion, progress is parsed retroactively).
+     *                   parsed from stdout. Works in both JNI and exec modes.
+     * @param onOutputLine Optional callback invoked for each non-progress output line.
      */
     fun executePyz(
         args: List<String>,
@@ -801,11 +803,32 @@ object PythonBridge {
     ): ExecResult {
         val startTime = System.currentTimeMillis()
         Log.d(TAG, "Exec (JNI): $pyz ${args.joinToString(" ")}")
+
+        // Build a line callback that parses __PROGRESS__ markers in real-time
+        // and forwards non-progress output lines to onOutputLine.
+        // This replaces the old retroactive-only parsing that only emitted
+        // the last ProgressUpdate after Py_Main() returned.
+        val lineCallback: ((String) -> Unit)? = if (onProgress != null || onOutputLine != null) {
+            { line: String ->
+                // Try to parse as a progress marker first
+                val isProgress = if (onProgress != null) {
+                    parseProgressLine(line, onProgress)
+                } else {
+                    false
+                }
+                // If not a progress marker, forward to output line callback
+                if (!isProgress) {
+                    onOutputLine?.invoke(line)
+                }
+            }
+        } else null
+
         val result = pyBridge!!.runPython(
             libDir = nativeLibDir!!,
             pyzPath = pyz,
             stdlibDir = stdlibDir!!,
-            args = args
+            args = args,
+            onLine = lineCallback
         )
         val duration = System.currentTimeMillis() - startTime
 
@@ -813,11 +836,15 @@ object PythonBridge {
             Log.w(TAG, "JNI exec exit ${result.exitCode}: ${result.output.take(500)}")
         }
 
-        // JNI mode returns all output after completion — stream retroactively
+        // Safety net: if any progress markers were missed by the line callback
+        // (e.g., partial lines at pipe boundary), emit final state retroactively.
+        // This is a fallback — the primary path is now real-time via onLine.
         if (onProgress != null) {
             parseProgressFromOutput(result.output, onProgress)
         }
-        if (onOutputLine != null) {
+        // If onOutputLine was not wired through onLine (shouldn't happen but defensive),
+        // stream lines retroactively.
+        if (onOutputLine != null && lineCallback == null) {
             for (line in result.output.lines()) {
                 onOutputLine(line)
             }
