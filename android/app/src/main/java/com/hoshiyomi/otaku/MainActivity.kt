@@ -233,6 +233,7 @@ class MainActivity : AppCompatActivity() {
         setupCustomFilenameField()
         setupThemeToggle()
         updateOutputPreview()  // Show default filename preview immediately
+        updateBuildButtonState()  // Disable Build button until partitions are added
 
         requestStoragePermissions()
         handleIncomingIntent(intent)
@@ -1030,6 +1031,18 @@ class MainActivity : AppCompatActivity() {
         // Show/hide empty state hint
         val emptyHint = findViewById<View>(R.id.textEmptyHint)
         emptyHint?.visibility = if (imageFiles.isEmpty()) View.VISIBLE else View.GONE
+
+        // Update Build button enabled state
+        updateBuildButtonState()
+    }
+
+    /**
+     * Disable the Build OTA Now button when required fields are empty.
+     * Required: at least one partition image must be added.
+     */
+    private fun updateBuildButtonState() {
+        val btnExecute = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonExecute)
+        btnExecute?.isEnabled = imageFiles.isNotEmpty() && !isBuilding
     }
 
     private fun updateOutputPreview() {
@@ -1211,8 +1224,8 @@ class MainActivity : AppCompatActivity() {
     private fun setUIExecuting(executing: Boolean) {
         runOnUiThread {
             val btnExecute = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonExecute)
-            btnExecute?.isEnabled = !executing
             btnExecute?.text = if (executing) "BUILDING OTA..." else getString(R.string.button_repack)
+            updateBuildButtonState()
             val container = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
             if (executing) {
                 container?.visibility = View.VISIBLE
