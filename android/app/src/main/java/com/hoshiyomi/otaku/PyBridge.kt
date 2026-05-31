@@ -81,13 +81,17 @@ class PyBridge {
      * @param pyzPath   absolute path to otaku.pyz
      * @param stdlibDir PYTHONHOME directory (extracted stdlib)
      * @param args      command-line arguments for the .pyz
+     * @param onLine    Optional callback invoked for each complete line read from Python's
+     *                  stdout in real-time. Enables live progress parsing during JNI execution
+     *                  instead of waiting for Py_Main() to return.
      * @return PyResult with captured output, exit code, and duration
      */
     fun runPython(
         libDir: String,
         pyzPath: String,
         stdlibDir: String,
-        args: List<String>
+        args: List<String>,
+        onLine: ((String) -> Unit)? = null
     ): PyResult {
         val startTime = System.currentTimeMillis()
 
@@ -103,15 +107,39 @@ class PyBridge {
         }
 
         // Start background thread to read Python's output
+        // Lines are emitted via onLine callback for real-time progress parsing.
+        // PYTHONUNBUFFERED=1 ensures Python flushes after each print(), so
+        // progress markers arrive line-by-line as they are emitted.
         val outputBuilder = StringBuilder()
+        val lineBuffer = StringBuilder()  // accumulates partial lines
         val readerThread = Thread({
             try {
                 val reader = InputStreamReader(FileInputStream("/proc/self/fd/$lastReadFd"), "UTF-8")
                 val buffer = CharArray(8192)
                 var charsRead: Int
                 while (reader.read(buffer).also { charsRead = it } != -1) {
+                    val chunk = String(buffer, 0, charsRead)
                     synchronized(outputBuilder) {
-                        outputBuilder.append(buffer, 0, charsRead)
+                        outputBuilder.append(chunk)
+                    }
+                    // Split chunk into lines and emit complete lines via onLine
+                    if (onLine != null) {
+                        lineBuffer.append(chunk)
+                        var newlineIdx: Int
+                        while (lineBuffer.indexOf('\n').also { newlineIdx = it } >= 0) {
+                            val line = lineBuffer.substring(0, newlineIdx).trimEnd('\r')
+                            lineBuffer.delete(0, newlineIdx + 1)
+                            if (line.isNotEmpty()) {
+                                try { onLine(line) } catch (_: Exception) { /* don't let callback crash reader */ }
+                            }
+                        }
+                    }
+                }
+                // Emit any remaining partial line (Python may not end with newline)
+                if (onLine != null && lineBuffer.isNotEmpty()) {
+                    val remaining = lineBuffer.toString().trimEnd('\r')
+                    if (remaining.isNotEmpty()) {
+                        try { onLine(remaining) } catch (_: Exception) { }
                     }
                 }
                 reader.close()
