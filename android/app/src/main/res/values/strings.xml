@@ -10,7 +10,7 @@
     <string name="label_partitions">PARTITIONS</string>
     <string name="hint_no_images">No images added yet</string>
     <string name="hint_add_images_prompt">Select partition images (.img) to include in the flashable ZIP.</string>
-    <string name="button_add_images">Add Images</string>
+    <string name="button_add_images">Add Partition(s)</string>
     <string name="button_remove_all">Remove All</string>
 
     <!-- Compression section -->
