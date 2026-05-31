@@ -340,7 +340,7 @@
 
                         </com.google.android.material.textfield.TextInputLayout>
 
-                        <!-- Output filename preview — NO italic -->
+                        <!-- Output filename preview — italic filename, non-italic "Preview:" label -->
                         <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -364,6 +364,7 @@
                                 android:layout_weight="1"
                                 android:textSize="12sp"
                                 android:textColor="?attr/colorOnSurfaceVariant"
+                                android:textStyle="italic"
                                 android:maxLines="2"
                                 android:ellipsize="middle"
                                 android:fontFamily="monospace" />
