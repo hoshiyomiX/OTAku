@@ -804,6 +804,10 @@ object PythonBridge {
         val startTime = System.currentTimeMillis()
         Log.d(TAG, "Exec (JNI): $pyz ${args.joinToString(" ")}")
 
+        // Track whether real-time progress was delivered via onLine callback.
+        // Used to skip the retroactive fallback if streaming already worked.
+        var realTimeProgressReceived = false
+
         // Build a line callback that parses __PROGRESS__ markers in real-time
         // and forwards non-progress output lines to onOutputLine.
         // This replaces the old retroactive-only parsing that only emitted
@@ -812,7 +816,9 @@ object PythonBridge {
             { line: String ->
                 // Try to parse as a progress marker first
                 val isProgress = if (onProgress != null) {
-                    parseProgressLine(line, onProgress)
+                    val parsed = parseProgressLine(line, onProgress)
+                    if (parsed) realTimeProgressReceived = true
+                    parsed
                 } else {
                     false
                 }
@@ -836,10 +842,12 @@ object PythonBridge {
             Log.w(TAG, "JNI exec exit ${result.exitCode}: ${result.output.take(500)}")
         }
 
-        // Safety net: if any progress markers were missed by the line callback
-        // (e.g., partial lines at pipe boundary), emit final state retroactively.
-        // This is a fallback — the primary path is now real-time via onLine.
-        if (onProgress != null) {
+        // Retroactive fallback: only if real-time streaming did NOT deliver any progress.
+        // This handles edge cases where the pipe reader missed all __PROGRESS__ lines
+        // (e.g., pipe closed before reader thread consumed them).
+        // If real-time already delivered progress, skip this to avoid overwriting
+        // the real progress state with the final marker (which is always ~100%).
+        if (onProgress != null && !realTimeProgressReceived) {
             parseProgressFromOutput(result.output, onProgress)
         }
         // If onOutputLine was not wired through onLine (shouldn't happen but defensive),
@@ -933,9 +941,10 @@ object PythonBridge {
         return false
     }
 
-    /** Parse all progress markers from completed output (for JNI mode retroactive parsing). */
+    /** Parse all progress markers from completed output (for JNI mode retroactive fallback).
+     *  Emits ALL found progress markers, not just the last one,
+     *  so the UI can animate through intermediate states. */
     private fun parseProgressFromOutput(output: String, onProgress: (ProgressUpdate) -> Unit) {
-        var lastProgress: ProgressUpdate? = null
         for (line in output.lineSequence()) {
             val idx = line.indexOf(PROGRESS_MARKER)
             if (idx < 0) continue
@@ -950,11 +959,9 @@ object PythonBridge {
                 } else {
                     if (total > 0) current * 100 / total else 0
                 }
-                lastProgress = ProgressUpdate(current, total, message, percent.coerceIn(0, 100))
+                onProgress(ProgressUpdate(current, total, message, percent.coerceIn(0, 100)))
             }
         }
-        // Emit the last known progress as final state
-        lastProgress?.let { onProgress(it) }
     }
 
     // ═══════════════════════════════════════════════════════════════

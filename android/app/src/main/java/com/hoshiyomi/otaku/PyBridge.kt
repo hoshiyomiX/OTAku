@@ -147,7 +147,7 @@ class PyBridge {
                 // Pipe closed — expected when Python finishes
             }
         }, "pybridge-output-reader")
-        readerThread.isDaemon = true
+        readerThread.isDaemon = false  // Must finish processing all lines before JVM can proceed
         readerThread.start()
 
         // Redirect stdout/stderr to pipe, then call Python
@@ -164,15 +164,17 @@ class PyBridge {
         nativeFlushOutput()
         nativeRestoreOutput()
 
-        // Wait for reader thread to finish (with timeout)
+        // Wait for reader thread to finish processing all buffered lines.
+        // Increased timeout: large builds can produce substantial output.
         try {
-            readerThread.join(5000)
+            readerThread.join(30_000)
         } catch (_: InterruptedException) {}
 
         val output = synchronized(outputBuilder) { outputBuilder.toString().trim() }
         val duration = System.currentTimeMillis() - startTime
 
-        // Close read fd
+        // Close read fd AFTER reader thread has finished — closing it too early
+        // can cause the reader to miss lines still in the OS pipe buffer.
         try { nativeCloseReadFd() } catch (_: Exception) {}
 
         return PyResult(
