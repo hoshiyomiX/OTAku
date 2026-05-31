@@ -1079,7 +1079,7 @@ class MainActivity : AppCompatActivity() {
             // Ensure .zip extension
             if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
         } else {
-            val device = prefs.getString("device", "")?.trim()
+            val device = prefs.getString("device", "")?.trim().orEmpty()
             OTABridge.buildOutputFileName(device.ifEmpty { "generic" })
         }
 
