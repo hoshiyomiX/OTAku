@@ -4,19 +4,17 @@
 
     Single-purpose: Build partition images (.img) into flashable OTA ZIP.
 
-    Layout (split architecture):
+    Layout (single scroll architecture):
     ┌─────────────────────────────────────────┐
     │ TopAppBar (title + version + theme btn) │
     ├─────────────────────────────────────────┤
-    │ NestedScrollView (weight=1, scrollable) │
+    │ NestedScrollView (full height)          │
     │   Settings Card                         │
     │     Device / Partitions / Compression   │
     │     Level / Output                      │
-    ├─────────────────────────────────────────┤
     │   [BUILD OTA NOW] + ProgressBar         │
-    ├─────────────────────────────────────────┤
-    │ Log Card (weight=1, independent scroll)│
-    │   Header + Copy/Clear + ScrollView      │
+    │   Log Card (below Build button)         │
+    │     Header + Copy/Clear + ScrollView    │
     └─────────────────────────────────────────┘
 -->
 <androidx.coordinatorlayout.widget.CoordinatorLayout
@@ -53,15 +51,14 @@
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
         <!-- ═══════════════════════════════════════════════════ -->
-        <!-- Top Section: Scrollable Settings                    -->
-        <!-- Weight=1 so it shares space equally with Log Card    -->
+        <!-- Scrollable Settings + Build Button + Log Panel      -->
+        <!-- Full height scroll — logs placed below Build button -->
         <!-- ═══════════════════════════════════════════════════ -->
 
         <androidx.core.widget.NestedScrollView
             android:id="@+id/scrollViewSettings"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
+            android:layout_height="match_parent"
             android:fillViewport="true"
             android:scrollbars="vertical"
             android:fadeScrollbars="true"
@@ -443,106 +440,104 @@
                     android:visibility="gone"
                     android:layout_marginBottom="10dp" />
 
+                <!-- ═══════════════════════════════════════════════════ -->
+                <!-- Log Panel — placed below Build button, not locked   -->
+                <!-- ═══════════════════════════════════════════════════ -->
+
+                <com.google.android.material.card.MaterialCardView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    app:cardCornerRadius="16dp"
+                    app:cardElevation="0dp"
+                    app:strokeWidth="1dp"
+                    app:strokeColor="?attr/colorOutlineVariant"
+                    app:cardBackgroundColor="@color/log_background">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+                        <!-- Log header bar -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:paddingHorizontal="12dp"
+                            android:paddingVertical="10dp">
+
+                            <TextView
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="@string/label_output_log"
+                                android:textSize="12sp"
+                                android:textAllCaps="true"
+                                android:letterSpacing="0.08"
+                                android:textColor="@color/log_info" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonCopyLog"
+                                style="Widget.Material3.Button.TextButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="32dp"
+                                android:text="@string/button_copy_log"
+                                android:textSize="12sp"
+                                android:minWidth="0dp"
+                                android:paddingHorizontal="12dp" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonClearLog"
+                                style="Widget.Material3.Button.TextButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="32dp"
+                                android:text="@string/button_clear_log"
+                                android:textSize="12sp"
+                                android:minWidth="0dp"
+                                android:layout_marginStart="8dp"
+                                android:paddingHorizontal="12dp" />
+
+                        </LinearLayout>
+
+                        <!-- Log divider -->
+                        <View
+                            android:layout_width="match_parent"
+                            android:layout_height="1dp"
+                            android:background="@color/log_divider" />
+
+                        <!-- Scrollable log — scrolls within the card, parent NestedScrollView handles outer scroll -->
+                        <ScrollView
+                            android:id="@+id/scrollViewLog"
+                            android:layout_width="match_parent"
+                            android:layout_height="240dp"
+                            android:fillViewport="true"
+                            android:scrollbars="vertical"
+                            android:fadeScrollbars="true"
+                            android:scrollbarThumbVertical="@android:color/darker_gray"
+                            android:scrollbarSize="4dp">
+
+                            <TextView
+                                android:id="@+id/textViewLog"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:padding="12dp"
+                                android:textColor="@color/log_text"
+                                android:fontFamily="monospace"
+                                android:textSize="11sp"
+                                android:lineSpacingMultiplier="1.3"
+                                android:typeface="monospace"
+                                android:textIsSelectable="true" />
+
+                        </ScrollView>
+
+                    </LinearLayout>
+
+                </com.google.android.material.card.MaterialCardView>
+
             </LinearLayout>
 
         </androidx.core.widget.NestedScrollView>
-
-        <!-- ═══════════════════════════════════════════════════ -->
-        <!-- Bottom Section: Log Card (independent scroll)       -->
-        <!-- Weight=1 so it shares space equally with settings  -->
-        <!-- ═══════════════════════════════════════════════════ -->
-
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            app:cardCornerRadius="16dp"
-            app:cardElevation="0dp"
-            app:strokeWidth="1dp"
-            app:strokeColor="?attr/colorOutlineVariant"
-            app:cardBackgroundColor="@color/log_background">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:orientation="vertical">
-
-                <!-- Log header bar -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingHorizontal="12dp"
-                    android:paddingVertical="10dp">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/label_output_log"
-                        android:textSize="12sp"
-                        android:textAllCaps="true"
-                        android:letterSpacing="0.08"
-                        android:textColor="@color/log_info" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/buttonCopyLog"
-                        style="Widget.Material3.Button.TextButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="32dp"
-                        android:text="@string/button_copy_log"
-                        android:textSize="12sp"
-                        android:minWidth="0dp"
-                        android:paddingHorizontal="12dp" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/buttonClearLog"
-                        style="Widget.Material3.Button.TextButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="32dp"
-                        android:text="@string/button_clear_log"
-                        android:textSize="12sp"
-                        android:minWidth="0dp"
-                        android:layout_marginStart="8dp"
-                        android:paddingHorizontal="12dp" />
-
-                </LinearLayout>
-
-                <!-- Log divider -->
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:background="@color/log_divider" />
-
-                <!-- Scrollable log — independent from main settings scroll -->
-                <ScrollView
-                    android:id="@+id/scrollViewLog"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:fillViewport="true"
-                    android:scrollbars="vertical"
-                    android:fadeScrollbars="true"
-                    android:scrollbarThumbVertical="@android:color/darker_gray"
-                    android:scrollbarSize="4dp">
-
-                    <TextView
-                        android:id="@+id/textViewLog"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:padding="12dp"
-                        android:textColor="@color/log_text"
-                        android:fontFamily="monospace"
-                        android:textSize="11sp"
-                        android:lineSpacingMultiplier="1.3"
-                        android:typeface="monospace"
-                        android:textIsSelectable="true" />
-
-                </ScrollView>
-
-            </LinearLayout>
-
-        </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
 

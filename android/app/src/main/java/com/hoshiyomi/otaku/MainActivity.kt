@@ -531,6 +531,13 @@ class MainActivity : AppCompatActivity() {
             findViewById<android.widget.TextView>(R.id.textViewLog).text = ""
             savedLogText.setLength(0)
         }
+
+        // Prevent parent NestedScrollView from stealing scroll events inside the log panel
+        val scrollViewLog = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
+        scrollViewLog?.setOnTouchListener { v, _ ->
+            v.parent?.requestDisallowInterceptTouchEvent(true)
+            false
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
