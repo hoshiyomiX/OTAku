@@ -34,6 +34,7 @@ import androidx.core.content.edit
 import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
 import android.app.NotificationManager
+import android.app.Activity
 import android.app.PendingIntent
 import androidx.core.app.NotificationCompat
 
@@ -188,9 +189,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val imageFileChooser = registerForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris: List<Uri>? ->
-        uris?.let { handleImageFilesSelected(it) }
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val clip = result.data?.clipData
+            val uris = mutableListOf<Uri>()
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) {
+                    uris.add(clip.getItemAt(i).uri)
+                }
+            } else {
+                result.data?.data?.let { uris.add(it) }
+            }
+            if (uris.isNotEmpty()) handleImageFilesSelected(uris)
+        }
     }
 
     private val removeImageConfirm = registerForActivityResult(
@@ -505,7 +517,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupButtons() {
         findViewById<View>(R.id.buttonAddImages).setOnClickListener {
-            imageFileChooser.launch(arrayOf("application/octet-stream", "image/*"))
+            // Launch document picker filtered to .img files only
+            // EXTRA_MIME_TYPES narrows selection — non-.img files are grayed out
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/octet-stream"))
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
+            imageFileChooser.launch(intent)
         }
 
         findViewById<View>(R.id.buttonBrowseOutput).setOnClickListener {
@@ -643,11 +663,17 @@ class MainActivity : AppCompatActivity() {
     private fun handleImageFilesSelected(uris: List<Uri>) {
         lifecycleScope.launch {
             for (uri in uris) {
-                val fileName = getFileName(uri) ?: "image.img"
+                val fileName = getFileName(uri) ?: continue
+
+                // Only accept .img files — reject all others
+                if (!fileName.lowercase().endsWith(".img")) {
+                    showLog("Skipped: $fileName — only .img files are supported", LogLevel.WARN)
+                    continue
+                }
+
                 // Partition name = filename without .img extension
-                val partitionName = if (fileName.lowercase().endsWith(".img"))
-                    fileName.removeSuffix(".img")
-                else fileName.removeSuffix(".IMG")
+                val partitionName = fileName.removeSuffix(".img")
+                    .removeSuffix(".IMG")
 
                 val destFile = File(inputDir, fileName)
 
@@ -1047,16 +1073,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateOutputPreview() {
 
-        // Use custom filename if set, otherwise auto-generate
+        // Use custom filename if set, otherwise auto-generate from device name
         val customName = prefs.getString("pref_custom_filename", "")?.trim()
         val fileName = if (!customName.isNullOrEmpty()) {
             // Ensure .zip extension
             if (customName.lowercase().endsWith(".zip")) customName else "$customName.zip"
-        } else if (imageFiles.isNotEmpty()) {
-            val device = prefs.getString("device", "")?.trim()
-            OTABridge.buildOutputFileName(device ?: "generic")
         } else {
-            "flashable_generic.zip"
+            val device = prefs.getString("device", "")?.trim()
+            OTABridge.buildOutputFileName(device.ifEmpty { "generic" })
         }
 
         // Show preview in dedicated TextView
