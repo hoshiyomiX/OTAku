@@ -136,7 +136,12 @@ object OTABridge {
                 level = level,
                 outputPath = outputPath,
                 device = effectiveDevice,
-                skipVerify = skipVerify
+                skipVerify = skipVerify,
+                onProgress = onProgress?.let { cb ->
+                    { current, total, message, percent ->
+                        cb.invoke(ProgressUpdate(current, total, message, percent))
+                    }
+                }
             )
 
             // Emit all Rust output lines to the log

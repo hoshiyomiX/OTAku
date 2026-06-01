@@ -108,9 +108,14 @@ class OTAService : Service() {
             level = level,
             outputPath = outputPath,
             onProgress = { progress ->
-                // Update notification with progress percentage
-                val notifText = "Building: $progress.percent% — ${progress.message}"
-                updateNotification(notifText)
+                // Update notification with real-time per-partition progress
+                val notifText = "Compressing ${progress.message} (${progress.current}/${progress.total}) — ${progress.percent}%"
+                val overallPercent = if (progress.total > 0) {
+                    ((progress.current - 1) * 100 + progress.percent) / progress.total
+                } else {
+                    progress.percent
+                }
+                updateNotification(notifText, progressPercent = overallPercent)
                 // Broadcast progress to MainActivity for progress bar
                 broadcastProgress(progress)
             },
@@ -160,29 +165,31 @@ class OTAService : Service() {
         }
     }
 
-    private fun updateNotification(text: String, isSuccess: Boolean = false, isError: Boolean = false) {
-        val notification = buildNotification(text, isSuccess, isError)
+    private fun updateNotification(text: String, isSuccess: Boolean = false, isError: Boolean = false, progressPercent: Int = -1) {
+        val notification = buildNotification(text, isSuccess, isError, progressPercent)
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
     private fun buildNotification(
         text: String,
         isSuccess: Boolean = false,
-        isError: Boolean = false
+        isError: Boolean = false,
+        progressPercent: Int = -1
     ): android.app.Notification {
         return NotificationCompat.Builder(this, OTAkuApp.CHANNEL_ID)
             .setContentTitle(NOTIFICATION_TITLE)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true) // Non-swipeable while running
+            .setOngoing(!isSuccess && !isError) // Non-swipeable while running
             .setSilent(true) // No sound for status updates
             .apply {
-                if (isSuccess) {
-                    setAutoCancel(true) // Allow dismiss on success
+                if (progressPercent >= 0) {
+                    setProgress(100, progressPercent.coerceIn(0, 100), false)
                 }
-                if (isError) {
-                    setAutoCancel(true) // Allow dismiss on error
+                if (isSuccess || isError) {
+                    setAutoCancel(true) // Allow dismiss on success/error
+                    setOngoing(false)
                 }
             }
             .build()

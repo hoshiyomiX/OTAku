@@ -267,6 +267,21 @@ object NativeBridge {
     // ═══════════════════════════════════════════════════════════════
 
     /**
+     * Progress callback interface for DD build operations.
+     *
+     * Called by the Rust native backend during compression to report
+     * real-time per-partition progress back to Kotlin.
+     *
+     * @param current 1-based partition index being compressed
+     * @param total Total number of partitions
+     * @param message Partition name (e.g. "boot", "system")
+     * @param percent Compression progress 0-100 for this partition
+     */
+    interface BuildProgressCallback {
+        fun onProgress(current: Int, total: Int, message: String, percent: Int)
+    }
+
+    /**
      * Build a DD-mode flashable ZIP from partition images.
      *
      * Generates a flashable ZIP containing:
@@ -281,6 +296,7 @@ object NativeBridge {
      * @param outputPath Absolute path for output .zip file
      * @param device Device codename(s), comma-separated
      * @param skipVerify Skip post-flash SHA-256 verification
+     * @param onProgress Optional callback for real-time progress updates
      * @return DdBuildResult with success/error, paths, sizes
      */
     fun buildDd(
@@ -289,17 +305,31 @@ object NativeBridge {
         level: Int = 0,
         outputPath: String,
         device: String = "generic",
-        skipVerify: Boolean = false
+        skipVerify: Boolean = false,
+        onProgress: ((Int, Int, String, Int) -> Unit)? = null
     ): DdBuildResult {
         if (!isLoaded) {
             return DdBuildResult.error("Native library not loaded: $loadError")
         }
         Log.d(TAG, "buildDd() images=${images.keys}, compression=$compression, level=$level, output=$outputPath, device=$device, skipVerify=$skipVerify")
+
+        // Create JNI callback wrapper if progress reporting is requested
+        val callback = if (onProgress != null) {
+            object : BuildProgressCallback {
+                override fun onProgress(current: Int, total: Int, message: String, percent: Int) {
+                    onProgress.invoke(current, total, message, percent)
+                }
+            }
+        } else {
+            null
+        }
+
         return try {
             val imagesJson = JSONObject(images).toString()
             val resultJson = nativeBuildDd(
                 imagesJson, compression, level, outputPath, device,
-                if (skipVerify) 1 else 0
+                if (skipVerify) 1 else 0,
+                callback
             )
             val result = parseDdBuildResult(resultJson)
             Log.d(TAG, "buildDd() result: success=${result.success}, zip_path=${result.zipPath}, duration=${result.durationMs}ms")
@@ -662,6 +692,7 @@ object NativeBridge {
         level: Int,
         outputPath: String,
         device: String,
-        skipVerify: Int
+        skipVerify: Int,
+        callback: BuildProgressCallback?
     ): String
 }

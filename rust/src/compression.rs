@@ -632,6 +632,180 @@ pub fn hash_and_compress_file(
 }
 
 // ---------------------------------------------------------------------------
+//  Hash and compress a file with real-time progress reporting
+// ---------------------------------------------------------------------------
+
+/// Hash and compress a file with real-time progress reporting.
+///
+/// Same as `hash_and_compress_file` but calls the progress callback
+/// after each chunk is read and fed to the compressor.
+/// Throttled to report at most once per ~1% change to avoid flooding
+/// the JNI bridge.
+///
+/// The callback signature is `(bytes_read, file_size)`.
+pub fn hash_and_compress_file_with_progress(
+    file_path: &str,
+    algorithm: &str,
+    level: Option<i32>,
+    mut on_progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<(Vec<u8>, String), String> {
+    use sha2::{Digest, Sha256};
+    use std::fs::File;
+
+    let file_size = std::fs::metadata(file_path)
+        .map_err(|e| format!("Cannot stat {}: {}", file_path, e))?
+        .len();
+
+    let mut file =
+        File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
+    let mut hasher = Sha256::new();
+    let chunk_size = 4 * 1024 * 1024; // 4 MB chunks
+    let mut buf = vec![0u8; chunk_size];
+    let mut bytes_read: u64 = 0;
+    let mut last_reported_percent: i32 = -1;
+
+    // Throttled progress callback: only fires when percent changes by >= 1
+    let mut report_progress = |read: u64, total: u64| {
+        if let Some(ref mut cb) = on_progress {
+            let percent = if total > 0 {
+                (read as f64 / total as f64 * 100.0) as i32
+            } else {
+                100
+            };
+            if percent != last_reported_percent {
+                last_reported_percent = percent;
+                cb(read, total);
+            }
+        }
+    };
+
+    if is_alg(algorithm, ALG_NONE) {
+        let mut raw_buf = Vec::with_capacity(file_size as usize);
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            raw_buf.extend_from_slice(&buf[..n]);
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((raw_buf, hex));
+    }
+
+    let resolved_level = resolve_level(algorithm, level);
+
+    if is_alg(algorithm, ALG_GZIP) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let level_clamped = resolved_level.clamp(1, 9) as u32;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level_clamped));
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("gzip compress write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        let compressed = encoder
+            .finish()
+            .map_err(|e| format!("gzip compress finish error: {}", e))?;
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((compressed, hex));
+    }
+
+    if is_alg(algorithm, ALG_BZIP2) {
+        use bzip2::write::BzEncoder;
+        use bzip2::Compression;
+
+        let level_clamped = resolved_level.clamp(1, 9) as u32;
+        let mut encoder = BzEncoder::new(Vec::new(), Compression::new(level_clamped));
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("bzip2 compress write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        let compressed = encoder
+            .finish()
+            .map_err(|e| format!("bzip2 compress finish error: {}", e))?;
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((compressed, hex));
+    }
+
+    if is_alg(algorithm, ALG_XZ) {
+        let level_clamped = resolved_level.clamp(0, 9) as u32;
+        let inner = Vec::new();
+        let mut encoder = xz2::write::XzEncoder::new(inner, level_clamped);
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("xz compress write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        let compressed = encoder
+            .finish()
+            .map_err(|e| format!("xz compress finish error: {}", e))?;
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((compressed, hex));
+    }
+
+    if is_alg(algorithm, ALG_BROTLI) {
+        let quality = resolved_level.clamp(0, 11) as u32;
+        let mut result = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut result, 4096, quality, 22);
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("brotli compress write error: {}", e))?;
+                bytes_read += n as u64;
+                report_progress(bytes_read, file_size);
+            }
+        }
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((result, hex));
+    }
+
+    Err(format!("Unknown compression algorithm: {:?}", algorithm))
+}
+
+// ---------------------------------------------------------------------------
 //  Operation type mapping
 // ---------------------------------------------------------------------------
 
