@@ -134,12 +134,6 @@ jobs:
             echo "ERROR: APK does NOT contain libotaku_native.so"
             exit 1
           fi
-          # Check that Python .so files are NOT in the APK
-          if unzip -l "$APK_FILE" | grep -q "libpython3"; then
-            echo "WARNING: APK still contains Python .so files (should be removed in Phase 4)"
-          else
-            echo "[OK] APK does not contain Python .so files"
-          fi
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4

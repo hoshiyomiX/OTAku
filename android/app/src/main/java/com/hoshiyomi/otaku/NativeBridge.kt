@@ -469,11 +469,11 @@ object NativeBridge {
             minorVersion = headerJson.optInt("minor_version", 0)
         )
 
-        val partitionsArr = manifestJson.optJSONArray("partitions") ?: emptyList()
-        val partitions = (0 until partitionsArr.length()).mapNotNull { i ->
+        val partitionsArr = manifestJson.optJSONArray("partitions")
+        val partitions = if (partitionsArr != null) (0 until partitionsArr.length()).mapNotNull { i ->
             val pj = partitionsArr.optJSONObject(i) ?: return@mapNotNull null
-            val opsArr = pj.optJSONArray("install_operations") ?: emptyList()
-            val ops = (0 until opsArr.length()).mapNotNull { j ->
+            val opsArr = pj.optJSONArray("install_operations")
+            val ops = if (opsArr != null) (0 until opsArr.length()).mapNotNull { j ->
                 val oj = opsArr.optJSONObject(j) ?: return@mapNotNull null
                 OpInfo(
                     type = oj.optInt("type", 0),
@@ -482,13 +482,13 @@ object NativeBridge {
                     dataLength = oj.optLong("data_length", 0),
                     dstLength = oj.optInt("dst_length", 0)
                 )
-            }
+            } else emptyList()
             PartitionInfo(
                 partitionName = pj.optString("partition_name", ""),
                 runPostinstall = pj.optBoolean("run_postinstall", false),
                 operations = ops
             )
-        }
+        } else emptyList()
 
         val manifest = ManifestInfo(
             blockSize = manifestJson.optLong("block_size", 4096),
@@ -528,8 +528,8 @@ object NativeBridge {
         if (!json.optBoolean("success", false)) {
             return WritePayloadResult.error(json.optString("error", "Unknown error"))
         }
-        val partsArr = json.optJSONArray("partitions") ?: emptyList()
-        val partitions = (0 until partsArr.length()).mapNotNull { i ->
+        val partsArr = json.optJSONArray("partitions")
+        val partitions = if (partsArr != null) (0 until partsArr.length()).mapNotNull { i ->
             val pj = partsArr.optJSONObject(i) ?: return@mapNotNull null
             PartitionSummary(
                 name = pj.optString("name", ""),
@@ -541,7 +541,7 @@ object NativeBridge {
                 opTypeName = pj.optString("op_type_name", ""),
                 sha256 = pj.optString("sha256", "")
             )
-        }
+        } else emptyList()
         return WritePayloadResult(
             success = true,
             output = json.optString("output", ""),

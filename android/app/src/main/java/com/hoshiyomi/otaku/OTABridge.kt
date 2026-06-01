@@ -28,12 +28,27 @@ data class OTAResult(
 }
 
 /**
- * OTABridge — Kotlin singleton that bridges the Android UI to otaku.pyz.
+ * ProgressUpdate — progress callback data for OTA build operations.
+ *
+ * Used by OTABridge.dd() and OTAService to report real-time progress
+ * from the Rust native backend (NativeBridge).
+ */
+data class ProgressUpdate(
+    val current: Int,
+    val total: Int,
+    val message: String,
+    val percent: Int
+)
+
+/**
+ * OTABridge — Kotlin singleton that bridges the Android UI to the Rust native backend.
  *
  * This app is DD-mode only: generates otaku-format flashable ZIPs
  * from partition images (.img) for TWRP/OrangeFox recovery flashing.
  *
  * Supported compression: none, gzip, bzip2, xz, brotli
+ *
+ * All operations use NativeBridge (Rust libotaku_native.so) — no Python dependency.
  */
 object OTABridge {
 
@@ -46,7 +61,7 @@ object OTABridge {
 
 
     // Compression level ranges per algorithm: (min, max, default)
-    // Ranges match Python compression.py LEVEL_RANGES and DEFAULT_LEVELS.
+    // Ranges match the Rust native backend LEVEL_RANGES and DEFAULT_LEVELS.
     val COMPRESS_LEVELS = mapOf(
         "none" to Triple(0, 0, 0),
         "gzip" to Triple(1, 9, 6),
@@ -54,34 +69,6 @@ object OTABridge {
         "xz" to Triple(0, 9, 6),
         "brotli" to Triple(0, 11, 6)
     )
-
-
-    /**
-     * Execute otaku.pyz with the given CLI arguments.
-     * PythonBridge.executePyz auto-configures the environment based on
-     * whether Python is bundled or system (Termux).
-     */
-    private suspend fun executePyz(args: List<String>, onProgress: ((ProgressUpdate) -> Unit)? = null, onOutputLine: ((String) -> Unit)? = null): OTAResult {
-        return withContext(Dispatchers.IO) {
-            // Boost thread priority for CPU-intensive build operations.
-            // THREAD_PRIORITY_DEFAULT=0, negative = higher priority.
-            // -10 gives ~80% CPU allocation (substantial boost over default).
-            try {
-                Process.setThreadPriority(Process.myTid(), -10)
-            } catch (_: Exception) {}
-
-            val execResult = PythonBridge.executePyz(args, onProgress, onOutputLine)
-
-            if (execResult.success) {
-                OTAResult.success(execResult.output, execResult.durationMs)
-            } else {
-                OTAResult.error(
-                    message = execResult.error ?: "Exit code ${execResult.exitCode}",
-                    durationMs = execResult.durationMs
-                ).copy(output = execResult.output)
-            }
-        }
-    }
 
     // ═══════════════════════════════════════════════════════════════
     //  Core operation — DD mode only
@@ -97,7 +84,7 @@ object OTABridge {
      *   - flash_info.txt (human-readable metadata)
      *
      * Uses the Rust native backend (NativeBridge) for all compression and
-     * ZIP creation. Falls back to PythonBridge if native library is not loaded.
+     * ZIP creation. Requires libotaku_native.so to be loaded.
      *
      * @param images Map of partition name -> absolute path to .img file
      * @param device Device codename(s), comma-separated (e.g. "crosshatch" or "OP11,OP11A")
@@ -120,55 +107,34 @@ object OTABridge {
         if (compression !in ALL_COMPRESSION)
             return OTAResult.error("Invalid compression: '$compression'")
 
-        // Prefer Rust native backend (faster, no Python dependency)
-        if (NativeBridge.isLoaded) {
-            return withContext(Dispatchers.IO) {
-                try {
-                    Process.setThreadPriority(Process.myTid(), -10)
-                } catch (_: Exception) {}
+        // Rust native backend required
+        if (!NativeBridge.isLoaded) {
+            return OTAResult.error("Native backend not loaded: ${NativeBridge.loadError}")
+        }
 
-                val ddResult = NativeBridge.buildDd(
-                    images = images,
-                    compression = compression,
-                    level = level,
-                    outputPath = outputPath,
-                    device = device.ifEmpty { "generic" },
-                    skipVerify = skipVerify
-                )
+        return withContext(Dispatchers.IO) {
+            try {
+                Process.setThreadPriority(Process.myTid(), -10)
+            } catch (_: Exception) {}
 
-                if (ddResult.success) {
-                    OTAResult.success(ddResult.output, ddResult.durationMs)
-                } else {
-                    OTAResult.error(
-                        ddResult.error ?: "Native build failed",
-                        ddResult.durationMs
-                    ).copy(output = ddResult.output)
-                }
+            val ddResult = NativeBridge.buildDd(
+                images = images,
+                compression = compression,
+                level = level,
+                outputPath = outputPath,
+                device = device.ifEmpty { "generic" },
+                skipVerify = skipVerify
+            )
+
+            if (ddResult.success) {
+                OTAResult.success(ddResult.output, ddResult.durationMs)
+            } else {
+                OTAResult.error(
+                    ddResult.error ?: "Native build failed",
+                    ddResult.durationMs
+                ).copy(output = ddResult.output)
             }
         }
-
-        // Fallback: Python backend (legacy, for devices without native .so)
-        val args = mutableListOf("dd")
-        for ((name, path) in images) {
-            args.add("--image"); args.add(path)
-            args.add("--partition"); args.add(name)
-        }
-        args.add("-o")
-        args.add(outputPath)
-        if (compression != "gzip") {
-            args.add("--compress")
-            args.add(compression)
-        }
-        if (level > 0) {
-            args.add("--compress-level")
-            args.add(level.toString())
-        }
-        if (skipVerify) {
-            args.add("--skip-verify")
-        }
-        args.add("--device")
-        args.add(device.ifEmpty { "generic" })
-        return executePyz(args, onProgress, onOutputLine)
     }
 
     /**
@@ -189,12 +155,4 @@ object OTABridge {
     //  Utility methods
     // ═══════════════════════════════════════════════════════════════
 
-    suspend fun getPyzVersion(): String? {
-        return withContext(Dispatchers.IO) {
-            try {
-                val result = PythonBridge.executePyz(listOf("--version"))
-                if (result.success) result.output.trim() else null
-            } catch (_: Exception) { null }
-        }
-    }
 }

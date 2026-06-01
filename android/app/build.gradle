@@ -1,7 +1,6 @@
 // OTAku Android — app module build.gradle (Groovy DSL)
 // Rust native backend (libotaku_native.so) built by cargo-ndk.
 // .so files placed in jniLibs/<abi>/ by CI build step.
-// No Python runtime, no Chaquopy, no Termux .so files.
 
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
@@ -14,7 +13,7 @@ android {
         applicationId 'com.hoshiyomi.otaku'
         minSdk 26
         targetSdk 34
-        versionCode 28
+        versionCode 29
         versionName '3.2.0'
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
