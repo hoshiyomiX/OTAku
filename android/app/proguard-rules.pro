@@ -26,6 +26,17 @@
 -keep class com.hoshiyomi.otaku.NativeBridge { *; }
 -keep class com.hoshiyomi.otaku.NativeBridge$Companion { *; }
 -keep class com.hoshiyomi.otaku.NativeBridge$DepCheckResult { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$PayloadResult { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$PayloadHeaderInfo { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$ManifestInfo { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$PartitionInfo { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$OpInfo { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$PartitionInfoData { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$ExtractResult { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$WritePayloadResult { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$PartitionSummary { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$VerifyResult { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$CompressResult { *; }
 -keepclassmembers class com.hoshiyomi.otaku.NativeBridge {
     native <methods>;
 }

@@ -1,7 +1,7 @@
 //! DD mode — Generate an otaku-format flashable ZIP from partition images.
 //!
 //! Phase 3 will implement the full DD build pipeline.
-//! Phase 1: Stub module that compiles.
+//! Phase 2: Updated stub with proper Default impl for PartitionUpdate.
 
 use serde::{Deserialize, Serialize};
 
