@@ -113,6 +113,10 @@ class OTAService : Service() {
                 updateNotification(notifText)
                 // Broadcast progress to MainActivity for progress bar
                 broadcastProgress(progress)
+            },
+            onOutputLine = { line ->
+                // Log Rust backend output lines
+                Log.d(TAG, line)
             }
         )
 

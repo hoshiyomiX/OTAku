@@ -27,6 +27,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import java.lang.ref.WeakReference
 import java.io.File
 import java.io.FileOutputStream
@@ -808,109 +811,133 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                val result = OTABridge.dd(
-                    images = images,
-                    device = deviceValue,
-                    compression = selectedCompression,
-                    level = selectedCompressionLevel,
-                    outputPath = outPath,
-                    onProgress = { progress ->
-                        // Update heartbeat timestamp (survives Activity recreation)
-                        lastProgressTime = System.currentTimeMillis()
+                // Start heartbeat coroutine — updates notification with elapsed time
+                // since JNI call blocks with no progress callbacks
+                val buildStartTime = System.currentTimeMillis()
+                val heartbeatJob = CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                    while (isActive) {
+                        delay(10_000) // 10 seconds
+                        val elapsed = (System.currentTimeMillis() - buildStartTime) / 1000
+                        val minutes = elapsed / 60
+                        val seconds = elapsed % 60
+                        val elapsedStr = if (minutes > 0) "${minutes}m ${seconds}s" else "${seconds}s"
+                        showProgressNotification("Compressing… ($elapsedStr elapsed)", 0)
+                    }
+                }
 
-                        // Update notification (works even when Activity is destroyed)
-                        val msg = "${progress.message} — ${progress.percent}%"
-                        if (msg != lastProgressMessage) {
-                            lastProgressMessage = msg
-                            showProgressNotification(msg, progress.percent)
-                        }
+                try {
+                    val result = OTABridge.dd(
+                        images = images,
+                        device = deviceValue,
+                        compression = selectedCompression,
+                        level = selectedCompressionLevel,
+                        outputPath = outPath,
+                        onProgress = { progress ->
+                            // Cancel heartbeat — real progress is arriving
+                            heartbeatJob.cancel()
 
-                        // Update split progress bars (per-partition) using message-based mapping.
-                        // progress.current is 1-based across ALL steps (Step 1 + N partitions + Step 2 + Step 3),
-                        // so numeric index mapping is unreliable. Map by partition name from message instead.
-                        if (partitionCount > 0) {
-                            val msg = progress.message
-                            val pIdx = when {
-                                msg.startsWith("Compressing ") -> {
-                                    val name = msg.removePrefix("Compressing ").trim()
-                                    partitionNames.indexOf(name)
-                                }
-                                msg.contains("Building otaku") -> {
-                                    // Pre-partition step: show bar 0 as indeterminate (process started)
-                                    currentPartitionIndex = 0
-                                    -2  // special sentinel
-                                }
-                                msg.contains("Building flasher") || msg.contains("Writing output") -> {
-                                    // Post-partition steps: mark all bars complete
-                                    for (j in 0 until partitionCount) {
-                                        partitionProgress[j] = 100
-                                    }
-                                    currentPartitionIndex = partitionCount - 1
-                                    -1  // skip bar update below
-                                }
-                                else -> -1
+                            // Update heartbeat timestamp (survives Activity recreation)
+                            lastProgressTime = System.currentTimeMillis()
+
+                            // Update notification (works even when Activity is destroyed)
+                            val msg = "${progress.message} — ${progress.percent}%"
+                            if (msg != lastProgressMessage) {
+                                lastProgressMessage = msg
+                                showProgressNotification(msg, progress.percent)
                             }
-                            when {
-                                pIdx == -2 -> { /* indeterminate handled in UI update block */ }
-                                pIdx >= 0 && pIdx < partitionCount -> {
-                                    partitionProgress[pIdx] = progress.percent
-                                    currentPartitionIndex = pIdx
-                                    // Relay: mark all previous partitions as complete
-                                    for (j in 0 until pIdx) {
-                                        if (partitionProgress[j] < 100) partitionProgress[j] = 100
-                                    }
-                                }
-                            }
-                        }
 
-                        // Only log when percent changes (not every chunk)
-                        val current = activityRef?.get()
-                        if (current != null && !current.isFinishing && !current.isDestroyed) {
-                            current.runOnUiThread {
-                                // Update split progress bars — bars live inside a tagged horizontal child
-                                val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                                val barRow = container?.findViewWithTag<android.widget.LinearLayout>("bar_row")
-                                if (barRow != null && barRow.childCount == partitionCount) {
-                                    for (i in 0 until partitionCount) {
-                                        val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                                        if (bar != null) {
-                                            // During pre-partition step (sentinel -2), show bar 0 as indeterminate
-                                            if (currentPartitionIndex == 0 && partitionProgress[0] == 0 && i == 0
-                                                && progress.message.contains("Building otaku")) {
-                                                bar.isIndeterminate = true
-                                            } else {
-                                                bar.isIndeterminate = false
-                                                bar.progress = partitionProgress[i]
-                                            }
+                            // Update split progress bars (per-partition) using message-based mapping.
+                            // progress.current is 1-based across ALL steps (Step 1 + N partitions + Step 2 + Step 3),
+                            // so numeric index mapping is unreliable. Map by partition name from message instead.
+                            if (partitionCount > 0) {
+                                val msg = progress.message
+                                val pIdx = when {
+                                    msg.startsWith("Compressing ") -> {
+                                        val name = msg.removePrefix("Compressing ").trim()
+                                        partitionNames.indexOf(name)
+                                    }
+                                    msg.contains("Building otaku") -> {
+                                        // Pre-partition step: show bar 0 as indeterminate (process started)
+                                        currentPartitionIndex = 0
+                                        -2  // special sentinel
+                                    }
+                                    msg.contains("Building flasher") || msg.contains("Writing output") -> {
+                                        // Post-partition steps: mark all bars complete
+                                        for (j in 0 until partitionCount) {
+                                            partitionProgress[j] = 100
+                                        }
+                                        currentPartitionIndex = partitionCount - 1
+                                        -1  // skip bar update below
+                                    }
+                                    else -> -1
+                                }
+                                when {
+                                    pIdx == -2 -> { /* indeterminate handled in UI update block */ }
+                                    pIdx >= 0 && pIdx < partitionCount -> {
+                                        partitionProgress[pIdx] = progress.percent
+                                        currentPartitionIndex = pIdx
+                                        // Relay: mark all previous partitions as complete
+                                        for (j in 0 until pIdx) {
+                                            if (partitionProgress[j] < 100) partitionProgress[j] = 100
                                         }
                                     }
                                 }
                             }
-                            // Log only when percent changes
-                            if (progress.percent != lastProgressPercent) {
-                                lastProgressPercent = progress.percent
-                                current.showLog("${progress.message} ${progress.percent}%")
+
+                            // Only log when percent changes (not every chunk)
+                            val current = activityRef?.get()
+                            if (current != null && !current.isFinishing && !current.isDestroyed) {
+                                current.runOnUiThread {
+                                    // Update split progress bars — bars live inside a tagged horizontal child
+                                    val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                                    val barRow = container?.findViewWithTag<android.widget.LinearLayout>("bar_row")
+                                    if (barRow != null && barRow.childCount == partitionCount) {
+                                        for (i in 0 until partitionCount) {
+                                            val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                                            if (bar != null) {
+                                                // During pre-partition step (sentinel -2), show bar 0 as indeterminate
+                                                if (currentPartitionIndex == 0 && partitionProgress[0] == 0 && i == 0
+                                                    && progress.message.contains("Building otaku")) {
+                                                    bar.isIndeterminate = true
+                                                } else {
+                                                    bar.isIndeterminate = false
+                                                    bar.progress = partitionProgress[i]
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Log only when percent changes
+                                if (progress.percent != lastProgressPercent) {
+                                    lastProgressPercent = progress.percent
+                                    current.showLog("${progress.message} ${progress.percent}%")
+                                }
+                            }
+                        },
+                        onOutputLine = { line ->
+                            // Stream native backend output to log in real-time
+                            val current = activityRef?.get()
+                            if (current != null && !current.isFinishing && !current.isDestroyed) {
+                                current.showLog(line)
                             }
                         }
-                    },
-                    onOutputLine = { line ->
-                        // Stream native backend output to log in real-time
-                        val current = activityRef?.get()
-                        if (current != null && !current.isFinishing && !current.isDestroyed) {
-                            current.showLog(line)
-                        }
-                    }
-                )
-
-                // Handle result on current Activity instance
-                val current = activityRef?.get()
-                if (current != null && !current.isFinishing && !current.isDestroyed) {
-                    current.handleBuildResult(
-                        success = result.success,
-                        output = result.output,
-                        error = result.error,
-                        durationMs = result.durationMs
                     )
+
+                    heartbeatJob.cancel()
+
+                    // Handle result on current Activity instance
+                    val current = activityRef?.get()
+                    if (current != null && !current.isFinishing && !current.isDestroyed) {
+                        current.handleBuildResult(
+                            success = result.success,
+                            output = result.output,
+                            error = result.error,
+                            durationMs = result.durationMs
+                        )
+                    }
+                } catch (e: Exception) {
+                    heartbeatJob.cancel()
+                    throw e
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 showCompletionNotification(false, "Build cancelled")
@@ -1248,7 +1275,8 @@ class MainActivity : AppCompatActivity() {
     //  Log Level System
     // ═══════════════════════════════════════════════════════════════
 
-    private enum class LogLevel(val tag: String, val colorRes: Int) {
+    enum class LogLevel(val tag: String, val colorRes: Int) {
+        DEBUG("DEBUG", R.color.log_debug),
         INFO("INFO", R.color.log_info),
         WARN("WARN", R.color.log_warning),
         ERROR("ERR ", R.color.log_error),
@@ -1256,7 +1284,11 @@ class MainActivity : AppCompatActivity() {
         PLAIN("", 0),
     }
 
-    private fun showLog(text: String, level: LogLevel = LogLevel.PLAIN) {
+    private fun showLog(text: String, level: LogLevel = LogLevel.INFO) {
+        // Add timestamp prefix [HH:mm:ss]
+        val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+        val timestamp = sdf.format(java.util.Date())
+
         val line = if (text.endsWith("\n")) text else "$text\n"
         // Persist to companion object (survives Activity recreation)
         savedLogText.append(line)
@@ -1267,7 +1299,7 @@ class MainActivity : AppCompatActivity() {
             if (level == LogLevel.PLAIN) {
                 textView.append(line)
             } else {
-                val prefix = "[${level.tag}] "
+                val prefix = "[$timestamp] [${level.tag}] "
                 val colored = SpannableString("$prefix$line")
                 try {
                     colored.setSpan(
