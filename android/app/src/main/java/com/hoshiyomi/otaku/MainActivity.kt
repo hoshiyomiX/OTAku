@@ -894,7 +894,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     },
                     onOutputLine = { line ->
-                        // Stream Python stdout to log in real-time
+                        // Stream native backend output to log in real-time
                         val current = activityRef?.get()
                         if (current != null && !current.isFinishing && !current.isDestroyed) {
                             current.showLog(line)

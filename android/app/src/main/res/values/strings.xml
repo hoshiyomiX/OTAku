@@ -50,8 +50,8 @@
     <string name="label_output_log">Logs</string>
 
     <!-- Status messages -->
-    <string name="log_init_success">otaku %1$s loaded — Python %2$s (%3$s)</string>
-    <string name="status_initializing">Initializing Python runtime…</string>
+    <string name="log_init_success">otaku-native %1$s loaded</string>
+    <string name="status_initializing">Initializing native backend…</string>
     <string name="status_executing">Building partitions…</string>
 
     <!-- About dialog -->
