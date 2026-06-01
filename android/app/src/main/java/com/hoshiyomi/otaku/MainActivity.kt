@@ -49,8 +49,7 @@ import androidx.core.app.NotificationCompat
  *   3. Select output directory
  *   4. Tap "Build" to generate flashable OTA ZIP
  *
- * Python runtime: external Python (Termux recommended).
- * otaku.pyz is bundled as an asset and extracted at first launch.
+ * Native backend: Rust (libotaku_native.so) — no Python dependency.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -105,7 +104,7 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var appContext: Context? = null
 
         // Cached dependency check result (updated at init, used for pre-build validation)
-        @Volatile var cachedDepCheck: PythonBridge.DepCheckResult? = null
+        @Volatile var cachedDepCheck: NativeBridge.DepCheckResult? = null
             private set
 
         /** Show ongoing progress notification with determinate progress bar. */
@@ -236,7 +235,7 @@ class MainActivity : AppCompatActivity() {
         inputDir = File(filesDir, "input").also { it.mkdirs() }
         outputDir = File("/storage/emulated/0/OTAku").also { it.mkdirs() }
 
-        initializePython()
+        initializeNative()
         setupCompressionSelector()
         setupButtons()
         setupToolbar()
@@ -260,51 +259,29 @@ class MainActivity : AppCompatActivity() {
     //  Initialization
     // ═══════════════════════════════════════════════════════════════
 
-    private fun initializePython() {
+    private fun initializeNative() {
         lifecycleScope.launch {
             showLog("Initializing OTAku...", LogLevel.INFO)
 
-            // Check native (Rust) backend first
+            // Check native (Rust) backend
             if (NativeBridge.isLoaded) {
                 val nativeVersion = NativeBridge.getVersion()
                 showLog("Native backend: $nativeVersion", LogLevel.INFO)
                 val depCheck = NativeBridge.checkDeps()
                 val available = depCheck.available.joinToString(", ")
                 showLog("Native compression: $available", LogLevel.INFO)
-            } else {
-                showLog("Native backend not loaded: ${NativeBridge.loadError}", LogLevel.WARN)
-            }
-
-            // Fall back to Python backend if native not available
-            // (Phase 4 will remove Python entirely)
-            withContext(Dispatchers.IO) {
-                val result = PythonBridge.ensureInitialized(this@MainActivity)
-                withContext(Dispatchers.Main) {
-                    if (result.success) {
-                        lifecycleScope.launch {
-                            // Run dependency health check (returns concise single-line summary)
-                            val depReport = withContext(Dispatchers.IO) {
-                                PythonBridge.checkDependencies()
-                            }
-                            showLog("OTAku ready — $depReport")
-
-                            // Cache parsed result for pre-build validation
-                            cachedDepCheck = withContext(Dispatchers.IO) {
-                                PythonBridge.checkDependenciesParsed()
-                            }
-                        }
-                    } else {
-                        showLog("Python init failed: ${result.error}", LogLevel.ERROR)
-                        // Show detailed diagnostics so the user can report them
-                        if (result.diagnostics.isNotBlank()) {
-                            showLog(result.diagnostics)
-                        }
-                        showLog("Possible causes:")
-                        showLog("  - APK installed from an old build (before v3.0)")
-                        showLog("  - App installed but native libs extraction failed")
-                        showLog("  - Try: Uninstall > Re-download latest APK > Install")
-                    }
+                cachedDepCheck = depCheck
+                if (depCheck.allOk) {
+                    showLog("OTAku ready")
+                } else {
+                    showLog("Some compression algorithms unavailable", LogLevel.WARN)
                 }
+            } else {
+                showLog("Native backend not loaded: ${NativeBridge.loadError}", LogLevel.ERROR)
+                showLog("Possible causes:")
+                showLog("  - APK installed from an old build (before v3.0)")
+                showLog("  - App installed but native libs extraction failed")
+                showLog("  - Try: Uninstall > Re-download latest APK > Install")
             }
         }
     }
@@ -470,8 +447,8 @@ class MainActivity : AppCompatActivity() {
         setupCompressionLevelSpinner()
     }
 
-    // Compression level ranges per algorithm (matches Python LEVEL_RANGES)
-    // Default level per algorithm (matches Python DEFAULT_LEVELS):
+    // Compression level ranges per algorithm (matches Rust native backend LEVEL_RANGES)
+    // Default level per algorithm (matches Rust native backend DEFAULT_LEVELS):
     //   gzip=6, bzip2=9, xz=6, brotli=6
     private val COMPRESSION_LEVELS: Map<String, Pair<Int, Int>> = mapOf(
         "none" to Pair(0, 0),     // no compression
@@ -768,31 +745,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (!PythonBridge.isReady()) {
-            showLog("Python runtime not available.", LogLevel.ERROR)
+        if (!NativeBridge.isLoaded) {
+            showLog("Native backend not available: ${NativeBridge.loadError}", LogLevel.ERROR)
             showLog("Restart the app to retry initialization.", LogLevel.WARN)
             return
         }
 
         // Pre-build dependency check: validate selected compression is available.
         // Uses cached result from initialization to avoid blocking the UI.
-        // Note: hashlib and bz2 are non-blocking — compression.py provides a
-        // pure-Python SHA-256 fallback, and bz2 is optional (use gzip/xz/brotli).
         val depCheck = cachedDepCheck
-        if (depCheck == null) {
-            showLog("Python runtime not ready. Restart the app.", LogLevel.ERROR)
-            return
-        }
-        // Show informational warnings for missing modules (don't block build).
-        if (depCheck.missing.contains("hashlib")) {
-            showLog("hashlib C extension unavailable — using pure-Python SHA-256 fallback.", LogLevel.WARN)
-        }
-        if (depCheck.missing.contains("bz2")) {
-            showLog("bz2 unavailable — bzip2 compression disabled.", LogLevel.WARN)
-        }
-        if (selectedCompression !in depCheck.availableCompression) {
+        if (depCheck != null && selectedCompression !in depCheck.available) {
             showLog("Cannot start build: compression '$selectedCompression' is not available.", LogLevel.ERROR)
-            showLog("  Available: ${depCheck.availableCompression.joinToString(", ")}", LogLevel.INFO)
+            showLog("  Available: ${depCheck.available.joinToString(", ")}", LogLevel.INFO)
             return
         }
 

@@ -2,8 +2,8 @@
 # ==============================
 # These rules ensure R8 does not strip or obfuscate classes that are:
 #   - Referenced from AndroidManifest.xml (backupAgent, Application, Service)
-#   - Accessed via JNI (PyBridge native methods)
-#   - Used as data transfer objects between Kotlin and Python
+#   - Accessed via JNI (NativeBridge native methods)
+#   - Used as data transfer objects between Kotlin and the Rust backend
 #   - Required for Kotlin coroutines and AndroidX internals
 
 # ─── Preserve attributes needed for reflection, JNI, and serialization ───
@@ -42,24 +42,9 @@
     native <methods>;
 }
 
-# ─── JNI Bridge: PyBridge (legacy, Phase 4 removal) ───
-# PyBridge loads libpybridge.so via System.loadLibrary and declares native methods.
-# R8 must NOT strip or obfuscate the class or its native method signatures,
-# otherwise the JNI linker cannot resolve native functions at runtime.
--keep class com.hoshiyomi.otaku.PyBridge { *; }
--keep class com.hoshiyomi.otaku.PyBridge$Companion { *; }
--keep class com.hoshiyomi.otaku.PyBridge$PyResult { *; }
--keepclassmembers class com.hoshiyomi.otaku.PyBridge {
-    native <methods>;
-}
-
-# ─── OTA Bridge classes (Kotlin ↔ Python interface) ───
+# ─── OTA Bridge classes (Kotlin ↔ Rust native interface) ───
 -keep class com.hoshiyomi.otaku.OTABridge { *; }
 -keep class com.hoshiyomi.otaku.OTAResult { *; }
--keep class com.hoshiyomi.otaku.PythonBridge { *; }
--keep class com.hoshiyomi.otaku.PythonBridge$InitResult { *; }
--keep class com.hoshiyomi.otaku.PythonBridge$DepCheckResult { *; }
--keep class com.hoshiyomi.otaku.ExecResult { *; }
 -keep class com.hoshiyomi.otaku.ProgressUpdate { *; }
 
 # ─── Application class (declared in AndroidManifest) ───
@@ -76,7 +61,7 @@
 # ─── Backup agent (declared in AndroidManifest android:backupAgent) ───
 -keep class com.hoshiyomi.otaku.data.BackupAgent { *; }
 
-# ─── BuildConfig (referenced from PythonBridge for version info) ───
+# ─── BuildConfig ───
 -keep class com.hoshiyomi.otaku.BuildConfig { *; }
 
 # ─── AndroidX ───
