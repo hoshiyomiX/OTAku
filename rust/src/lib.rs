@@ -8,8 +8,10 @@
 //!   Java_com_hoshiyomi_otaku_NativeBridge_<method_name>
 
 use jni::objects::JClass;
+use jni::objects::JObject;
 use jni::objects::JString;
-use jni::sys::{jboolean, jint, jstring};
+use jni::objects::JValue;
+use jni::sys::{jboolean, jint, jobject, jstring};
 use jni::JNIEnv;
 
 // ---------------------------------------------------------------------------
@@ -303,9 +305,13 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
 /// @param output_path   Absolute path for output .zip
 /// @param device        Device codename(s), comma-separated
 /// @param skip_verify   Skip SHA-256 post-flash verification (0/1)
+/// @param callback      BuildProgressCallback object (or null for no progress)
 /// @return JSON result: {"success": bool, "output": str, "error": str|null,
 ///                       "zip_path": str|null, "zip_size": int|null, "bundle_size": int|null,
 ///                       "duration_ms": int, "native_version": str}
+///
+/// BuildProgressCallback interface (Kotlin):
+///   fun onProgress(current: Int, total: Int, message: String, percent: Int)
 #[no_mangle]
 pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     mut env: JNIEnv,
@@ -316,6 +322,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     output_path: JString,
     device: JString,
     skip_verify: jboolean,
+    callback: jobject,
 ) -> jstring {
     // Parse JNI string arguments
     let images_str: String = match env.get_string(&images_json) {
@@ -346,7 +353,49 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     // Convert HashMap to Vec<(String, String)> preserving order
     let images_vec: Vec<(String, String)> = images_map.into_iter().collect();
 
-    // Call the DD build pipeline
+    // Create progress callback if provided
+    let progress_cb: Option<Box<dyn FnMut(i32, i32, &str, i32)>> = if callback.is_null() {
+        None
+    } else {
+        // Create a global reference to the callback object so it survives
+        // across the entire run_dd_build call (local refs are auto-freed).
+        let callback_obj = unsafe { JObject::from_raw(callback) };
+        let callback_ref = match env.new_global_ref(&callback_obj) {
+            Ok(r) => r,
+            Err(_) => {
+                return make_error_json(&env, "Failed to create global ref for callback");
+            }
+        };
+        // Get raw JNIEnv pointer for reconstruction inside the closure.
+        // Safe because run_dd_build is synchronous on the same JNI thread.
+        let raw_env = env.get_raw();
+
+        Some(Box::new(move |current: i32, total: i32, message: &str, percent: i32| {
+            unsafe {
+                let mut cb_env = match JNIEnv::from_raw(raw_env) {
+                    Ok(e) => e,
+                    Err(_) => return,
+                };
+                let msg_jstr = match cb_env.new_string(message) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let _ = cb_env.call_method(
+                    callback_ref.as_obj(),
+                    "onProgress",
+                    "(IILjava/lang/String;I)V",
+                    &[
+                        JValue::Int(current),
+                        JValue::Int(total),
+                        JValue::Object(&msg_jstr),
+                        JValue::Int(percent),
+                    ],
+                );
+            }
+        }))
+    };
+
+    // Call the DD build pipeline (with optional progress callback)
     let result = dd::run_dd_build(
         &images_vec,
         &comp_str,
@@ -354,6 +403,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
         &output_str,
         &device_str,
         skip_verify != 0,
+        progress_cb,
     );
 
     // Serialize result to JSON

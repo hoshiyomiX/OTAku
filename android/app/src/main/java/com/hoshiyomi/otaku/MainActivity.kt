@@ -811,10 +811,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // Start heartbeat coroutine — updates notification with elapsed time
-                // since JNI call blocks with no progress callbacks
+                // Fallback heartbeat: only activates if no progress callback fires within 15s
+                // (e.g. very small files that compress before the first callback)
                 val buildStartTime = System.currentTimeMillis()
+                var heartbeatActive = true
                 val heartbeatJob = CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                    delay(15_000) // Wait 15s for first real progress
+                    if (!heartbeatActive) return@launch
                     while (isActive) {
                         delay(10_000) // 10 seconds
                         val elapsed = (System.currentTimeMillis() - buildStartTime) / 1000
@@ -833,84 +836,67 @@ class MainActivity : AppCompatActivity() {
                         level = selectedCompressionLevel,
                         outputPath = outPath,
                         onProgress = { progress ->
-                            // Cancel heartbeat — real progress is arriving
+                            // Real progress arriving — cancel heartbeat
+                            heartbeatActive = false
                             heartbeatJob.cancel()
 
                             // Update heartbeat timestamp (survives Activity recreation)
                             lastProgressTime = System.currentTimeMillis()
 
-                            // Update notification (works even when Activity is destroyed)
-                            val msg = "${progress.message} — ${progress.percent}%"
-                            if (msg != lastProgressMessage) {
-                                lastProgressMessage = msg
-                                showProgressNotification(msg, progress.percent)
+                            // progress.current is 1-based partition index
+                            // progress.message is the partition name (e.g. "boot", "system")
+                            // progress.percent is 0-100 for the current partition's compression
+                            val pIdx = progress.current - 1  // Convert to 0-based index
+                            val overallPercent = if (progress.total > 0) {
+                                ((pIdx * 100 + progress.percent) / progress.total).coerceIn(0, 100)
+                            } else {
+                                progress.percent
                             }
 
-                            // Update split progress bars (per-partition) using message-based mapping.
-                            // progress.current is 1-based across ALL steps (Step 1 + N partitions + Step 2 + Step 3),
-                            // so numeric index mapping is unreliable. Map by partition name from message instead.
-                            if (partitionCount > 0) {
-                                val msg = progress.message
-                                val pIdx = when {
-                                    msg.startsWith("Compressing ") -> {
-                                        val name = msg.removePrefix("Compressing ").trim()
-                                        partitionNames.indexOf(name)
-                                    }
-                                    msg.contains("Building otaku") -> {
-                                        // Pre-partition step: show bar 0 as indeterminate (process started)
-                                        currentPartitionIndex = 0
-                                        -2  // special sentinel
-                                    }
-                                    msg.contains("Building flasher") || msg.contains("Writing output") -> {
-                                        // Post-partition steps: mark all bars complete
-                                        for (j in 0 until partitionCount) {
-                                            partitionProgress[j] = 100
-                                        }
-                                        currentPartitionIndex = partitionCount - 1
-                                        -1  // skip bar update below
-                                    }
-                                    else -> -1
+                            // Update notification with per-partition progress
+                            val notifMsg = "Compressing ${progress.message} (${progress.current}/${progress.total}) — ${progress.percent}%"
+                            if (notifMsg != lastProgressMessage) {
+                                lastProgressMessage = notifMsg
+                                showProgressNotification(notifMsg, overallPercent)
+                            }
+
+                            // Update per-partition split progress bars
+                            if (partitionCount > 0 && pIdx >= 0 && pIdx < partitionCount) {
+                                partitionProgress[pIdx] = progress.percent
+                                currentPartitionIndex = pIdx
+                                // Mark all previous partitions as complete
+                                for (j in 0 until pIdx) {
+                                    if (partitionProgress[j] < 100) partitionProgress[j] = 100
                                 }
-                                when {
-                                    pIdx == -2 -> { /* indeterminate handled in UI update block */ }
-                                    pIdx >= 0 && pIdx < partitionCount -> {
-                                        partitionProgress[pIdx] = progress.percent
-                                        currentPartitionIndex = pIdx
-                                        // Relay: mark all previous partitions as complete
-                                        for (j in 0 until pIdx) {
-                                            if (partitionProgress[j] < 100) partitionProgress[j] = 100
-                                        }
+                                // Mark all subsequent partitions as 0 (not started)
+                                for (j in pIdx + 1 until partitionCount) {
+                                    if (partitionProgress[j] > 0 && partitionProgress[j] < 100) {
+                                        partitionProgress[j] = 0
                                     }
                                 }
                             }
 
-                            // Only log when percent changes (not every chunk)
+                            // Update UI on main thread
                             val current = activityRef?.get()
                             if (current != null && !current.isFinishing && !current.isDestroyed) {
                                 current.runOnUiThread {
-                                    // Update split progress bars — bars live inside a tagged horizontal child
+                                    // Update split progress bars
                                     val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
                                     val barRow = container?.findViewWithTag<android.widget.LinearLayout>("bar_row")
                                     if (barRow != null && barRow.childCount == partitionCount) {
                                         for (i in 0 until partitionCount) {
                                             val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                                            if (bar != null) {
-                                                // During pre-partition step (sentinel -2), show bar 0 as indeterminate
-                                                if (currentPartitionIndex == 0 && partitionProgress[0] == 0 && i == 0
-                                                    && progress.message.contains("Building otaku")) {
-                                                    bar.isIndeterminate = true
-                                                } else {
-                                                    bar.isIndeterminate = false
-                                                    bar.progress = partitionProgress[i]
-                                                }
+                                            bar?.let {
+                                                it.isIndeterminate = false
+                                                it.progress = partitionProgress[i]
                                             }
                                         }
                                     }
                                 }
-                                // Log only when percent changes
-                                if (progress.percent != lastProgressPercent) {
+                                // Log only when percent changes (avoid log spam)
+                                if (progress.percent != lastProgressPercent || pIdx != currentPartitionIndex) {
                                     lastProgressPercent = progress.percent
-                                    current.showLog("${progress.message} ${progress.percent}%")
+                                    current.showLog("Compressing ${progress.message} (${progress.current}/${progress.total}) ${progress.percent}%", LogLevel.INFO)
                                 }
                             }
                         },

@@ -22,7 +22,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::compression::{compress_id, hash_and_compress_file, is_alg, ALG_NONE};
+use crate::compression::{compress_id, hash_and_compress_file_with_progress, is_alg, ALG_NONE};
+use std::cell::RefCell;
 
 // ---------------------------------------------------------------------------
 //  DD format constants
@@ -752,6 +753,7 @@ pub fn run_dd_build(
     output_path: &str,
     device: &str,
     skip_verify: bool,
+    on_progress: Option<Box<dyn FnMut(i32, i32, &str, i32)>>,
 ) -> DdBuildResult {
     let start = std::time::Instant::now();
     let mut lines: Vec<String> = Vec::new();
@@ -822,6 +824,11 @@ pub fn run_dd_build(
     }
 
     // ── Run the build pipeline ──
+    // Wrap the progress callback in RefCell for interior mutability.
+    // This allows the callback to be called from inside the (|| { ... })()
+    // closure without the borrow checker complaining about mutable borrows
+    // across loop iterations.
+    let on_progress_cell = on_progress.map(|cb| RefCell::new(cb));
     let result: Result<DdBuildResult, String> = (|| {
         let num_parts = images.len();
         let level_display = if level > 0 {
@@ -884,9 +891,31 @@ pub fn run_dd_build(
                 path
             );
 
-            // Hash and compress the image in a single streaming pass
+            // Hash and compress the image in a single streaming pass (with progress)
             let level_opt = if level > 0 { Some(level) } else { None };
-            let (compressed, hash_hex) = hash_and_compress_file(path, &compress_name, level_opt)?;
+            let part_idx = (i + 1) as i32;
+            let total_parts = num_parts as i32;
+            let name_for_cb = name.clone();
+            let cell_ref = &on_progress_cell;
+            let (compressed, hash_hex) = {
+                let mut adapter = |bytes_read: u64, file_size: u64| {
+                    if let Some(cell) = cell_ref.as_ref() {
+                        let mut cb = cell.borrow_mut();
+                        let pct = if file_size > 0 {
+                            (bytes_read as f64 / file_size as f64 * 100.0) as i32
+                        } else {
+                            100
+                        };
+                        cb(part_idx, total_parts, &name_for_cb, pct);
+                    }
+                };
+                hash_and_compress_file_with_progress(
+                    path,
+                    &compress_name,
+                    level_opt,
+                    Some(&mut adapter),
+                )?
+            };
 
             // Get uncompressed size
             let unc_size = std::fs::metadata(path)
@@ -1209,7 +1238,7 @@ mod tests {
 
     #[test]
     fn test_run_dd_build_no_images() {
-        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false);
+        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false, None);
         assert!(!result.success);
         assert!(result.error.unwrap().contains("no images specified"));
     }
@@ -1223,6 +1252,7 @@ mod tests {
             "/tmp/test.zip",
             "",
             false,
+            None,
         );
         assert!(!result.success);
         assert!(result.error.unwrap().contains("unsupported compression"));
