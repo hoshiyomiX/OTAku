@@ -109,10 +109,14 @@ object NativeBridge {
         if (!isLoaded) {
             return PayloadResult.error("Native library not loaded: $loadError")
         }
+        Log.d(TAG, "readPayload() path=$path")
         return try {
             val jsonStr = nativeReadPayload(path)
-            parsePayloadResult(jsonStr)
+            val result = parsePayloadResult(jsonStr)
+            Log.d(TAG, "readPayload() result: success=${result.success}, error=${result.error}")
+            result
         } catch (e: Exception) {
+            Log.e(TAG, "readPayload() failed: ${e.message}")
             PayloadResult.error("Read payload failed: ${e.message}")
         }
     }
@@ -136,10 +140,14 @@ object NativeBridge {
         if (!isLoaded) {
             return ExtractResult.error("Native library not loaded: $loadError")
         }
+        Log.d(TAG, "extractPartition() payload=$payloadPath, partition=$partitionName, output=$outputPath")
         return try {
             val jsonStr = nativeExtractPartition(payloadPath, partitionName, outputPath)
-            parseExtractResult(jsonStr)
+            val result = parseExtractResult(jsonStr)
+            Log.d(TAG, "extractPartition() result: success=${result.success}, fileSize=${result.fileSize}, duration=${result.durationMs}ms")
+            result
         } catch (e: Exception) {
+            Log.e(TAG, "extractPartition() failed: ${e.message}")
             ExtractResult.error("Extract failed: ${e.message}")
         }
     }
@@ -164,13 +172,17 @@ object NativeBridge {
         if (!isLoaded) {
             return WritePayloadResult.error("Native library not loaded: $loadError")
         }
+        Log.d(TAG, "writePayload() images=${images.keys}, compression=$compression, output=$outputPath, blockSize=$blockSize")
         return try {
             val imagesJson = JSONObject(images).toString()
             val jsonStr = nativeWritePayload(
                 imagesJson, compression, 0, outputPath, blockSize, minorVersion
             )
-            parseWritePayloadResult(jsonStr)
+            val result = parseWritePayloadResult(jsonStr)
+            Log.d(TAG, "writePayload() result: success=${result.success}, duration=${result.durationMs}ms")
+            result
         } catch (e: Exception) {
+            Log.e(TAG, "writePayload() failed: ${e.message}")
             WritePayloadResult.error("Write payload failed: ${e.message}")
         }
     }
@@ -282,14 +294,18 @@ object NativeBridge {
         if (!isLoaded) {
             return DdBuildResult.error("Native library not loaded: $loadError")
         }
+        Log.d(TAG, "buildDd() images=${images.keys}, compression=$compression, level=$level, output=$outputPath, device=$device, skipVerify=$skipVerify")
         return try {
             val imagesJson = JSONObject(images).toString()
             val resultJson = nativeBuildDd(
                 imagesJson, compression, level, outputPath, device,
                 if (skipVerify) 1 else 0
             )
-            parseDdBuildResult(resultJson)
+            val result = parseDdBuildResult(resultJson)
+            Log.d(TAG, "buildDd() result: success=${result.success}, zip_path=${result.zipPath}, duration=${result.durationMs}ms")
+            result
         } catch (e: Exception) {
+            Log.e(TAG, "buildDd() failed: ${e.message}")
             DdBuildResult.error("Native build failed: ${e.message}")
         }
     }

@@ -1,6 +1,7 @@
 package com.hoshiyomi.otaku
 
 import android.os.Process
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -51,6 +52,8 @@ data class ProgressUpdate(
  * All operations use NativeBridge (Rust libotaku_native.so) — no Python dependency.
  */
 object OTABridge {
+
+    private const val TAG = "OTABridge"
 
     // Compression algorithm choices exposed in the UI spinner
     // Ordered by compression ratio: worst (none) → best (brotli)
@@ -112,6 +115,16 @@ object OTABridge {
             return OTAResult.error("Native backend not loaded: ${NativeBridge.loadError}")
         }
 
+        val effectiveDevice = device.ifEmpty { "generic" }
+        val buildStartTime = System.currentTimeMillis()
+
+        // Log input parameters before the JNI call
+        val debugStartMsg = "[DEBUG] dd() called: ${images.size} partitions, " +
+            "compression=$compression, level=$level, device=$effectiveDevice, " +
+            "output=$outputPath"
+        Log.d(TAG, debugStartMsg)
+        onOutputLine?.invoke(debugStartMsg)
+
         return withContext(Dispatchers.IO) {
             try {
                 Process.setThreadPriority(Process.myTid(), -10)
@@ -122,9 +135,26 @@ object OTABridge {
                 compression = compression,
                 level = level,
                 outputPath = outputPath,
-                device = device.ifEmpty { "generic" },
+                device = effectiveDevice,
                 skipVerify = skipVerify
             )
+
+            // Emit all Rust output lines to the log
+            ddResult.output.split("\n").forEach { line ->
+                if (line.isNotBlank()) {
+                    onOutputLine?.invoke(line)
+                }
+            }
+
+            // Log result summary after the JNI call returns
+            val durationMs = System.currentTimeMillis() - buildStartTime
+            val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
+            val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
+            val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
+                "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
+                "bundle_size=$bundleSizeStr"
+            Log.d(TAG, debugEndMsg)
+            onOutputLine?.invoke(debugEndMsg)
 
             if (ddResult.success) {
                 OTAResult.success(ddResult.output, ddResult.durationMs)
@@ -155,4 +185,11 @@ object OTABridge {
     //  Utility methods
     // ═══════════════════════════════════════════════════════════════
 
+    /** Format byte size as human-readable string (e.g. "45.2MB"). */
+    private fun formatSize(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
+        bytes < 1024 * 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024))
+        else -> String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024))
+    }
 }

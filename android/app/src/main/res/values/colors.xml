@@ -97,6 +97,7 @@
     <color name="log_success">#4CAF50</color>
     <color name="log_warning">#FF9800</color>
     <color name="log_info">#80CBC4</color>
+    <color name="log_debug">#9E9E9E</color>
 
     <!-- Status colors -->
     <color name="status_running">#FF9800</color>
