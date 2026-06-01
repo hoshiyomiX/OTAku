@@ -20,7 +20,17 @@
     volatile <fields>;
 }
 
-# ─── JNI Bridge: PyBridge ───
+# ─── JNI Bridge: NativeBridge (Rust libotaku_native.so) ───
+# NativeBridge loads libotaku_native.so via System.loadLibrary and declares native methods.
+# R8 must NOT strip or obfuscate the class or its native method signatures.
+-keep class com.hoshiyomi.otaku.NativeBridge { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$Companion { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$DepCheckResult { *; }
+-keepclassmembers class com.hoshiyomi.otaku.NativeBridge {
+    native <methods>;
+}
+
+# ─── JNI Bridge: PyBridge (legacy, Phase 4 removal) ───
 # PyBridge loads libpybridge.so via System.loadLibrary and declares native methods.
 # R8 must NOT strip or obfuscate the class or its native method signatures,
 # otherwise the JNI linker cannot resolve native functions at runtime.

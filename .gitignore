@@ -46,6 +46,17 @@ captures/
 google-services.json
 
 # ═══════════════════════════════════════════════════════════════
+#  Rust
+# ═══════════════════════════════════════════════════════════════
+
+# Rust build artifacts
+rust/target/
+rust/Cargo.lock
+
+# Generated .so files (built by CI cargo-ndk step)
+android/app/src/main/jniLibs/*/libotaku_native.so
+
+# ═══════════════════════════════════════════════════════════════
 #  Python
 # ═══════════════════════════════════════════════════════════════
 

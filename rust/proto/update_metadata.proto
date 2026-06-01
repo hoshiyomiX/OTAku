@@ -1,0 +1,93 @@
+// AOSP update_engine protobuf schema
+// Reference: system/update_engine/update_metadata.proto
+//
+// This is a placeholder for Phase 2 when we switch to
+// prost-build codegen. For Phase 1, we use hand-defined
+// prost structs in src/proto.rs.
+
+syntax = "proto3";
+
+package chromeos_update_engine;
+
+// DeltaArchiveManifest
+message DeltaArchiveManifest {
+  Signatures signatures = 1;
+  repeated InstallOperation install_operations = 2;
+  uint64 block_size = 3;
+  uint32 minor_version = 4;
+  repeated PartitionUpdate partitions = 5;
+  uint64 max_timestamp = 6;
+  DynamicPartitionMetadata dynamic_partition_metadata = 7;
+  bool minor_version_applied = 8;
+  repeated DynamicPartitionGroup groups = 9;
+  bool has_source_metadata = 11;
+}
+
+// PartitionUpdate
+message PartitionUpdate {
+  string partition_name = 1;
+  bool run_postinstall = 2;
+  repeated InstallOperation install_operations = 3;
+  PartitionInfo old_partition_info = 4;
+  PartitionInfo new_partition_info = 5;
+  PostInstallHook postinstall_hook = 6;
+}
+
+// InstallOperation
+message InstallOperation {
+  enum Type {
+    REPLACE = 0;
+    MOVE = 1;
+    BSDIFF = 2;
+    SOURCE_COPY = 3;
+    SOURCE_BSDIFF = 4;
+    REPLACE_BZ = 12;
+    REPLACE_XZ = 8;
+    PUIGZIP = 14;
+    BROTLI_BSDIFF = 23;
+    ZERO = 21;
+    DISCARD = 22;
+    REPLACE_BROT = 13;
+  }
+  Type type = 1;
+  uint64 data_offset = 2;
+  uint64 data_length = 3;
+  uint32 src_length = 5;
+  repeated Extent src_extents = 6;
+  repeated Extent dst_extents = 7;
+  uint32 dst_length = 8;
+  bytes data_sha256_hash = 9;
+}
+
+// Extent
+message Extent {
+  uint64 start_block = 1;
+  uint64 num_blocks = 2;
+}
+
+// PartitionInfo
+message PartitionInfo {
+  uint64 partition_size = 1;
+  bytes hash = 2;
+}
+
+// Signatures
+message Signatures {
+  repeated Signature signatures = 1;
+}
+
+// Signature
+message Signature {
+  uint32 version = 1;
+  bytes data = 2;
+  uint32 unpadded_data_size = 3;
+}
+
+// PostInstallHook (placeholder)
+message PostInstallHook {}
+
+// DynamicPartitionMetadata (placeholder)
+message DynamicPartitionMetadata {}
+
+// DynamicPartitionGroup (placeholder)
+message DynamicPartitionGroup {}

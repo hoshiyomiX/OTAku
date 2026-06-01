@@ -1,0 +1,45 @@
+[package]
+name = "otaku-native"
+version = "3.1.0"
+edition = "2021"
+description = "OTAku native backend — Rust + JNI for Android"
+
+[lib]
+name = "otaku_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# JNI bridge
+jni = "0.21"
+
+# Compression
+flate2 = { version = "1.0", default-features = false, features = ["miniz_oxide"] }
+bzip2 = "0.4"
+xz2 = "0.1"
+brotli = "6.0"
+
+# Hashing
+sha2 = "0.10"
+
+# Protobuf
+prost = "0.12"
+
+# Serialization (for JNI result passing)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ZIP creation
+zip = "2.1"
+
+# Logging
+log = "0.4"
+android_logger = "0.14"
+
+[build-dependencies]
+prost-build = "0.12"
+
+[profile.release]
+opt-level = "z"       # Optimize for size
+lto = true
+strip = true
+codegen-units = 1
