@@ -1,6 +1,6 @@
 // Top-level build file for OTAku
 // Configures plugins used across all subprojects
-// NOTE: Chaquopy removed — uses ProcessBuilder/JNI + bundled Python
+// NOTE: Chaquopy removed — uses Rust + JNI native backend (libotaku_native.so)
 
 buildscript {
     repositories {

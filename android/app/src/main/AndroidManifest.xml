@@ -8,7 +8,7 @@
 
     Non-root application: no root/system permissions requested.
     All file I/O uses app-specific storage and SAF.
-    Requires external Python runtime (Termux recommended).
+    Requires no external runtime — Rust native backend compiled into APK.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
