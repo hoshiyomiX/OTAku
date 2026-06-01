@@ -263,6 +263,20 @@ class MainActivity : AppCompatActivity() {
     private fun initializePython() {
         lifecycleScope.launch {
             showLog("Initializing OTAku...", LogLevel.INFO)
+
+            // Check native (Rust) backend first
+            if (NativeBridge.isLoaded) {
+                val nativeVersion = NativeBridge.getVersion()
+                showLog("Native backend: $nativeVersion", LogLevel.INFO)
+                val depCheck = NativeBridge.checkDeps()
+                val available = depCheck.available.joinToString(", ")
+                showLog("Native compression: $available", LogLevel.INFO)
+            } else {
+                showLog("Native backend not loaded: ${NativeBridge.loadError}", LogLevel.WARN)
+            }
+
+            // Fall back to Python backend if native not available
+            // (Phase 4 will remove Python entirely)
             withContext(Dispatchers.IO) {
                 val result = PythonBridge.ensureInitialized(this@MainActivity)
                 withContext(Dispatchers.Main) {
@@ -280,7 +294,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     } else {
-                        showLog("Initialization failed: ${result.error}", LogLevel.ERROR)
+                        showLog("Python init failed: ${result.error}", LogLevel.ERROR)
                         // Show detailed diagnostics so the user can report them
                         if (result.diagnostics.isNotBlank()) {
                             showLog(result.diagnostics)
