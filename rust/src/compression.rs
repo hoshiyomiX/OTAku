@@ -99,7 +99,7 @@ fn resolve_level(algorithm: &str, level: Option<i32>) -> i32 {
 
 /// Check if an algorithm name matches a canonical algorithm.
 /// Works with the String return type of normalise().
-fn is_alg(algorithm: &str, target: &str) -> bool {
+pub fn is_alg(algorithm: &str, target: &str) -> bool {
     normalise(algorithm) == target
 }
 

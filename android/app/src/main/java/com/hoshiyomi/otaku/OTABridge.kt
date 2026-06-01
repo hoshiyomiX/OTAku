@@ -96,12 +96,14 @@ object OTABridge {
      *   - META-INF/com/google/android/updater-script (stub)
      *   - flash_info.txt (human-readable metadata)
      *
+     * Uses the Rust native backend (NativeBridge) for all compression and
+     * ZIP creation. Falls back to PythonBridge if native library is not loaded.
+     *
      * @param images Map of partition name -> absolute path to .img file
      * @param device Device codename(s), comma-separated (e.g. "crosshatch" or "OP11,OP11A")
      * @param compression Compression algorithm: none, gzip, bzip2, xz, or brotli
-     * @param compressionLevel Compression level (algorithm-specific range, null=default)
+     * @param level Compression level (0 = default per algorithm)
      * @param skipVerify Skip post-flash SHA-256 hash verification
-     * @param backup Dump current partitions before flashing (in recovery)
      * @param outputPath Absolute path to output .zip file
      */
     suspend fun dd(
@@ -118,7 +120,34 @@ object OTABridge {
         if (compression !in ALL_COMPRESSION)
             return OTAResult.error("Invalid compression: '$compression'")
 
-        // dd mode uses --image (repeatable) + --partition (repeatable)
+        // Prefer Rust native backend (faster, no Python dependency)
+        if (NativeBridge.isLoaded) {
+            return withContext(Dispatchers.IO) {
+                try {
+                    Process.setThreadPriority(Process.myTid(), -10)
+                } catch (_: Exception) {}
+
+                val ddResult = NativeBridge.buildDd(
+                    images = images,
+                    compression = compression,
+                    level = level,
+                    outputPath = outputPath,
+                    device = device.ifEmpty { "generic" },
+                    skipVerify = skipVerify
+                )
+
+                if (ddResult.success) {
+                    OTAResult.success(ddResult.output, ddResult.durationMs)
+                } else {
+                    OTAResult.error(
+                        ddResult.error ?: "Native build failed",
+                        ddResult.durationMs
+                    ).copy(output = ddResult.output)
+                }
+            }
+        }
+
+        // Fallback: Python backend (legacy, for devices without native .so)
         val args = mutableListOf("dd")
         for ((name, path) in images) {
             args.add("--image"); args.add(path)
@@ -137,7 +166,6 @@ object OTABridge {
         if (skipVerify) {
             args.add("--skip-verify")
         }
-        // Always pass --device so the Python side receives it
         args.add("--device")
         args.add(device.ifEmpty { "generic" })
         return executePyz(args, onProgress, onOutputLine)

@@ -251,11 +251,17 @@ object NativeBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  DD Build (Phase 3 stub)
+    //  DD Build (Phase 3 — full implementation)
     // ═══════════════════════════════════════════════════════════════
 
     /**
      * Build a DD-mode flashable ZIP from partition images.
+     *
+     * Generates a flashable ZIP containing:
+     *   - otaku.bin (DDBU header + compressed partition data)
+     *   - META-INF/com/google/android/update-binary (TWRP/OrangeFox flasher)
+     *   - META-INF/com/google/android/updater-script (stub)
+     *   - flash_info.txt (human-readable metadata)
      *
      * @param images Map of partition name -> absolute path to .img file
      * @param compression Compression algorithm: "none", "gzip", "bzip2", "xz", "brotli"
@@ -263,7 +269,7 @@ object NativeBridge {
      * @param outputPath Absolute path for output .zip file
      * @param device Device codename(s), comma-separated
      * @param skipVerify Skip post-flash SHA-256 verification
-     * @return OTAResult with success/error info
+     * @return DdBuildResult with success/error, paths, sizes
      */
     fun buildDd(
         images: Map<String, String>,
@@ -272,9 +278,9 @@ object NativeBridge {
         outputPath: String,
         device: String = "generic",
         skipVerify: Boolean = false
-    ): OTAResult {
+    ): DdBuildResult {
         if (!isLoaded) {
-            return OTAResult.error("Native library not loaded: $loadError")
+            return DdBuildResult.error("Native library not loaded: $loadError")
         }
         return try {
             val imagesJson = JSONObject(images).toString()
@@ -282,9 +288,9 @@ object NativeBridge {
                 imagesJson, compression, level, outputPath, device,
                 if (skipVerify) 1 else 0
             )
-            parseOtaResult(resultJson)
+            parseDdBuildResult(resultJson)
         } catch (e: Exception) {
-            OTAResult.error("Native build failed: ${e.message}")
+            DdBuildResult.error("Native build failed: ${e.message}")
         }
     }
 
@@ -406,6 +412,25 @@ object NativeBridge {
     ) {
         companion object {
             fun error(msg: String) = CompressResult(success = false, error = msg)
+        }
+    }
+
+    /**
+     * Result of a DD build operation (Phase 3).
+     *
+     * Contains the output log, ZIP path and sizes, and error info.
+     */
+    data class DdBuildResult(
+        val success: Boolean,
+        val output: String = "",
+        val zipPath: String? = null,
+        val zipSize: Long? = null,
+        val bundleSize: Long? = null,
+        val error: String? = null,
+        val durationMs: Long = 0
+    ) {
+        companion object {
+            fun error(msg: String) = DdBuildResult(success = false, error = msg)
         }
     }
 
@@ -554,17 +579,24 @@ object NativeBridge {
         }
     }
 
-    private fun parseOtaResult(jsonStr: String): OTAResult {
+    private fun parseDdBuildResult(jsonStr: String): DdBuildResult {
         val json = JSONObject(jsonStr)
         return if (json.optBoolean("success", false)) {
-            OTAResult.success(
-                json.optString("output", ""),
-                json.optLong("duration_ms", 0)
+            DdBuildResult(
+                success = true,
+                output = json.optString("output", ""),
+                zipPath = json.optString("zip_path", null),
+                zipSize = if (json.has("zip_size")) json.optLong("zip_size") else null,
+                bundleSize = if (json.has("bundle_size")) json.optLong("bundle_size") else null,
+                error = null,
+                durationMs = json.optLong("duration_ms", 0)
             )
         } else {
-            OTAResult.error(
-                json.optString("error", "Unknown error"),
-                json.optLong("duration_ms", 0)
+            DdBuildResult(
+                success = false,
+                output = json.optString("output", ""),
+                error = json.optString("error", "Unknown error"),
+                durationMs = json.optLong("duration_ms", 0)
             )
         }
     }
