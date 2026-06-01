@@ -1,6 +1,6 @@
 [package]
 name = "otaku-native"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2021"
 description = "OTAku native backend — Rust + JNI for Android"
 
@@ -30,6 +30,9 @@ serde_json = "1.0"
 
 # ZIP creation
 zip = "2.1"
+
+# Date/time for flash_info.txt timestamps
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Logging
 log = "0.4"

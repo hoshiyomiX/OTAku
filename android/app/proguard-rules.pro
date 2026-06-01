@@ -37,6 +37,7 @@
 -keep class com.hoshiyomi.otaku.NativeBridge$PartitionSummary { *; }
 -keep class com.hoshiyomi.otaku.NativeBridge$VerifyResult { *; }
 -keep class com.hoshiyomi.otaku.NativeBridge$CompressResult { *; }
+-keep class com.hoshiyomi.otaku.NativeBridge$DdBuildResult { *; }
 -keepclassmembers class com.hoshiyomi.otaku.NativeBridge {
     native <methods>;
 }

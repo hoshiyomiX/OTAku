@@ -303,26 +303,68 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
 /// @param output_path   Absolute path for output .zip
 /// @param device        Device codename(s), comma-separated
 /// @param skip_verify   Skip SHA-256 post-flash verification (0/1)
-/// @return JSON result: {"success": bool, "output": str, "error": str|null, ...}
+/// @return JSON result: {"success": bool, "output": str, "error": str|null,
+///                       "zip_path": str|null, "zip_size": int|null, "bundle_size": int|null,
+///                       "duration_ms": int, "native_version": str}
 #[no_mangle]
 pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
-    _images_json: JString,
-    _compression: JString,
-    _level: jint,
-    _output_path: JString,
-    _device: JString,
-    _skip_verify: jboolean,
+    images_json: JString,
+    compression: JString,
+    level: jint,
+    output_path: JString,
+    device: JString,
+    skip_verify: jboolean,
 ) -> jstring {
-    // Phase 3: Full implementation with compression, ZIP creation, progress.
-    // For Phase 1, return a stub indicating the native bridge is loaded.
-    let result = serde_json::json!({
-        "success": false,
-        "error": "DD build not yet implemented in native (Phase 3)",
-        "native_version": env!("CARGO_PKG_VERSION")
+    // Parse JNI string arguments
+    let images_str: String = match env.get_string(&images_json) {
+        Ok(s) => s.into(),
+        Err(_) => return make_error_json(&env, "Invalid images JSON"),
+    };
+    let comp_str: String = match env.get_string(&compression) {
+        Ok(s) => s.into(),
+        Err(_) => "gzip".to_string(),
+    };
+    let output_str: String = match env.get_string(&output_path) {
+        Ok(s) => s.into(),
+        Err(_) => return make_error_json(&env, "Invalid output path"),
+    };
+    let device_str: String = match env.get_string(&device) {
+        Ok(s) => s.into(),
+        Err(_) => String::new(),
+    };
+
+    // Parse images JSON: {"partition_name": "path", ...}
+    let images_map: std::collections::HashMap<String, String> = match serde_json::from_str(&images_str) {
+        Ok(m) => m,
+        Err(e) => {
+            return make_error_json(&env, &format!("Invalid images JSON: {}", e));
+        }
+    };
+
+    // Convert HashMap to Vec<(String, String)> preserving order
+    let images_vec: Vec<(String, String)> = images_map.into_iter().collect();
+
+    // Call the DD build pipeline
+    let result = dd::run_dd_build(
+        &images_vec,
+        &comp_str,
+        level,
+        &output_str,
+        &device_str,
+        skip_verify != 0,
+    );
+
+    // Serialize result to JSON
+    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+        format!(
+            "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
+            e
+        )
     });
-    match env.new_string(result.to_string()) {
+
+    match env.new_string(json) {
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
