@@ -110,6 +110,10 @@ class MainActivity : AppCompatActivity() {
         @Volatile var cachedDepCheck: NativeBridge.DepCheckResult? = null
             private set
 
+        // Cold start flag: false on fresh process, true after first Activity creation.
+        // Used to clear session-only input fields (device, custom filename) on cold start.
+        @Volatile var wasProcessAlive = false
+
         /** Show ongoing progress notification with determinate progress bar. */
         fun showProgressNotification(message: String, percent: Int) {
             val ctx = appContext ?: return
@@ -221,8 +225,13 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 promptManageStorage()
+                // Battery prompt deferred to onResume after user returns from storage settings
+                pendingBatteryPrompt = true
+                return@registerForActivityResult
             }
         }
+        // All storage permissions resolved — now check battery optimization
+        checkBatteryOptimizationAtStartup()
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -237,6 +246,15 @@ class MainActivity : AppCompatActivity() {
 
         inputDir = File(filesDir, "input").also { it.mkdirs() }
         outputDir = File("/storage/emulated/0/OTAku").also { it.mkdirs() }
+
+        // Cold start detection: clear session input fields on fresh process start
+        if (!wasProcessAlive) {
+            prefs.edit {
+                remove("device")
+                remove("pref_custom_filename")
+            }
+            wasProcessAlive = true
+        }
 
         initializeNative()
         setupCompressionSelector()
@@ -592,7 +610,27 @@ class MainActivity : AppCompatActivity() {
 
         if (permissionsToRequest.isNotEmpty()) {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())
+        } else {
+            // All runtime permissions already granted — check manage storage + battery
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+                promptManageStorage()
+                pendingBatteryPrompt = true
+            } else {
+                // All storage permissions already resolved — check battery optimization
+                checkBatteryOptimizationAtStartup()
+            }
         }
+    }
+
+    /** Check and prompt battery optimization at startup (after storage permissions are resolved). */
+    private fun checkBatteryOptimizationAtStartup() {
+        if (prefs.getBoolean("pref_battery_prompted", false)) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) {
+            prefs.edit { putBoolean("pref_battery_prompted", true) }
+            return
+        }
+        promptBatteryOptimization()
     }
 
     private fun promptManageStorage() {
@@ -788,30 +826,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Prompt for battery optimization exemption on first build.
-        // This prevents the OS from killing the app during long compression jobs.
-        if (!prefs.getBoolean("pref_battery_prompted", false)) {
-            promptBatteryOptimization()
-            return  // onBuildClicked() will be re-called after the dialog
-        }
-
         startBuild(device)
     }
 
     /**
      * Prompt the user to grant OEM unrestricted battery optimization.
      * This prevents Android from killing the app during long builds.
-     * Only shown once — subsequent launches skip the prompt.
+     * Shown once at startup after storage permissions are resolved.
      */
     private fun promptBatteryOptimization() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) {
             // Already whitelisted — skip the prompt entirely
             prefs.edit { putBoolean("pref_battery_prompted", true) }
-            // Re-read the device field and proceed
-            val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-                ?.text?.toString()?.trim() ?: ""
-            startBuild(device)
             return
         }
 
@@ -842,31 +869,17 @@ class MainActivity : AppCompatActivity() {
                         showLog("Go to: Settings > Apps > OTAku > Battery > Unrestricted", LogLevel.WARN)
                     }
                 }
-                // Build will start after user returns from settings via onResume()
-                // Store pending build flag so onResume can trigger it
-                pendingBuildDevice = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-                    ?.text?.toString()?.trim() ?: ""
             }
             .setNegativeButton("Skip for Now") { _, _ ->
-                // User chose to skip — proceed with build but warn
                 prefs.edit { putBoolean("pref_battery_prompted", true) }
                 showLog("Battery optimization not granted — build may be killed on long runs.", LogLevel.WARN)
-                val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-                    ?.text?.toString()?.trim() ?: ""
-                startBuild(device)
-            }
-            .setNeutralButton("Don't Ask Again") { _, _ ->
-                prefs.edit { putBoolean("pref_battery_prompted", true) }
-                val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-                    ?.text?.toString()?.trim() ?: ""
-                startBuild(device)
             }
             .setCancelable(false)
             .show()
     }
 
-    // When user returns from battery optimization settings, resume pending build
-    private var pendingBuildDevice: String? = null
+    // Flag: battery optimization prompt should be shown after storage permissions resolve
+    private var pendingBatteryPrompt = false
 
     /** Core build logic — separated from onBuildClicked for battery prompt flow. */
     private fun startBuild(device: String) {
@@ -1218,18 +1231,23 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         activityRef = WeakReference(this)
         // Restore persisted log text on Activity recreation
+        // Always restore from the companion buffer to ensure logs survive
+        // minimize/reopen and Activity recreation (fix: logs clearing on warm resume)
         if (savedLogText.isNotEmpty()) {
             val textView = findViewById<android.widget.TextView>(R.id.textViewLog)
-            if (textView != null && textView.text.isEmpty()) {
+            if (textView != null) {
                 textView.text = savedLogText.toString()
             }
         }
-        // Resume pending build after user returns from battery optimization settings
-        if (pendingBuildDevice != null && !isBuilding) {
-            val device = pendingBuildDevice!!
-            pendingBuildDevice = null
-            startBuild(device)
-            return
+        // Show battery optimization prompt after user returns from storage settings
+        if (pendingBatteryPrompt) {
+            pendingBatteryPrompt = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+                // Storage still not granted — defer again
+                pendingBatteryPrompt = true
+            } else {
+                checkBatteryOptimizationAtStartup()
+            }
         }
         // Check if build process is actually alive
         if (isBuilding) {
