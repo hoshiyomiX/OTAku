@@ -1141,7 +1141,8 @@ pub fn run_dd_build(
                 File::create(output_path).map_err(|e| format!("Cannot create ZIP: {}", e))?;
             let mut zip = zip::ZipWriter::new(zip_file);
             let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
+                .compression_method(zip::CompressionMethod::Stored)
+                .large_file(true);  // ZIP64: support otaku.bin > 4 GB
 
             // Add otaku.bin (from the temp file we built incrementally)
             zip.start_file("otaku.bin", options)
