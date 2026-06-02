@@ -202,11 +202,7 @@ fn build_header(compress_id: u16, num_parts: u16) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Slant ASCII art banner for the flasher script.
-const BANNER: &str = r#"    ____              __  __
-   / __ \____  ____  / /_/ /_  ____
-  / / / / __ \/ __ \/ __/ __ \/ __ \
- / /_/ / /_/ / / / / /_/ / / / /_/ /
- \____/\____/_/ /_/\__/_/ /_/\____/  v3"#;
+const SCRIPT_VERSION: &str = "v3";
 
 /// Build the META-INF/com/google/android/update-binary shell script.
 ///
@@ -348,7 +344,7 @@ fi
     // ── Header / bootstrap ──
     script.push_str(&format!(
         r#"#!/sbin/sh
-# {banner}
+# OTAku {script_version}
 # {header_info}
 
 # ── TWRP/OrangeFox bootstrap ────────────────────────────────
@@ -367,15 +363,14 @@ BUNDLE="/tmp/otaku.bin"
 COMPRESS_ID={compress_id}
 
 ui_print ""
-{banner_trimmed}
+ui_print "  OTAku {script_version}"
 ui_print ""
 "#,
-        banner = BANNER,
+        script_version = SCRIPT_VERSION,
         header_info = header_info,
         part_vars = part_vars,
         num_parts = num_parts,
         compress_id = compress_id,
-        banner_trimmed = BANNER.trim(),
     ));
 
     // ── Step 0: Extract otaku.bin ──
@@ -638,8 +633,8 @@ validate_target() {{
 }}
 
 for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
-    eval "PNAME=\\$PART_${{i}}_NAME"
-    eval "PSIZE=\\$PART_${{i}}_UNC_SIZE"
+    eval "PNAME=\$PART_${{i}}_NAME"
+    eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
     PTARGET=$(resolve_target "$PNAME")
     if ! validate_target "$PTARGET" "$PSIZE" "$PNAME"; then
         ui_print "! ABORT: Partition validation failed for $PNAME"
@@ -656,11 +651,11 @@ ui_print ""
     script.push_str(&format!(
         r#"# ── Step {flash_step_offset}+{num_parts_minus_1}/{total_steps}: Flash each partition ────────────────────
 for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
-    eval "PNAME=\\$PART_${{i}}_NAME"
-    eval "PSIZE=\\$PART_${{i}}_UNC_SIZE"
-    eval "PHASH=\\$PART_${{i}}_HASH"
-    eval "PCSIZE=\\$PART_${{i}}_COMP_SIZE"
-    eval "POFFSET=\\$PART_${{i}}_DATA_OFFSET"
+    eval "PNAME=\$PART_${{i}}_NAME"
+    eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
+    eval "PHASH=\$PART_${{i}}_HASH"
+    eval "PCSIZE=\$PART_${{i}}_COMP_SIZE"
+    eval "POFFSET=\$PART_${{i}}_DATA_OFFSET"
 
     STEP_NUM=$(( i + {flash_step_offset} ))
 
