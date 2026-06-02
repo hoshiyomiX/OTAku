@@ -824,7 +824,11 @@ class MainActivity : AppCompatActivity() {
                         val minutes = elapsed / 60
                         val seconds = elapsed % 60
                         val elapsedStr = if (minutes > 0) "${minutes}m ${seconds}s" else "${seconds}s"
-                        showProgressNotification("Compressing… ($elapsedStr elapsed)", 0)
+                        // Only show heartbeat if no real progress has arrived in last 15s
+                        val timeSinceProgress = System.currentTimeMillis() - lastProgressTime
+                        if (timeSinceProgress > 15_000) {
+                            showProgressNotification("Building… ($elapsedStr elapsed)", 0)
+                        }
                     }
                 }
 
@@ -843,25 +847,35 @@ class MainActivity : AppCompatActivity() {
                             // Update heartbeat timestamp (survives Activity recreation)
                             lastProgressTime = System.currentTimeMillis()
 
-                            // progress.current is 1-based partition index
+                            // progress.current is 1-based partition index (or = total for non-partition phases)
                             // progress.message is the partition name (e.g. "boot", "system")
+                            //   or phase name ("scripts", "writing ZIP") for post-compression steps
                             // progress.percent is 0-100 for the current partition's compression
-                            val pIdx = progress.current - 1  // Convert to 0-based index
-                            val overallPercent = if (progress.total > 0) {
+                            val isPhaseProgress = progress.message == "scripts" || progress.message == "writing ZIP"
+                            val pIdx = if (isPhaseProgress) -1 else progress.current - 1  // -1 for phase progress
+
+                            val overallPercent = if (isPhaseProgress) {
+                                // Post-compression phases: show ~95% for scripts, ~98% for ZIP writing
+                                if (progress.message == "writing ZIP") 98 else 95
+                            } else if (progress.total > 0) {
                                 ((pIdx * 100 + progress.percent) / progress.total).coerceIn(0, 100)
                             } else {
                                 progress.percent
                             }
 
-                            // Update notification with per-partition progress
-                            val notifMsg = "Compressing ${progress.message} (${progress.current}/${progress.total}) — ${progress.percent}%"
+                            // Update notification with progress
+                            val notifMsg = if (isPhaseProgress) {
+                                if (progress.message == "writing ZIP") "Writing ZIP file…" else "Building flasher scripts…"
+                            } else {
+                                "Compressing ${progress.message} (${progress.current}/${progress.total}) — ${progress.percent}%"
+                            }
                             if (notifMsg != lastProgressMessage) {
                                 lastProgressMessage = notifMsg
                                 showProgressNotification(notifMsg, overallPercent)
                             }
 
-                            // Update per-partition split progress bars
-                            if (partitionCount > 0 && pIdx >= 0 && pIdx < partitionCount) {
+                            // Update per-partition split progress bars (only for compression, not phase progress)
+                            if (!isPhaseProgress && partitionCount > 0 && pIdx >= 0 && pIdx < partitionCount) {
                                 partitionProgress[pIdx] = progress.percent
                                 currentPartitionIndex = pIdx
                                 // Mark all previous partitions as complete
@@ -873,6 +887,11 @@ class MainActivity : AppCompatActivity() {
                                     if (partitionProgress[j] > 0 && partitionProgress[j] < 100) {
                                         partitionProgress[j] = 0
                                     }
+                                }
+                            } else if (isPhaseProgress) {
+                                // Mark ALL partition progress bars as 100% complete
+                                for (j in 0 until partitionCount) {
+                                    partitionProgress[j] = 100
                                 }
                             }
 
@@ -893,10 +912,15 @@ class MainActivity : AppCompatActivity() {
                                         }
                                     }
                                 }
-                                // Log only when percent changes (avoid log spam)
-                                if (progress.percent != lastProgressPercent || pIdx != currentPartitionIndex) {
+                                // Log only when percent or phase changes (avoid log spam)
+                                val logMsg = if (isPhaseProgress) {
+                                    if (progress.message == "writing ZIP") "Writing ZIP file…" else "Building flasher scripts…"
+                                } else {
+                                    "Compressing ${progress.message} (${progress.current}/${progress.total}) ${progress.percent}%"
+                                }
+                                if (logMsg != lastProgressMessage || progress.percent != lastProgressPercent) {
                                     lastProgressPercent = progress.percent
-                                    current.showLog("Compressing ${progress.message} (${progress.current}/${progress.total}) ${progress.percent}%", LogLevel.INFO)
+                                    current.showLog(logMsg, LogLevel.INFO)
                                 }
                             }
                         },
