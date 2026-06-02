@@ -114,6 +114,10 @@ class MainActivity : AppCompatActivity() {
         // Used to clear session-only input fields (device, custom filename) on cold start.
         @Volatile var wasProcessAlive = false
 
+        // Native initialization flag: true after initializeNative() has run once.
+        // Prevents duplicate "Initializing OTAku…" log lines on Activity recreation.
+        @Volatile var nativeInitialized = false
+
         /** Show ongoing progress notification with determinate progress bar. */
         fun showProgressNotification(message: String, percent: Int) {
             val ctx = appContext ?: return
@@ -281,6 +285,12 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     private fun initializeNative() {
+        // Skip if native was already initialized in this process (e.g. Activity was
+        // recreated after minimize+reopen). The companion savedLogText already has
+        // the initialization messages — re-logging would duplicate them.
+        if (nativeInitialized) return
+        nativeInitialized = true
+
         lifecycleScope.launch {
             showLog("Initializing OTAku...", LogLevel.INFO)
 
