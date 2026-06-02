@@ -108,14 +108,9 @@ class OTAService : Service() {
             level = level,
             outputPath = outputPath,
             onProgress = { progress ->
-                // Update notification with real-time per-partition progress
-                val notifText = "Compressing ${progress.message} (${progress.current}/${progress.total}) — ${progress.percent}%"
-                val overallPercent = if (progress.total > 0) {
-                    ((progress.current - 1) * 100 + progress.percent) / progress.total
-                } else {
-                    progress.percent
-                }
-                updateNotification(notifText, progressPercent = overallPercent)
+                // Update notification with determinate progress bar
+                val notifText = "${progress.message} — ${progress.percent}%"
+                updateNotification(notifText, progress.percent)
                 // Broadcast progress to MainActivity for progress bar
                 broadcastProgress(progress)
             },
@@ -165,31 +160,28 @@ class OTAService : Service() {
         }
     }
 
-    private fun updateNotification(text: String, isSuccess: Boolean = false, isError: Boolean = false, progressPercent: Int = -1) {
-        val notification = buildNotification(text, isSuccess, isError, progressPercent)
+    private fun updateNotification(text: String, percent: Int = 0, isSuccess: Boolean = false, isError: Boolean = false) {
+        val notification = buildNotification(text, percent, isSuccess, isError)
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
     private fun buildNotification(
         text: String,
+        percent: Int = 0,
         isSuccess: Boolean = false,
-        isError: Boolean = false,
-        progressPercent: Int = -1
+        isError: Boolean = false
     ): android.app.Notification {
         return NotificationCompat.Builder(this, OTAkuApp.CHANNEL_ID)
             .setContentTitle(NOTIFICATION_TITLE)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
+            .setProgress(100, percent.coerceIn(0, 100), percent == 0 && !isSuccess && !isError)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(!isSuccess && !isError) // Non-swipeable while running
             .setSilent(true) // No sound for status updates
             .apply {
-                if (progressPercent >= 0) {
-                    setProgress(100, progressPercent.coerceIn(0, 100), false)
-                }
                 if (isSuccess || isError) {
-                    setAutoCancel(true) // Allow dismiss on success/error
-                    setOngoing(false)
+                    setAutoCancel(true) // Allow dismiss on completion
                 }
             }
             .build()

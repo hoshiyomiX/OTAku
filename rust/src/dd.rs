@@ -22,8 +22,37 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::compression::{compress_id, hash_and_compress_file_with_progress, is_alg, ALG_NONE};
-use std::cell::RefCell;
+use crate::compression::{compress_id, hash_and_compress_file, is_alg, ALG_NONE};
+
+// ---------------------------------------------------------------------------
+//  Progress sidecar file
+// ---------------------------------------------------------------------------
+
+/// Write a progress sidecar file next to the output ZIP.
+///
+/// The progress file is `<output_path>.progress` and contains a single JSON line:
+///   `{"current":1,"total":3,"name":"boot","phase":"compressing","bytes_written":12345678}`
+///
+/// Kotlin polls this file every 500ms to drive live progress UI.
+/// The file is deleted when the build completes (success or failure).
+fn write_progress_file(output_path: &str, current: usize, total: usize, name: &str, phase: &str, bytes_written: u64) {
+    let progress_path = format!("{}.progress", output_path);
+    let content = serde_json::json!({
+        "current": current,
+        "total": total,
+        "name": name,
+        "phase": phase,
+        "bytes_written": bytes_written
+    });
+    // Best-effort — progress file is non-critical
+    let _ = std::fs::write(&progress_path, content.to_string());
+}
+
+/// Delete the progress sidecar file (called on build completion or error).
+fn delete_progress_file(output_path: &str) {
+    let progress_path = format!("{}.progress", output_path);
+    let _ = std::fs::remove_file(&progress_path);
+}
 
 // ---------------------------------------------------------------------------
 //  DD format constants
@@ -753,7 +782,6 @@ pub fn run_dd_build(
     output_path: &str,
     device: &str,
     skip_verify: bool,
-    on_progress: Option<Box<dyn FnMut(i32, i32, &str, i32)>>,
 ) -> DdBuildResult {
     let start = std::time::Instant::now();
     let mut lines: Vec<String> = Vec::new();
@@ -824,11 +852,6 @@ pub fn run_dd_build(
     }
 
     // ── Run the build pipeline ──
-    // Wrap the progress callback in RefCell for interior mutability.
-    // This allows the callback to be called from inside the (|| { ... })()
-    // closure without the borrow checker complaining about mutable borrows
-    // across loop iterations.
-    let on_progress_cell = on_progress.map(|cb| RefCell::new(cb));
     let result: Result<DdBuildResult, String> = (|| {
         let num_parts = images.len();
         let level_display = if level > 0 {
@@ -883,12 +906,6 @@ pub fn run_dd_build(
         let mut data_blobs: Vec<u8> = Vec::new();
 
         for (i, (name, path)) in images.iter().enumerate() {
-            let part_idx = (i + 1) as i32;
-            let total_parts = num_parts as i32;
-            let name_for_cb = name.clone();
-            let cell_ref = &on_progress_cell;
-            let level_opt = if level > 0 { Some(level) } else { None };
-
             log::info!(
                 "[{}/{}] Compressing {} ({})",
                 i + 1,
@@ -897,32 +914,12 @@ pub fn run_dd_build(
                 path
             );
 
-            // Report progress: starting compression of this partition (0%)
-            if let Some(cell) = cell_ref.as_ref() {
-                let mut cb = cell.borrow_mut();
-                cb(part_idx, total_parts, &name_for_cb, 0);
-            }
+            // Write progress: starting this partition
+            write_progress_file(output_path, i + 1, num_parts, name, "compressing", data_blobs.len() as u64);
 
-            // Hash and compress the image in a single streaming pass (with progress)
-            let (compressed, hash_hex) = {
-                let mut adapter = |bytes_read: u64, file_size: u64| {
-                    if let Some(cell) = cell_ref.as_ref() {
-                        let mut cb = cell.borrow_mut();
-                        let pct = if file_size > 0 {
-                            (bytes_read as f64 / file_size as f64 * 100.0) as i32
-                        } else {
-                            100
-                        };
-                        cb(part_idx, total_parts, &name_for_cb, pct);
-                    }
-                };
-                hash_and_compress_file_with_progress(
-                    path,
-                    &compress_name,
-                    level_opt,
-                    Some(&mut adapter),
-                )?
-            };
+            // Hash and compress the image in a single streaming pass
+            let level_opt = if level > 0 { Some(level) } else { None };
+            let (compressed, hash_hex) = hash_and_compress_file(path, &compress_name, level_opt)?;
 
             // Get uncompressed size
             let unc_size = std::fs::metadata(path)
@@ -950,6 +947,9 @@ pub fn run_dd_build(
                 data_blobs.extend_from_slice(&vec![0u8; padding]);
             }
 
+            // Write progress: partition done
+            write_progress_file(output_path, i + 1, num_parts, name, "compressed", data_blobs.len() as u64);
+
             let ratio = if unc_size > 0 {
                 comp_size as f64 / unc_size as f64 * 100.0
             } else {
@@ -959,12 +959,6 @@ pub fn run_dd_build(
                 "    {}: {} -> {} bytes ({:.1}%)",
                 name, unc_size, comp_size, ratio
             ));
-
-            // Report progress: this partition is done (100%)
-            if let Some(cell) = cell_ref.as_ref() {
-                let mut cb = cell.borrow_mut();
-                cb(part_idx, total_parts, &name_for_cb, 100);
-            }
         }
 
         // Combine header + data blobs
@@ -976,12 +970,7 @@ pub fn run_dd_build(
 
         // ── Step 2: Build flasher scripts ──
         lines.push("[2/3] Building flasher scripts".to_string());
-
-        // Report progress: all partitions compressed, now building scripts
-        if let Some(cell) = on_progress_cell.as_ref() {
-            let mut cb = cell.borrow_mut();
-            cb(num_parts as i32, num_parts as i32, "scripts", 100);
-        }
+        write_progress_file(output_path, num_parts, num_parts, "scripts", "building_scripts", bundle_size);
 
         let update_binary = build_update_script(
             num_parts,
@@ -1020,12 +1009,7 @@ pub fn run_dd_build(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()
         ));
-
-        // Report progress: writing ZIP file
-        if let Some(cell) = on_progress_cell.as_ref() {
-            let mut cb = cell.borrow_mut();
-            cb(num_parts as i32, num_parts as i32, "writing ZIP", 100);
-        }
+        write_progress_file(output_path, num_parts, num_parts, "writing_zip", "writing_zip", bundle_size);
 
         // Ensure output directory exists
         if let Some(parent) = Path::new(output_path).parent() {
@@ -1091,6 +1075,9 @@ pub fn run_dd_build(
         // Clean up temp file
         let _ = std::fs::remove_file(&bundle_tmp_path);
 
+        // Clean up progress file — build is complete
+        delete_progress_file(output_path);
+
         let zip_size = std::fs::metadata(output_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -1113,6 +1100,9 @@ pub fn run_dd_build(
             duration_ms: elapsed.as_millis() as u64,
         })
     })();
+
+    // Clean up progress file on error too
+    delete_progress_file(output_path);
 
     match result {
         Ok(r) => r,
@@ -1263,7 +1253,7 @@ mod tests {
 
     #[test]
     fn test_run_dd_build_no_images() {
-        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false, None);
+        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false);
         assert!(!result.success);
         assert!(result.error.unwrap().contains("no images specified"));
     }
@@ -1277,7 +1267,6 @@ mod tests {
             "/tmp/test.zip",
             "",
             false,
-            None,
         );
         assert!(!result.success);
         assert!(result.error.unwrap().contains("unsupported compression"));

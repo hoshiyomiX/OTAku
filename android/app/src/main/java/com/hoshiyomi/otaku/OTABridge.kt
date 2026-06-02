@@ -118,56 +118,128 @@ object OTABridge {
         val effectiveDevice = device.ifEmpty { "generic" }
         val buildStartTime = System.currentTimeMillis()
 
+        // Compute total input size for progress estimation
+        val totalInputBytes = images.values.sumOf { path ->
+            try { java.io.File(path).length() } catch (_: Exception) { 0L }
+        }
+
         // Log input parameters before the JNI call
         val debugStartMsg = "[DEBUG] dd() called: ${images.size} partitions, " +
             "compression=$compression, level=$level, device=$effectiveDevice, " +
-            "output=$outputPath"
+            "output=$outputPath, total_input=${formatSize(totalInputBytes)}"
         Log.d(TAG, debugStartMsg)
         onOutputLine?.invoke(debugStartMsg)
+
+        // Delete stale progress file from previous runs
+        val progressFile = java.io.File("${outputPath}.progress")
+        progressFile.delete()
+
+        // Start progress polling coroutine — reads the .progress sidecar file
+        // that Rust writes after each partition is compressed
+        val progressJob = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            var lastCurrent = 0
+            var lastPercent = -1
+            while (kotlinx.coroutines.isActive) {
+                kotlinx.coroutines.delay(500) // poll every 500ms
+                try {
+                    if (!progressFile.exists()) continue
+                    val content = progressFile.readText().trim()
+                    if (content.isEmpty()) continue
+                    val json = org.json.JSONObject(content)
+                    val current = json.optInt("current", 0)
+                    val total = json.optInt("total", 0)
+                    val name = json.optString("name", "")
+                    val phase = json.optString("phase", "")
+                    val bytesWritten = json.optLong("bytes_written", 0)
+
+                    // Calculate percentage based on input bytes consumed vs total
+                    // The partition being compressed is current/total, and within it
+                    // we estimate based on proportional input bytes
+                    val partitionFraction = if (total > 0) {
+                        (current - 1).toFloat() / total.toFloat()
+                    } else 0f
+                    val currentPartitionBytes = if (total > 0 && current > 0) {
+                        totalInputBytes / total
+                    } else 0L
+                    val bytesSoFar = (totalInputBytes * partitionFraction).toLong() +
+                        (if (phase == "compressed") currentPartitionBytes else 0L)
+                    val percent = if (totalInputBytes > 0) {
+                        (bytesSoFar * 100 / totalInputBytes).toInt().coerceIn(0, 99)
+                    } else {
+                        (partitionFraction * 100).toInt().coerceIn(0, 99)
+                    }
+
+                    // Only emit if something changed
+                    if (current != lastCurrent || percent != lastPercent) {
+                        lastCurrent = current
+                        lastPercent = percent
+
+                        // Build progress message
+                        val message = when (phase) {
+                            "compressing" -> "Compressing $name"
+                            "compressed" -> "Compressing $name"
+                            "building_scripts" -> "Building flasher scripts"
+                            "writing_zip" -> "Writing ZIP file"
+                            else -> "Processing $name"
+                        }
+
+                        onProgress?.invoke(ProgressUpdate(
+                            current = current,
+                            total = total,
+                            message = message,
+                            percent = percent
+                        ))
+                    }
+                } catch (_: Exception) {
+                    // Progress file read is non-critical — ignore parse errors
+                }
+            }
+        }
 
         return withContext(Dispatchers.IO) {
             try {
                 Process.setThreadPriority(Process.myTid(), -10)
             } catch (_: Exception) {}
 
-            val ddResult = NativeBridge.buildDd(
-                images = images,
-                compression = compression,
-                level = level,
-                outputPath = outputPath,
-                device = effectiveDevice,
-                skipVerify = skipVerify,
-                onProgress = onProgress?.let { cb ->
-                    { current, total, message, percent ->
-                        cb.invoke(ProgressUpdate(current, total, message, percent))
+            try {
+                val ddResult = NativeBridge.buildDd(
+                    images = images,
+                    compression = compression,
+                    level = level,
+                    outputPath = outputPath,
+                    device = effectiveDevice,
+                    skipVerify = skipVerify
+                )
+
+                // Emit all Rust output lines to the log
+                ddResult.output.split("\n").forEach { line ->
+                    if (line.isNotBlank()) {
+                        onOutputLine?.invoke(line)
                     }
                 }
-            )
 
-            // Emit all Rust output lines to the log
-            ddResult.output.split("\n").forEach { line ->
-                if (line.isNotBlank()) {
-                    onOutputLine?.invoke(line)
+                // Log result summary after the JNI call returns
+                val durationMs = System.currentTimeMillis() - buildStartTime
+                val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
+                val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
+                val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
+                    "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
+                    "bundle_size=$bundleSizeStr"
+                Log.d(TAG, debugEndMsg)
+                onOutputLine?.invoke(debugEndMsg)
+
+                if (ddResult.success) {
+                    OTAResult.success(ddResult.output, ddResult.durationMs)
+                } else {
+                    OTAResult.error(
+                        ddResult.error ?: "Native build failed",
+                        ddResult.durationMs
+                    ).copy(output = ddResult.output)
                 }
-            }
-
-            // Log result summary after the JNI call returns
-            val durationMs = System.currentTimeMillis() - buildStartTime
-            val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
-            val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
-            val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
-                "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
-                "bundle_size=$bundleSizeStr"
-            Log.d(TAG, debugEndMsg)
-            onOutputLine?.invoke(debugEndMsg)
-
-            if (ddResult.success) {
-                OTAResult.success(ddResult.output, ddResult.durationMs)
-            } else {
-                OTAResult.error(
-                    ddResult.error ?: "Native build failed",
-                    ddResult.durationMs
-                ).copy(output = ddResult.output)
+            } finally {
+                // Always cancel progress polling and clean up
+                progressJob.cancel()
+                progressFile.delete()
             }
         }
     }
