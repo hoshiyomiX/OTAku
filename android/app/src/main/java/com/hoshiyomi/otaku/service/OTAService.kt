@@ -108,8 +108,13 @@ class OTAService : Service() {
             level = level,
             outputPath = outputPath,
             onProgress = { progress ->
-                // Update notification with determinate progress bar
-                val notifText = "${progress.message} — ${progress.percent}%"
+                // Update notification with per-partition info
+                val notifText = if (progress.current > 0 && progress.total > 0 &&
+                    progress.partitionPercent in 1..99) {
+                    "${progress.message} (${progress.current}/${progress.total}) — ${progress.partitionPercent}%"
+                } else {
+                    "${progress.message} — ${progress.percent}%"
+                }
                 updateNotification(notifText, progress.percent)
                 // Broadcast progress to MainActivity for progress bar
                 broadcastProgress(progress)

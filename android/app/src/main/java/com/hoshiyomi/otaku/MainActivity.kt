@@ -843,41 +843,43 @@ class MainActivity : AppCompatActivity() {
                             // Update heartbeat timestamp (survives Activity recreation)
                             lastProgressTime = System.currentTimeMillis()
 
-                            // Update notification (works even when Activity is destroyed)
-                            val notifMsg = "${progress.message} — ${progress.percent}%"
+                            // Build notification message with per-partition info
+                            // For compression: "Compressing boot (1/3) — 45%"
+                            // For phases: "Writing ZIP file — 97%"
+                            val notifMsg = if (progress.current > 0 && progress.total > 0 &&
+                                progress.partitionPercent in 1..99) {
+                                "${progress.message} (${progress.current}/${progress.total}) — ${progress.partitionPercent}%"
+                            } else {
+                                "${progress.message} — ${progress.percent}%"
+                            }
                             if (notifMsg != lastProgressMessage) {
                                 lastProgressMessage = notifMsg
                                 showProgressNotification(notifMsg, progress.percent)
                             }
 
-                            // Update split progress bars (per-partition) using message-based mapping.
-                            // progress.current is 1-based partition index, progress.total is total partitions.
-                            // Map by partition name from message for per-bar updates.
+                            // Update split progress bars (per-partition).
+                            // Use progress.current (1-based) for partition index — reliable
+                            // unlike message parsing which broke when message contained "%".
+                            // Use progress.partitionPercent for per-partition bar fill (0-100).
                             if (partitionCount > 0) {
-                                val msg = progress.message
-                                val pIdx = when {
-                                    msg.startsWith("Compressing ") -> {
-                                        val name = msg.removePrefix("Compressing ").trim()
-                                        partitionNames.indexOf(name)
-                                    }
-                                    msg.contains("Building flasher") || msg.contains("Writing ZIP") -> {
+                                val pIdx = progress.current - 1  // 0-based index
+                                when {
+                                    progress.message.contains("Building flasher") ||
+                                    progress.message.contains("Writing ZIP") -> {
                                         // Post-partition steps: mark all bars complete
                                         for (j in 0 until partitionCount) {
                                             partitionProgress[j] = 100
                                         }
                                         currentPartitionIndex = partitionCount - 1
-                                        -1  // skip bar update below
                                     }
-                                    else -> -1
-                                }
-                                if (pIdx >= 0 && pIdx < partitionCount) {
-                                    // Calculate per-partition progress: current partition gets the
-                                    // fractional percent, previous partitions are 100%
-                                    partitionProgress[pIdx] = progress.percent
-                                    currentPartitionIndex = pIdx
-                                    // Mark all previous partitions as complete
-                                    for (j in 0 until pIdx) {
-                                        if (partitionProgress[j] < 100) partitionProgress[j] = 100
+                                    pIdx in 0 until partitionCount -> {
+                                        // Use partitionPercent for per-partition bar fill
+                                        partitionProgress[pIdx] = progress.partitionPercent
+                                        currentPartitionIndex = pIdx
+                                        // Mark all previous partitions as complete
+                                        for (j in 0 until pIdx) {
+                                            if (partitionProgress[j] < 100) partitionProgress[j] = 100
+                                        }
                                     }
                                 }
                             }
@@ -899,10 +901,16 @@ class MainActivity : AppCompatActivity() {
                                         }
                                     }
                                 }
-                                // Log only when percent changes
-                                if (progress.percent != lastProgressPercent) {
-                                    lastProgressPercent = progress.percent
-                                    current.showLog("${progress.message} ${progress.percent}%", LogLevel.INFO)
+                                // Log per-partition progress when partitionPercent changes
+                                // Format: "Compressing product 4%" (single clean percentage)
+                                if (progress.partitionPercent != lastProgressPercent) {
+                                    lastProgressPercent = progress.partitionPercent
+                                    val logMsg = if (progress.partitionPercent in 1..99) {
+                                        "${progress.message} ${progress.partitionPercent}%"
+                                    } else {
+                                        progress.message
+                                    }
+                                    current.showLog(logMsg, LogLevel.INFO)
                                 }
                             }
                         },
