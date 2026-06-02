@@ -8,6 +8,6 @@
         android:icon="@drawable/ic_theme_auto"
         android:contentDescription="@string/theme_label"
         app:showAsAction="always"
-        app:tint="?attr/colorOnSurfaceVariant" />
+        app:tint="?attr/colorOnSurface" />
 
 </menu>
