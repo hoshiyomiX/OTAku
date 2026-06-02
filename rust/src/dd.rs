@@ -19,7 +19,7 @@
 //! Ported from Python modes/dd.py (849 lines) to Rust with identical semantics.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::Path;
 
 use crate::compression::{compress_id, hash_and_compress_file, is_alg, ALG_NONE};
@@ -31,18 +31,22 @@ use crate::compression::{compress_id, hash_and_compress_file, is_alg, ALG_NONE};
 /// Write a progress sidecar file next to the output ZIP.
 ///
 /// The progress file is `<output_path>.progress` and contains a single JSON line:
-///   `{"current":1,"total":3,"name":"boot","phase":"compressing","bytes_written":12345678}`
+///   `{"current":1,"total":3,"name":"boot","phase":"compressing","bytes_written":12345678,
+///     "tmp_path":"/tmp/otaku_build_tmp.bin","total_estimated":500000000}`
 ///
 /// Kotlin polls this file every 500ms to drive live progress UI.
+/// It also monitors the tmp file size for granular percentage display.
 /// The file is deleted when the build completes (success or failure).
-fn write_progress_file(output_path: &str, current: usize, total: usize, name: &str, phase: &str, bytes_written: u64) {
+fn write_progress_file(output_path: &str, current: usize, total: usize, name: &str, phase: &str, bytes_written: u64, tmp_path: Option<&str>, total_estimated: u64) {
     let progress_path = format!("{}.progress", output_path);
     let content = serde_json::json!({
         "current": current,
         "total": total,
         "name": name,
         "phase": phase,
-        "bytes_written": bytes_written
+        "bytes_written": bytes_written,
+        "tmp_path": tmp_path.unwrap_or(""),
+        "total_estimated": total_estimated
     });
     // Best-effort — progress file is non-critical
     let _ = std::fs::write(&progress_path, content.to_string());
@@ -860,6 +864,33 @@ pub fn run_dd_build(
             String::new()
         };
 
+        // ── Compute total estimated size (sum of all input image sizes) ──
+        // Used by Kotlin for progress percentage calculation.
+        let total_estimated: u64 = images.iter().map(|(_, path)| {
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        }).sum();
+
+        // ── Create temp file for incremental bundle writing ──
+        // Writing compressed data incrementally (partition by partition) instead
+        // of accumulating in memory allows Kotlin to monitor the growing file size
+        // for live progress display.
+        let temp_dir = std::env::temp_dir();
+        let bundle_tmp_path = temp_dir.join("otaku_build_tmp.bin");
+        let bundle_tmp_path_str = bundle_tmp_path.to_string_lossy().to_string();
+
+        // Clean up stale temp file from previous builds
+        let _ = std::fs::remove_file(&bundle_tmp_path);
+
+        // Write placeholder header first (will overwrite with real header later)
+        {
+            let mut tmp = File::create(&bundle_tmp_path)
+                .map_err(|e| format!("Cannot create temp file: {}", e))?;
+            tmp.write_all(&vec![0u8; HEADER_SIZE])
+                .map_err(|e| format!("Cannot write header placeholder: {}", e))?;
+            tmp.flush()
+                .map_err(|e| format!("Cannot flush header: {}", e))?;
+        }
+
         // ── Header info ──
         let partition_names: Vec<&str> = images.iter().map(|(n, _)| n.as_str()).collect();
         lines.push("\u{2550} OTAku \u{2550}".to_string());
@@ -885,7 +916,7 @@ pub fn run_dd_build(
         ));
         lines.push(String::new());
 
-        // ── Step 1: Build otaku.bin ──
+        // ── Step 1: Build otaku.bin (incrementally written to temp file) ──
         lines.push("[1/3] Building otaku.bin".to_string());
         lines.push(format!(
             "  Compressing {} partition(s) with {}{}",
@@ -900,77 +931,114 @@ pub fn run_dd_build(
             ));
         }
 
-        let header = build_header(compress_id_val, num_parts as u16);
-
         let mut partitions_meta: Vec<PartitionMeta> = Vec::new();
-        let mut data_blobs: Vec<u8> = Vec::new();
 
-        for (i, (name, path)) in images.iter().enumerate() {
-            log::info!(
-                "[{}/{}] Compressing {} ({})",
-                i + 1,
-                num_parts,
-                name,
-                path
-            );
+        // Open temp file in append mode for incremental writes
+        {
+            let mut tmp_file = std::fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&bundle_tmp_path)
+                .map_err(|e| format!("Cannot open temp file for writing: {}", e))?;
 
-            // Write progress: starting this partition
-            write_progress_file(output_path, i + 1, num_parts, name, "compressing", data_blobs.len() as u64);
+            for (i, (name, path)) in images.iter().enumerate() {
+                log::info!(
+                    "[{}/{}] Compressing {} ({})",
+                    i + 1,
+                    num_parts,
+                    name,
+                    path
+                );
 
-            // Hash and compress the image in a single streaming pass
-            let level_opt = if level > 0 { Some(level) } else { None };
-            let (compressed, hash_hex) = hash_and_compress_file(path, &compress_name, level_opt)?;
+                // Write progress: starting this partition
+                write_progress_file(
+                    output_path, i + 1, num_parts, name, "compressing",
+                    tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64),
+                    Some(&bundle_tmp_path_str), total_estimated,
+                );
 
-            // Get uncompressed size
-            let unc_size = std::fs::metadata(path)
-                .map_err(|e| format!("Cannot stat {}: {}", path, e))?
-                .len();
+                // Hash and compress the image in a single streaming pass
+                let level_opt = if level > 0 { Some(level) } else { None };
+                let (compressed, hash_hex) = hash_and_compress_file(path, &compress_name, level_opt)?;
 
-            let comp_size = compressed.len() as u64;
-            let data_offset = data_blobs.len() as u64;
+                // Get uncompressed size
+                let unc_size = std::fs::metadata(path)
+                    .map_err(|e| format!("Cannot stat {}: {}", path, e))?
+                    .len();
 
-            partitions_meta.push(PartitionMeta {
-                name: name.clone(),
-                unc_size,
-                hash_hex,
-                comp_size,
-                data_offset,
-            });
+                let comp_size = compressed.len() as u64;
+                let data_offset = tmp_file.metadata().map(|m| m.len()).unwrap_or(0) - HEADER_SIZE as u64;
 
-            data_blobs.extend_from_slice(&compressed);
-            drop(compressed); // free compressed data
+                partitions_meta.push(PartitionMeta {
+                    name: name.clone(),
+                    unc_size,
+                    hash_hex,
+                    comp_size,
+                    data_offset,
+                });
 
-            // Align data_blobs to ALIGN boundary
-            let aligned = align_up(data_blobs.len(), ALIGN);
-            if aligned > data_blobs.len() {
-                let padding = aligned - data_blobs.len();
-                data_blobs.extend_from_slice(&vec![0u8; padding]);
+                // Write compressed data directly to temp file (incremental!)
+                tmp_file.write_all(&compressed)
+                    .map_err(|e| format!("Cannot write compressed data for {}: {}", name, e))?;
+
+                // Align to 4096 boundary
+                let current_pos = tmp_file.metadata().map(|m| m.len()).unwrap_or(0);
+                let aligned = align_up(current_pos as usize, ALIGN);
+                if aligned > current_pos as usize {
+                    let padding = aligned - current_pos as usize;
+                    tmp_file.write_all(&vec![0u8; padding])
+                        .map_err(|e| format!("Cannot write alignment padding: {}", e))?;
+                }
+
+                tmp_file.flush()
+                    .map_err(|e| format!("Cannot flush temp file after {}: {}", name, e))?;
+
+                // Write progress: partition done (file has grown!)
+                write_progress_file(
+                    output_path, i + 1, num_parts, name, "compressed",
+                    tmp_file.metadata().map(|m| m.len()).unwrap_or(0),
+                    Some(&bundle_tmp_path_str), total_estimated,
+                );
+
+                let ratio = if unc_size > 0 {
+                    comp_size as f64 / unc_size as f64 * 100.0
+                } else {
+                    100.0
+                };
+                lines.push(format!(
+                    "    {}: {} -> {} bytes ({:.1}%)",
+                    name, unc_size, comp_size, ratio
+                ));
             }
+        } // tmp_file dropped here
 
-            // Write progress: partition done
-            write_progress_file(output_path, i + 1, num_parts, name, "compressed", data_blobs.len() as u64);
-
-            let ratio = if unc_size > 0 {
-                comp_size as f64 / unc_size as f64 * 100.0
-            } else {
-                100.0
-            };
-            lines.push(format!(
-                "    {}: {} -> {} bytes ({:.1}%)",
-                name, unc_size, comp_size, ratio
-            ));
+        // Now overwrite the header placeholder with the real header
+        let header = build_header(compress_id_val, num_parts as u16);
+        {
+            let mut tmp_file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&bundle_tmp_path)
+                .map_err(|e| format!("Cannot open temp file for header: {}", e))?;
+            tmp_file.seek(std::io::SeekFrom::Start(0))
+                .map_err(|e| format!("Cannot seek to start: {}", e))?;
+            tmp_file.write_all(&header)
+                .map_err(|e| format!("Cannot write header: {}", e))?;
+            tmp_file.flush()
+                .map_err(|e| format!("Cannot flush header: {}", e))?;
         }
 
-        // Combine header + data blobs
-        let mut bundle_data = header;
-        bundle_data.append(&mut data_blobs);
-        let bundle_size = bundle_data.len() as u64;
+        let bundle_size = std::fs::metadata(&bundle_tmp_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         lines.push(format!("  Bundle size  : {}", human_size(bundle_size)));
         lines.push(String::new());
 
         // ── Step 2: Build flasher scripts ──
         lines.push("[2/3] Building flasher scripts".to_string());
-        write_progress_file(output_path, num_parts, num_parts, "scripts", "building_scripts", bundle_size);
+        write_progress_file(
+            output_path, num_parts, num_parts, "scripts", "building_scripts",
+            bundle_size, Some(&bundle_tmp_path_str), total_estimated,
+        );
 
         let update_binary = build_update_script(
             num_parts,
@@ -1009,30 +1077,16 @@ pub fn run_dd_build(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()
         ));
-        write_progress_file(output_path, num_parts, num_parts, "writing_zip", "writing_zip", bundle_size);
+        write_progress_file(
+            output_path, num_parts, num_parts, "writing_zip", "writing_zip",
+            bundle_size, Some(&bundle_tmp_path_str), total_estimated,
+        );
 
         // Ensure output directory exists
         if let Some(parent) = Path::new(output_path).parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Cannot create output dir: {}", e))?;
         }
-
-        // Write otaku.bin to temp file first, then add to ZIP.
-        // This avoids double-copying the bundle data in memory.
-        let temp_dir = std::env::temp_dir();
-        let bundle_tmp_path = temp_dir.join("otaku_build_tmp.bin");
-
-        {
-            let mut bundle_tmp =
-                File::create(&bundle_tmp_path).map_err(|e| format!("Cannot create temp file: {}", e))?;
-            bundle_tmp
-                .write_all(&bundle_data)
-                .map_err(|e| format!("Cannot write temp bundle: {}", e))?;
-            bundle_tmp
-                .flush()
-                .map_err(|e| format!("Cannot flush temp bundle: {}", e))?;
-        }
-        drop(bundle_data); // free memory before ZIP creation
 
         // Create the output ZIP with ZIP_STORED (no compression — the data is already compressed)
         {
@@ -1042,7 +1096,7 @@ pub fn run_dd_build(
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
 
-            // Add otaku.bin
+            // Add otaku.bin (from the temp file we built incrementally)
             zip.start_file("otaku.bin", options)
                 .map_err(|e| format!("Cannot start otaku.bin in ZIP: {}", e))?;
             let mut bundle_file = File::open(&bundle_tmp_path)
