@@ -11,7 +11,7 @@ use jni::objects::JClass;
 use jni::objects::JObject;
 use jni::objects::JString;
 use jni::objects::JValue;
-use jni::sys::{jboolean, jint, jobject, jstring};
+use jni::sys::{jint, jobject, jstring};
 use jni::JNIEnv;
 
 // ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
 /// @param level         Compression level (0 = default)
 /// @param output_path   Absolute path for output .zip
 /// @param device        Device codename(s), comma-separated
-/// @param skip_verify   Skip SHA-256 post-flash verification (0/1)
+/// @param skip_verify   Skip SHA-256 post-flash verification (0 = verify, 1 = skip)
 /// @param callback      BuildProgressCallback object (or null for no progress)
 /// @return JSON result: {"success": bool, "output": str, "error": str|null,
 ///                       "zip_path": str|null, "zip_size": int|null, "bundle_size": int|null,
@@ -321,7 +321,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     level: jint,
     output_path: JString,
     device: JString,
-    skip_verify: jboolean,
+    skip_verify: jint,
     callback: jobject,
 ) -> jstring {
     // Parse JNI string arguments
@@ -350,11 +350,15 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
         }
     };
 
-    // Convert HashMap to Vec<(String, String)> preserving order
-    let images_vec: Vec<(String, String)> = images_map.into_iter().collect();
+    // Convert HashMap to Vec<(String, String)> sorted by partition name.
+    // This MUST match Kotlin's `images.keys.sorted()` in MainActivity.kt
+    // so that per-partition progress bars map to the correct partition.
+    let mut images_vec: Vec<(String, String)> = images_map.into_iter().collect();
+    images_vec.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Create progress callback if provided
     let progress_cb: Option<Box<dyn FnMut(i32, i32, &str, i32)>> = if callback.is_null() {
+        log::info!("nativeBuildDd: no progress callback provided");
         None
     } else {
         // Create a global reference to the callback object so it survives
@@ -362,35 +366,79 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
         let callback_obj = unsafe { JObject::from_raw(callback) };
         let callback_ref = match env.new_global_ref(&callback_obj) {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
+                log::error!("nativeBuildDd: failed to create global ref: {:?}", e);
                 return make_error_json(&env, "Failed to create global ref for callback");
             }
         };
-        // Get raw JNIEnv pointer for reconstruction inside the closure.
-        // Safe because run_dd_build is synchronous on the same JNI thread.
-        let raw_env = env.get_raw();
+        // Get the JavaVM for the callback closure.
+        // Using JavaVM.get_env() is safer than JNIEnv::from_raw() because
+        // it properly obtains the JNIEnv for the current thread through
+        // the official JNI API, avoiding double-wrapping issues.
+        let vm = match env.get_java_vm() {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("nativeBuildDd: failed to get JavaVM: {:?}", e);
+                return make_error_json(&env, "Failed to get JavaVM for callback");
+            }
+        };
+        log::info!("nativeBuildDd: progress callback created successfully");
 
         Some(Box::new(move |current: i32, total: i32, message: &str, percent: i32| {
-            unsafe {
-                let mut cb_env = match JNIEnv::from_raw(raw_env) {
-                    Ok(e) => e,
-                    Err(_) => return,
-                };
-                let msg_jstr = match cb_env.new_string(message) {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                let _ = cb_env.call_method(
-                    callback_ref.as_obj(),
-                    "onProgress",
-                    "(IILjava/lang/String;I)V",
-                    &[
-                        JValue::Int(current),
-                        JValue::Int(total),
-                        JValue::Object(&msg_jstr),
-                        JValue::Int(percent),
-                    ],
-                );
+            // Get the JNIEnv for the current thread via JavaVM.
+            // This is the safe, official way to obtain the JNI environment
+            // from within a callback — no raw pointer reconstruction needed.
+            let mut cb_env = match vm.get_env() {
+                Ok(e) => e,
+                Err(e) => {
+                    log::warn!(
+                        "Progress callback: get_env failed: {:?} (thread not attached?)",
+                        e
+                    );
+                    return;
+                }
+            };
+            // Use a local reference frame to prevent local reference accumulation.
+            // Each callback creates at least 1 local reference (the JString).
+            // Without this, a build with many progress updates could overflow
+            // Android's 512-entry local reference table.
+            let callback_result: std::result::Result<(), jni::errors::Error> =
+                cb_env.with_local_frame(4, |frame_env| {
+                    let msg_jstr = match frame_env.new_string(message) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::warn!("Progress callback: new_string failed: {:?}", e);
+                            return Ok(());
+                        }
+                    };
+                    let result = frame_env.call_method(
+                        callback_ref.as_obj(),
+                        "onProgress",
+                        "(IILjava/lang/String;I)V",
+                        &[
+                            JValue::Int(current),
+                            JValue::Int(total),
+                            JValue::Object(&msg_jstr),
+                            JValue::Int(percent),
+                        ],
+                    );
+                    match result {
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!(
+                                "Progress callback: call_method failed: {:?}",
+                                e
+                            );
+                        }
+                    }
+                    // Clear any pending Java exceptions to prevent cascading failures.
+                    // A Java exception in the Kotlin onProgress handler must not
+                    // poison all subsequent JNI calls.
+                    let _ = frame_env.exception_clear();
+                    Ok(())
+                });
+            if let Err(e) = callback_result {
+                log::warn!("Progress callback: with_local_frame failed: {:?}", e);
             }
         }))
     };

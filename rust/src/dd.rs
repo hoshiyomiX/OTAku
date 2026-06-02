@@ -883,6 +883,12 @@ pub fn run_dd_build(
         let mut data_blobs: Vec<u8> = Vec::new();
 
         for (i, (name, path)) in images.iter().enumerate() {
+            let part_idx = (i + 1) as i32;
+            let total_parts = num_parts as i32;
+            let name_for_cb = name.clone();
+            let cell_ref = &on_progress_cell;
+            let level_opt = if level > 0 { Some(level) } else { None };
+
             log::info!(
                 "[{}/{}] Compressing {} ({})",
                 i + 1,
@@ -891,12 +897,13 @@ pub fn run_dd_build(
                 path
             );
 
+            // Report progress: starting compression of this partition (0%)
+            if let Some(cell) = cell_ref.as_ref() {
+                let mut cb = cell.borrow_mut();
+                cb(part_idx, total_parts, &name_for_cb, 0);
+            }
+
             // Hash and compress the image in a single streaming pass (with progress)
-            let level_opt = if level > 0 { Some(level) } else { None };
-            let part_idx = (i + 1) as i32;
-            let total_parts = num_parts as i32;
-            let name_for_cb = name.clone();
-            let cell_ref = &on_progress_cell;
             let (compressed, hash_hex) = {
                 let mut adapter = |bytes_read: u64, file_size: u64| {
                     if let Some(cell) = cell_ref.as_ref() {
@@ -952,6 +959,12 @@ pub fn run_dd_build(
                 "    {}: {} -> {} bytes ({:.1}%)",
                 name, unc_size, comp_size, ratio
             ));
+
+            // Report progress: this partition is done (100%)
+            if let Some(cell) = cell_ref.as_ref() {
+                let mut cb = cell.borrow_mut();
+                cb(part_idx, total_parts, &name_for_cb, 100);
+            }
         }
 
         // Combine header + data blobs
@@ -963,6 +976,12 @@ pub fn run_dd_build(
 
         // ── Step 2: Build flasher scripts ──
         lines.push("[2/3] Building flasher scripts".to_string());
+
+        // Report progress: all partitions compressed, now building scripts
+        if let Some(cell) = on_progress_cell.as_ref() {
+            let mut cb = cell.borrow_mut();
+            cb(num_parts as i32, num_parts as i32, "scripts", 100);
+        }
 
         let update_binary = build_update_script(
             num_parts,
@@ -1001,6 +1020,12 @@ pub fn run_dd_build(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()
         ));
+
+        // Report progress: writing ZIP file
+        if let Some(cell) = on_progress_cell.as_ref() {
+            let mut cb = cell.borrow_mut();
+            cb(num_parts as i32, num_parts as i32, "writing ZIP", 100);
+        }
 
         // Ensure output directory exists
         if let Some(parent) = Path::new(output_path).parent() {
