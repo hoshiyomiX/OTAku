@@ -552,22 +552,33 @@ esac
 ui_print "  Active slot: ${{TARGET_SLOT:-none (non-A/B device)}}"
 ui_print ""
 
-is_shared_partition() {{
-    case "$1" in
-        modem|bluetooth|dsp|cnss|fvb|persist|keystore|provision) return 0 ;;
-        *) return 1 ;;
-    esac
-}}
-
 resolve_target() {{
     local name="$1"
-    if is_shared_partition "$name"; then
-        echo "/dev/block/by-name/$name"
-    elif [ -n "$TARGET_SLOT" ]; then
-        echo "/dev/block/by-name/${{name}}${{TARGET_SLOT}}"
-    else
-        echo "/dev/block/by-name/$name"
+    local slotted="/dev/block/by-name/${{name}}${{TARGET_SLOT}}"
+    local plain="/dev/block/by-name/$name"
+
+    # No slot detected — non-A/B device
+    if [ -z "$TARGET_SLOT" ]; then
+        echo "$plain"
+        return
     fi
+
+    # Prefer slotted path if it exists (e.g. boot_b, dtbo_b, vbmeta_b)
+    if [ -e "$slotted" ]; then
+        echo "$slotted"
+        return
+    fi
+
+    # Dynamic partitions in super don't have _a/_b symlinks on Virtual AB
+    # devices — use the plain name (e.g. system, vendor, odm_dlkm)
+    if [ -e "$plain" ]; then
+        echo "$plain"
+        return
+    fi
+
+    # Neither exists yet — return slotted path as best guess;
+    # validate_target() will produce a clear error if still missing
+    echo "$slotted"
 }}
 "#,
         slot_step = slot_step,
