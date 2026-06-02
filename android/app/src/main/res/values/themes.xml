@@ -61,7 +61,7 @@
         <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
         <!-- Toolbar icon tinting -->
-        <item name="colorControlNormal">@color/md_theme_light_onSurfaceVariant</item>
+        <item name="colorControlNormal">@color/md_theme_light_onSurface</item>
     </style>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -111,7 +111,7 @@
         <item name="android:windowLightNavigationBar">false</item>
 
         <!-- Toolbar icon tinting -->
-        <item name="colorControlNormal">@color/md_theme_dark_onSurfaceVariant</item>
+        <item name="colorControlNormal">@color/md_theme_dark_onSurface</item>
     </style>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
