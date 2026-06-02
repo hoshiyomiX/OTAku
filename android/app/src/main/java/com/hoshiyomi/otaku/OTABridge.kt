@@ -42,7 +42,8 @@ data class ProgressUpdate(
     val current: Int,
     val total: Int,
     val message: String,
-    val percent: Int
+    val percent: Int,
+    val partitionPercent: Int = 0
 )
 
 /**
@@ -190,10 +191,12 @@ object OTABridge {
                             lastPhase = phase
 
                             // Build progress message based on phase and partition info
+                            // Message is clean (no percentage) — percentage is passed separately
+                            // via partitionPercent field so UI can use it for per-partition bars.
                             val message = when (phase) {
                                 "compressing" -> {
                                     if (name.isNotEmpty()) {
-                                        "Compressing $name $partitionPercent%"
+                                        "Compressing $name"
                                     } else {
                                         "Compressing…"
                                     }
@@ -204,11 +207,21 @@ object OTABridge {
                                 else -> if (name.isNotEmpty()) "Processing $name" else "Building…"
                             }
 
+                            // partitionPercent: per-partition compression progress (0-100)
+                            // percent (displayPercent): overall build progress (0-97)
+                            val pPct = when {
+                                phase == "writing_zip" -> 100
+                                phase == "building_scripts" -> 100
+                                phase == "compressed" -> 100
+                                else -> partitionPercent
+                            }
+
                             onProgress?.invoke(ProgressUpdate(
                                 current = current,
                                 total = total,
                                 message = message,
-                                percent = displayPercent
+                                percent = displayPercent,
+                                partitionPercent = pPct
                             ))
                         }
                     } catch (_: Exception) {
