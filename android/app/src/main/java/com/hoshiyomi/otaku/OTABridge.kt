@@ -2,7 +2,11 @@ package com.hoshiyomi.otaku
 
 import android.os.Process
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -150,15 +154,15 @@ object OTABridge {
         //
         // The tmp file grows incrementally during compression, giving smooth
         // progress instead of the jump-at-completion behavior from sidecar-only.
-        val progressJob = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+        val progressJob = CoroutineScope(Dispatchers.IO).launch {
             var lastCurrent = 0
             var lastPercent = -1
             var lastPhase = ""
             var lastName = ""
             var lastTotal = 0
 
-            while (kotlinx.coroutines.isActive) {
-                kotlinx.coroutines.delay(500) // poll every 500ms
+            while (isActive) {
+                delay(500) // poll every 500ms
                 try {
                     // --- Source 1: sidecar file for partition name, phase, and tmp_path ---
                     var current = lastCurrent
