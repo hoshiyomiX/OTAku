@@ -348,8 +348,12 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
         }
     };
 
-    // Convert HashMap to Vec<(String, String)> preserving order
-    let images_vec: Vec<(String, String)> = images_map.into_iter().collect();
+    // Convert HashMap to Vec<(String, String)> and sort alphabetically by partition name.
+    // Kotlin sorts partition names for the progress bar (images.keys.sorted()),
+    // so Rust must compress in the same order so that log messages and per-partition
+    // progress bar indices match.
+    let mut images_vec: Vec<(String, String)> = images_map.into_iter().collect();
+    images_vec.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Call the DD build pipeline
     let result = dd::run_dd_build(
