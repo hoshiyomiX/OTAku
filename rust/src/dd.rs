@@ -22,23 +22,35 @@ use std::fs::File;
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use crate::compression::{compress_id, hash_and_compress_file, is_alg, ALG_NONE};
+use crate::compression::{compress_id, hash_and_compress_file_with_progress, is_alg, ALG_NONE};
 
 // ---------------------------------------------------------------------------
 //  Progress sidecar file
 // ---------------------------------------------------------------------------
 
-/// Write a progress sidecar file next to the output ZIP.
+/// Write progress with per-partition compression percentage.
 ///
-/// The progress file is `<output_path>.progress` and contains a single JSON line:
-///   `{"current":1,"total":3,"name":"boot","phase":"compressing","bytes_written":12345678,
-///     "tmp_path":"/tmp/otaku_build_tmp.bin","total_estimated":500000000}`
-///
-/// Kotlin polls this file every 500ms to drive live progress UI.
-/// It also monitors the tmp file size for granular percentage display.
-/// The file is deleted when the build completes (success or failure).
-fn write_progress_file(output_path: &str, current: usize, total: usize, name: &str, phase: &str, bytes_written: u64, tmp_path: Option<&str>, total_estimated: u64) {
+/// `partition_percent` is 0-100 for the current partition being compressed.
+/// The overall build percentage is calculated as:
+///   completed_partitions * 100 / total_partitions + partition_percent / total_partitions
+fn write_progress_with_percent(
+    output_path: &str,
+    current: usize,
+    total: usize,
+    name: &str,
+    phase: &str,
+    bytes_written: u64,
+    tmp_path: Option<&str>,
+    total_estimated: u64,
+    partition_percent: i32,
+) {
     let progress_path = format!("{}.progress", output_path);
+    // Overall percent = (completed partitions * 100 + current partition percent) / total
+    let overall_percent = if total > 0 {
+        ((current.saturating_sub(1)) * 100 + partition_percent as usize) / total
+    } else {
+        0
+    };
     let content = serde_json::json!({
         "current": current,
         "total": total,
@@ -46,7 +58,9 @@ fn write_progress_file(output_path: &str, current: usize, total: usize, name: &s
         "phase": phase,
         "bytes_written": bytes_written,
         "tmp_path": tmp_path.unwrap_or(""),
-        "total_estimated": total_estimated
+        "total_estimated": total_estimated,
+        "partition_percent": partition_percent,
+        "overall_percent": overall_percent
     });
     // Best-effort — progress file is non-critical
     let _ = std::fs::write(&progress_path, content.to_string());
@@ -932,6 +946,7 @@ pub fn run_dd_build(
         }
 
         let mut partitions_meta: Vec<PartitionMeta> = Vec::new();
+        let level_opt = if level > 0 { Some(level) } else { None };
 
         // Open temp file in append mode for incremental writes
         {
@@ -950,21 +965,50 @@ pub fn run_dd_build(
                     path
                 );
 
-                // Write progress: starting this partition
-                write_progress_file(
+                // Write progress: starting this partition (0%)
+                write_progress_with_percent(
                     output_path, i + 1, num_parts, name, "compressing",
                     tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64),
                     Some(&bundle_tmp_path_str), total_estimated,
+                    0, // partition_percent = 0%
                 );
 
-                // Hash and compress the image in a single streaming pass
-                let level_opt = if level > 0 { Some(level) } else { None };
-                let (compressed, hash_hex) = hash_and_compress_file(path, &compress_name, level_opt)?;
-
-                // Get uncompressed size
+                // Get the uncompressed file size for progress calculation
                 let unc_size = std::fs::metadata(path)
                     .map_err(|e| format!("Cannot stat {}: {}", path, e))?
                     .len();
+
+                // Hash and compress with real-time per-chunk progress reporting.
+                // The progress callback fires after each 4MB chunk is read and fed
+                // to the compressor, updating the sidecar file with the partition
+                // compression percentage. This is what makes live progress work —
+                // Kotlin polls the sidecar every 500ms and sees the percentage grow.
+                let output_path_clone = output_path.to_string();
+                let bundle_tmp_path_str_clone = bundle_tmp_path_str.clone();
+                let name_clone = name.clone();
+                let (compressed, hash_hex) = hash_and_compress_file_with_progress(
+                    path,
+                    &compress_name,
+                    level_opt,
+                    Some(&mut |bytes_read: u64, file_size: u64| {
+                        let pct = if file_size > 0 {
+                            (bytes_read * 100 / file_size) as i32
+                        } else {
+                            100
+                        };
+                        write_progress_with_percent(
+                            &output_path_clone,
+                            i + 1,
+                            num_parts,
+                            &name_clone,
+                            "compressing",
+                            tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64),
+                            Some(&bundle_tmp_path_str_clone),
+                            total_estimated,
+                            pct,
+                        );
+                    }),
+                )?;
 
                 let comp_size = compressed.len() as u64;
                 let data_offset = tmp_file.metadata().map(|m| m.len()).unwrap_or(0) - HEADER_SIZE as u64;
@@ -993,11 +1037,12 @@ pub fn run_dd_build(
                 tmp_file.flush()
                     .map_err(|e| format!("Cannot flush temp file after {}: {}", name, e))?;
 
-                // Write progress: partition done (file has grown!)
-                write_progress_file(
+                // Write progress: partition done (100% for this partition)
+                write_progress_with_percent(
                     output_path, i + 1, num_parts, name, "compressed",
                     tmp_file.metadata().map(|m| m.len()).unwrap_or(0),
                     Some(&bundle_tmp_path_str), total_estimated,
+                    100, // partition_percent = 100%
                 );
 
                 let ratio = if unc_size > 0 {
@@ -1035,9 +1080,10 @@ pub fn run_dd_build(
 
         // ── Step 2: Build flasher scripts ──
         lines.push("[2/3] Building flasher scripts".to_string());
-        write_progress_file(
+        write_progress_with_percent(
             output_path, num_parts, num_parts, "scripts", "building_scripts",
             bundle_size, Some(&bundle_tmp_path_str), total_estimated,
+            100, // all partitions done
         );
 
         let update_binary = build_update_script(
@@ -1077,9 +1123,10 @@ pub fn run_dd_build(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()
         ));
-        write_progress_file(
+        write_progress_with_percent(
             output_path, num_parts, num_parts, "writing_zip", "writing_zip",
             bundle_size, Some(&bundle_tmp_path_str), total_estimated,
+            100, // all partitions done
         );
 
         // Ensure output directory exists
