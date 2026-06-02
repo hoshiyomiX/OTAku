@@ -138,125 +138,84 @@ object OTABridge {
         val progressFile = java.io.File("${outputPath}.progress")
         progressFile.delete()
 
-        // Track the temp build file that Rust creates during compression.
-        // Rust writes compressed data incrementally to this file, so its size
-        // grows during the build — giving us live progress data.
-        // The exact path is communicated via the .progress sidecar's "tmp_path" field.
-        var tmpBuildFile: java.io.File? = null
-
-        // Estimated final output size: sum of all input image sizes.
-        // Rust computes this identically and sends it via the sidecar's "total_estimated".
-        var estimatedFinalSize = totalInputBytes
-
-        // Start progress polling coroutine — uses TWO data sources:
-        // 1. The .progress sidecar file for partition name / phase / tmp_path info
-        // 2. The tmp build file SIZE for granular percentage calculation
+        // Start progress polling coroutine — reads the .progress sidecar file
+        // written by Rust every 4MB chunk during compression.
         //
-        // The tmp file grows incrementally during compression, giving smooth
-        // progress instead of the jump-at-completion behavior from sidecar-only.
+        // Rust updates the sidecar with:
+        //   - partition_percent: 0-100 for the current partition being compressed
+        //   - overall_percent: weighted across all partitions (0-94%)
+        //   - current, total, name, phase: partition tracking info
+        //
+        // This gives smooth, real-time progress instead of 0→100% jumps.
         val progressJob = CoroutineScope(Dispatchers.IO).launch {
-            var lastCurrent = 0
-            var lastPercent = -1
+            var lastOverallPercent = -1
             var lastPhase = ""
             var lastName = ""
-            var lastTotal = 0
 
             while (isActive) {
                 delay(500) // poll every 500ms
                 try {
-                    // --- Source 1: sidecar file for partition name, phase, and tmp_path ---
-                    var current = lastCurrent
-                    var total = lastTotal
-                    var name = lastName
-                    var phase = lastPhase
-                    var bytesWrittenFromSidecar = 0L
+                    if (!progressFile.exists()) continue
 
-                    if (progressFile.exists()) {
-                        val content = progressFile.readText().trim()
-                        if (content.isNotEmpty()) {
-                            try {
-                                val json = org.json.JSONObject(content)
-                                current = json.optInt("current", lastCurrent)
-                                total = json.optInt("total", lastTotal)
-                                name = json.optString("name", lastName)
-                                phase = json.optString("phase", lastPhase)
-                                bytesWrittenFromSidecar = json.optLong("bytes_written", 0L)
+                    val content = progressFile.readText().trim()
+                    if (content.isEmpty()) continue
 
-                                // Discover the temp file path from Rust
-                                val tmpPath = json.optString("tmp_path", "")
-                                if (tmpPath.isNotEmpty() && tmpBuildFile == null) {
-                                    val discovered = java.io.File(tmpPath)
-                                    if (discovered.exists()) {
-                                        tmpBuildFile = discovered
+                    try {
+                        val json = org.json.JSONObject(content)
+                        val current = json.optInt("current", 0)
+                        val total = json.optInt("total", 0)
+                        val name = json.optString("name", "")
+                        val phase = json.optString("phase", "")
+                        val partitionPercent = json.optInt("partition_percent", 0)
+                        val overallPercent = json.optInt("overall_percent", 0)
+
+                        // Compute the display percentage:
+                        // - During compression: use Rust's overall_percent (0-94%)
+                        // - Scripts phase: 95%
+                        // - ZIP writing phase: 97%
+                        val displayPercent = when {
+                            phase == "writing_zip" -> 97
+                            phase == "building_scripts" -> 95
+                            phase == "compressed" -> {
+                                // Partition just finished — show 94% overall
+                                (current * 100 / (total.coerceAtLeast(1))).coerceAtMost(94)
+                            }
+                            else -> overallPercent.coerceIn(0, 94)
+                        }
+
+                        // Only emit if something changed
+                        if (displayPercent != lastOverallPercent || name != lastName || phase != lastPhase) {
+                            lastOverallPercent = displayPercent
+                            lastName = name
+                            lastPhase = phase
+
+                            // Build progress message based on phase and partition info
+                            val message = when (phase) {
+                                "compressing" -> {
+                                    if (name.isNotEmpty()) {
+                                        "Compressing $name $partitionPercent%"
+                                    } else {
+                                        "Compressing…"
                                     }
                                 }
-
-                                // Use Rust's total_estimated if available (more accurate)
-                                val rustEstimated = json.optLong("total_estimated", 0L)
-                                if (rustEstimated > 0) {
-                                    estimatedFinalSize = rustEstimated
-                                }
-
-                                lastCurrent = current
-                                lastTotal = total
-                                lastName = name
-                                lastPhase = phase
-                            } catch (_: Exception) {
-                                // Parse error — use last known values
+                                "compressed" -> if (name.isNotEmpty()) "Compressed $name" else "Compressing…"
+                                "building_scripts" -> "Building flasher scripts"
+                                "writing_zip" -> "Writing ZIP file"
+                                else -> if (name.isNotEmpty()) "Processing $name" else "Building…"
                             }
+
+                            onProgress?.invoke(ProgressUpdate(
+                                current = current,
+                                total = total,
+                                message = message,
+                                percent = displayPercent
+                            ))
                         }
-                    }
-
-                    // --- Source 2: tmp build file size for percentage ---
-                    // The tmp file grows as Rust compresses each partition.
-                    // Its size directly reflects how much data has been processed.
-                    val tmpFileSize = tmpBuildFile?.let { if (it.exists()) it.length() else 0L } ?: 0L
-
-                    // Use tmp file size if available, otherwise fall back to sidecar bytes_written
-                    val bytesProgress = if (tmpFileSize > 0) {
-                        tmpFileSize
-                    } else {
-                        bytesWrittenFromSidecar
-                    }
-
-                    // Calculate percentage: bytes processed vs estimated final size
-                    // Cap at 94% during compression (reserve 5% for scripts + ZIP writing)
-                    val rawPercent = if (estimatedFinalSize > 0) {
-                        (bytesProgress * 100 / estimatedFinalSize).toInt()
-                    } else if (total > 0) {
-                        ((current - 1) * 100 / total)
-                    } else {
-                        0
-                    }
-
-                    val percent = when {
-                        phase == "writing_zip" -> 97  // ZIP writing is near the end
-                        phase == "building_scripts" -> 95  // Scripts phase
-                        else -> rawPercent.coerceIn(0, 94)  // Compression phase, cap at 94%
-                    }
-
-                    // Only emit if something changed
-                    if (current != lastCurrent || percent != lastPercent || phase != lastPhase) {
-                        lastPercent = percent
-
-                        // Build progress message based on phase and partition info
-                        val message = when (phase) {
-                            "compressing" -> if (name.isNotEmpty()) "Compressing $name" else "Compressing…"
-                            "compressed" -> if (name.isNotEmpty()) "Compressing $name" else "Compressing…"
-                            "building_scripts" -> "Building flasher scripts"
-                            "writing_zip" -> "Writing ZIP file"
-                            else -> if (name.isNotEmpty()) "Processing $name" else "Building…"
-                        }
-
-                        onProgress?.invoke(ProgressUpdate(
-                            current = current,
-                            total = total,
-                            message = message,
-                            percent = percent
-                        ))
+                    } catch (_: Exception) {
+                        // JSON parse error — ignore, try again next poll
                     }
                 } catch (_: Exception) {
-                    // Progress polling is non-critical — ignore parse errors
+                    // Progress polling is non-critical — ignore all errors
                 }
             }
         }
