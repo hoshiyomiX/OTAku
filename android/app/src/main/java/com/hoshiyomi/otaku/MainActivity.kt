@@ -389,8 +389,21 @@ class MainActivity : AppCompatActivity() {
             editDevice?.setText(deviceName)
             prefs.edit { putString("device", deviceName) }
             updateOutputPreview()
+            updateBuildButtonState()
             showLog("Auto-detected device: $deviceName")
         }
+
+        // Listen for changes in device codename — update Build button state
+        editDevice?.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val text = s?.toString()?.trim() ?: ""
+                prefs.edit { putString("device", text) }
+                updateOutputPreview()
+                updateBuildButtonState()
+            }
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+        })
     }
 
     private fun setupOutputField() {
@@ -754,6 +767,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Require device codename — it is mandatory for the flasher script's
+        // device verification step in custom recovery (TWRP/OrangeFox).
+        val editDevice = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
+        val device = editDevice?.text?.toString()?.trim() ?: ""
+        if (device.isEmpty()) {
+            showLog("Device codename is required for recovery verification.", LogLevel.ERROR)
+            showLog("Enter your device codename or tap Auto-Detect, then retry.", LogLevel.WARN)
+            // Focus the device field and shake to draw attention
+            editDevice?.requestFocus()
+            return
+        }
+
         // Pre-build dependency check: validate selected compression is available.
         // Uses cached result from initialization to avoid blocking the UI.
         val depCheck = cachedDepCheck
@@ -763,10 +788,89 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Collect parameters for build
+        // Prompt for battery optimization exemption on first build.
+        // This prevents the OS from killing the app during long compression jobs.
+        if (!prefs.getBoolean("pref_battery_prompted", false)) {
+            promptBatteryOptimization()
+            return  // onBuildClicked() will be re-called after the dialog
+        }
+
+        startBuild(device)
+    }
+
+    /**
+     * Prompt the user to grant OEM unrestricted battery optimization.
+     * This prevents Android from killing the app during long builds.
+     * Only shown once — subsequent launches skip the prompt.
+     */
+    private fun promptBatteryOptimization() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) {
+            // Already whitelisted — skip the prompt entirely
+            prefs.edit { putBoolean("pref_battery_prompted", true) }
+            // Re-read the device field and proceed
+            val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
+                ?.text?.toString()?.trim() ?: ""
+            startBuild(device)
+            return
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Prevent App from Being Killed")
+            .setMessage(
+                "Android may kill OTAku during long builds to save battery, " +
+                "causing the build to fail silently.\n\n" +
+                "Granting \"Unrestricted\" battery usage prevents this and " +
+                "ensures your flashable ZIP builds reliably.\n\n" +
+                "On the next screen, select \"Don't optimize\" or \"Unrestricted\" " +
+                "for OTAku."
+            )
+            .setPositiveButton("Grant Unrestricted") { _, _ ->
+                prefs.edit { putBoolean("pref_battery_prompted", true) }
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (_: Exception) {
+                    // Fallback: open app-specific battery settings
+                    try {
+                        val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                        startActivity(intent)
+                    } catch (_: Exception) {
+                        showLog("Could not open battery settings automatically.", LogLevel.WARN)
+                        showLog("Go to: Settings > Apps > OTAku > Battery > Unrestricted", LogLevel.WARN)
+                    }
+                }
+                // Build will start after user returns from settings via onResume()
+                // Store pending build flag so onResume can trigger it
+                pendingBuildDevice = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
+                    ?.text?.toString()?.trim() ?: ""
+            }
+            .setNegativeButton("Skip for Now") { _, _ ->
+                // User chose to skip — proceed with build but warn
+                prefs.edit { putBoolean("pref_battery_prompted", true) }
+                showLog("Battery optimization not granted — build may be killed on long runs.", LogLevel.WARN)
+                val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
+                    ?.text?.toString()?.trim() ?: ""
+                startBuild(device)
+            }
+            .setNeutralButton("Don't Ask Again") { _, _ ->
+                prefs.edit { putBoolean("pref_battery_prompted", true) }
+                val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
+                    ?.text?.toString()?.trim() ?: ""
+                startBuild(device)
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    // When user returns from battery optimization settings, resume pending build
+    private var pendingBuildDevice: String? = null
+
+    /** Core build logic — separated from onBuildClicked for battery prompt flow. */
+    private fun startBuild(device: String) {
         val images = imageFiles.toMap()
-        val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-            ?.text?.toString()?.trim() ?: ""
         prefs.edit { putString("device", device) }
         val deviceValue = device.ifEmpty { "generic" }
 
@@ -1069,11 +1173,16 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Disable the Build OTA Now button when required fields are empty.
-     * Required: at least one partition image must be added.
+     * Required: at least one partition image AND a device codename must be set.
+     * The codename is mandatory for the flasher script's device verification
+     * step in custom recovery (TWRP/OrangeFox).
      */
     private fun updateBuildButtonState() {
         val btnExecute = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonExecute)
-        btnExecute?.isEnabled = imageFiles.isNotEmpty() && !isBuilding
+        val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
+            ?.text?.toString()?.trim() ?: ""
+        val canBuild = imageFiles.isNotEmpty() && device.isNotEmpty() && !isBuilding
+        btnExecute?.isEnabled = canBuild
     }
 
     private fun updateOutputPreview() {
@@ -1115,6 +1224,13 @@ class MainActivity : AppCompatActivity() {
                 textView.text = savedLogText.toString()
             }
         }
+        // Resume pending build after user returns from battery optimization settings
+        if (pendingBuildDevice != null && !isBuilding) {
+            val device = pendingBuildDevice!!
+            pendingBuildDevice = null
+            startBuild(device)
+            return
+        }
         // Check if build process is actually alive
         if (isBuilding) {
             val elapsed = System.currentTimeMillis() - lastProgressTime
@@ -1125,7 +1241,30 @@ class MainActivity : AppCompatActivity() {
                 cancelBuildNotification()
                 showLog("\nBuild was interrupted — process killed (idle timeout).", LogLevel.ERROR)
                 showLog("The device may have entered Doze mode and killed the background process.", LogLevel.WARN)
-                showLog("Tip: go to Settings > Apps > OTAku > Battery > Unrestricted.")
+                // Offer to open battery optimization settings directly
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Build Killed by System")
+                    .setMessage(
+                        "Android killed OTAku to save battery during the build.\n\n" +
+                        "To prevent this, grant \"Unrestricted\" battery usage for OTAku.\n\n" +
+                        "Go to: Settings > Apps > OTAku > Battery > Unrestricted"
+                    )
+                    .setPositiveButton("Open Settings") { _, _ ->
+                        try {
+                            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = Uri.parse("package:$packageName")
+                            }
+                            startActivity(intent)
+                        } catch (_: Exception) {
+                            try {
+                                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                            } catch (_: Exception) {
+                                showLog("Could not open battery settings automatically.", LogLevel.WARN)
+                            }
+                        }
+                    }
+                    .setNegativeButton("Dismiss", null)
+                    .show()
                 setUIExecuting(false)
             } else {
                 // Process still alive — reconnect UI

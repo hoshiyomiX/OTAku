@@ -43,6 +43,9 @@
     <!-- Notification permission (Android 13+ for foreground service notification) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Battery optimization exemption — prevents OS from killing the app during long builds -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:name=".OTAkuApp"
         android:allowBackup="true"
