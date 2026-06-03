@@ -748,27 +748,119 @@ else
         exit 1
     fi
 
-    # Save dm table info for all dynamic partitions BEFORE unmapping
-    # We need this for the dmsetup fallback path
-    for pname in $DYNAMIC_PART_NAMES; do
-        DM_TABLE=$(dmsetup table "$pname" 2>/dev/null | head -1)
-        if [ -n "$DM_TABLE" ]; then
-            echo "$pname $DM_TABLE" >> /tmp/dm_tables_backup.txt
+    # ── Save dm table info for ALL dynamic partitions BEFORE any changes ──
+    # We need this for the dmsetup fallback path (last resort).
+    # Some recoveries don't have dmsetup — check first and try multiple methods.
+    HAS_DMSETUP=0
+    which dmsetup >/dev/null 2>&1 && HAS_DMSETUP=1
+
+    if [ "$HAS_DMSETUP" = "1" ]; then
+        # Save individual partition tables by name
+        for pname in $DYNAMIC_PART_NAMES; do
+            DM_TABLE=$(dmsetup table "$pname" 2>/dev/null | head -1)
+            if [ -n "$DM_TABLE" ]; then
+                echo "$pname $DM_TABLE" >> /tmp/dm_tables_backup.txt
+            fi
+        done
+        # If no tables found by name, try dmsetup table (all devices)
+        # which outputs format: "<name>: <start> <sectors> linear <major:minor> <offset>"
+        if [ ! -s /tmp/dm_tables_backup.txt ]; then
+            dmsetup table 2>/dev/null | while IFS=': ' read -r dname dtable; do
+                case " $DYNAMIC_PART_NAMES " in
+                    *" $dname "*) echo "$dname $dtable" >> /tmp/dm_tables_backup.txt ;;
+                esac
+            done
         fi
-    done
+        DM_SAVED_COUNT=$(wc -l < /tmp/dm_tables_backup.txt 2>/dev/null)
+        ui_print "  Saved $DM_SAVED_COUNT dm table(s) for fallback"
+    fi
 
     # Unmap all dynamic partitions before resize
     ui_print "  Unmapping dynamic partitions..."
-    for pname in $DYNAMIC_PART_NAMES; do
-        dmsetup remove "$pname" 2>/dev/null
-    done
+    if [ "$HAS_LPTOOLS" = "1" ]; then
+        for pname in $DYNAMIC_PART_NAMES; do
+            lptools unmap "$pname" 2>/dev/null
+        done
+    elif [ "$HAS_DMSETUP" = "1" ]; then
+        for pname in $DYNAMIC_PART_NAMES; do
+            dmsetup remove "$pname" 2>/dev/null
+        done
+    fi
 
-    # Resize each partition that needs it using lpmake
-    # First, gather all current partition info from the super metadata
-    HAS_LPMAKE=0
-    which lpmake >/dev/null 2>&1 && HAS_LPMAKE=1
+    # ── RESIZE METHOD 1: lptools (best for on-device recovery use) ──
+    # lptools is a single binary that handles dynamic partition management
+    # natively on-device: resize, map, unmap, unlimited-group, etc.
+    # It auto-detects slot suffix and updates ALL metadata slots.
+    # Available in many OrangeFox/TWRP builds (opt-in flag required).
+    HAS_LPTOOLS=0
+    which lptools >/dev/null 2>&1 && HAS_LPTOOLS=1
 
-    if [ "$HAS_LPMAKE" = "1" ]; then
+    if [ "$HAS_LPTOOLS" = "1" ]; then
+        ui_print "  Using lptools to resize dynamic partitions..."
+
+        # Set group size to unlimited — allows partitions to grow beyond original group size
+        lptools unlimited-group 2>/dev/null
+
+        # Clear COW partitions if this is a Virtual A/B device
+        lptools clear-cow 2>/dev/null
+
+        # Resize each partition that needs it
+        RESIZE_OK=1
+        for pname in $RESIZE_NEEDED; do
+            pname=$(echo "$pname" | tr -d ' ')
+            [ -z "$pname" ] && continue
+
+            # Find the partition index to get its UNC_SIZE
+            FOUND_IDX=-1
+            for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
+                eval "CHECK_NAME=\$PART_${{j}}_NAME"
+                if [ "$CHECK_NAME" = "$pname" ]; then
+                    FOUND_IDX=$j
+                    break
+                fi
+            done
+
+            if [ "$FOUND_IDX" -lt 0 ]; then
+                continue
+            fi
+
+            eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
+            # lptools resize takes size in KB
+            NEW_SIZE_KB=$(( (PNAME_SZ + 1023) / 1024 ))
+
+            ui_print "  Resizing $pname to $(( NEW_SIZE_KB / 1024 )) MB..."
+            lptools resize "$pname" "$NEW_SIZE_KB" 2>/dev/null
+            if [ $? -ne 0 ]; then
+                ui_print "!  lptools resize failed for $pname — trying remove+create fallback"
+                # Fallback: remove then create with new size
+                lptools remove "$pname" 2>/dev/null
+                lptools create "$pname" "$NEW_SIZE_KB" 2>/dev/null
+                if [ $? -ne 0 ]; then
+                    ui_print "!  lptools remove+create also failed for $pname"
+                    RESIZE_OK=0
+                else
+                    ui_print "  $pname recreated at $(( NEW_SIZE_KB / 1024 )) MB"
+                fi
+            else
+                ui_print "  $pname resized to $(( NEW_SIZE_KB / 1024 )) MB"
+            fi
+        done
+
+        if [ "$RESIZE_OK" != "1" ]; then
+            ui_print "! ABORT: lptools resize failed for one or more partitions."
+            ui_print "!  Try flashing via fastbootd or use a different recovery."
+            exit 1
+        fi
+
+        # Remap ALL dynamic partitions after lptools resize
+        ui_print "  Remapping dynamic partitions..."
+        for pname in $DYNAMIC_PART_NAMES; do
+            lptools map "$pname" 2>/dev/null
+        done
+
+        ui_print "  lptools resize complete."
+
+    elif [ "$HAS_LPMAKE" = "1" ]; then
         ui_print "  Using lpmake to rebuild super partition metadata..."
 
         # Dump current metadata to parse partition layout
@@ -1027,8 +1119,8 @@ else
         fi
 
     else
-        # No lpmake available — try dmsetup fallback using saved tables
-        ui_print "! lpmake not available in this recovery."
+        # No lptools or lpmake available — try dmsetup fallback using saved tables
+        ui_print "! Neither lptools nor lpmake available in this recovery."
         ui_print "  Attempting dmsetup fallback for resize..."
 
         FALLBACK_OK=1
@@ -1075,11 +1167,12 @@ else
 
         if [ "$FALLBACK_OK" != "1" ]; then
             ui_print "! ABORT: Cannot resize dynamic partitions."
-            ui_print "!  This recovery does not have lpmake and dmsetup fallback failed."
+            ui_print "!  This recovery lacks lptools, lpmake, and dmsetup tables are missing."
             ui_print "!  Solutions:"
-            ui_print "!  1. Flash via fastbootd instead of recovery"
-            ui_print "!  2. Use a recovery that includes lpmake (e.g. newer TWRP/OrangeFox)"
-            ui_print "!  3. Manually resize partitions before flashing"
+            ui_print "!  1. Use a recovery with lptools enabled (OF_ENABLE_LPTOOLS=1)"
+            ui_print "!  2. Use a recovery that includes lpmake/lpdump"
+            ui_print "!  3. Flash via fastbootd instead of recovery"
+            ui_print "!  4. Manually resize partitions before flashing"
             exit 1
         fi
 
