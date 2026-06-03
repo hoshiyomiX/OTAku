@@ -245,7 +245,8 @@ fn build_update_script(
     let integrity_step = 2;
     let slot_step = if has_device { 4 } else { 3 };
     let validation_step = if has_device { 5 } else { 4 };
-    let flash_step_offset = if has_device { 6 } else { 5 };
+    let resize_step = if has_device { 6 } else { 5 };
+    let flash_step_offset = if has_device { 7 } else { 6 };
     let total_steps = num_parts + flash_step_offset;
 
     // Device check step
@@ -590,10 +591,30 @@ resolve_target() {{
         r#"# ── Step {validation_step}/{total_steps}: Partition validation ─────────────────────
 ui_print "[Step {validation_step}/{total_steps}] Partition validation..."
 
+# Known dynamic partition names (live inside super partition, resizable)
+DYNAMIC_PART_NAMES="system vendor product system_ext odm odm_dlkm vendor_dlkm"
+
+is_dynamic_partition() {{
+    local name="$1"
+    case " $DYNAMIC_PART_NAMES " in
+        *" $name "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}}
+
+# List of partitions that need resizing (filled during validation)
+RESIZE_NEEDED=""
+RESIZE_TOTAL=0
+
 validate_target() {{
     local target="$1"
     local min_size="$2"
     local name="$3"
+    local is_dynamic=0
+
+    if is_dynamic_partition "$name"; then
+        is_dynamic=1
+    fi
 
     if [ ! -e "$target" ]; then
         ui_print "! ABORT: $target not found for partition '$name'"
@@ -635,8 +656,16 @@ validate_target() {{
     fi
 
     if [ "$PART_SIZE" -lt "$min_size" ]; then
-        ui_print "! ABORT: Partition $name too small: $PART_SIZE < $min_size"
-        return 1
+        if [ "$is_dynamic" = "1" ]; then
+            # Dynamic partitions can be resized — defer to resize step
+            ui_print "  $name ($target): $(( PART_SIZE / 1048576 )) MB [NEEDS RESIZE: $(( PART_SIZE / 1048576 )) -> $(( min_size / 1048576 )) MB]"
+            RESIZE_NEEDED="$RESIZE_NEEDED $name"
+            RESIZE_TOTAL=$(( RESIZE_TOTAL + min_size - PART_SIZE ))
+            return 0
+        else
+            ui_print "! ABORT: Partition $name too small: $PART_SIZE < $min_size"
+            return 1
+        fi
     fi
 
     ui_print "  $name ($target): $(( PART_SIZE / 1048576 )) MB [OK]"
@@ -655,6 +684,324 @@ done
 ui_print ""
 "#,
         validation_step = validation_step,
+        total_steps = total_steps,
+    ));
+
+    // ── Resize dynamic partitions ──
+    script.push_str(&format!(
+        r#"# ── Step {resize_step}/{total_steps}: Resize dynamic partitions ──────────────────
+ui_print "[Step {resize_step}/{total_steps}] Resize dynamic partitions..."
+
+if [ -z "$RESIZE_NEEDED" ]; then
+    ui_print "  No dynamic partitions need resizing."
+    ui_print ""
+else
+    ui_print "  Partitions needing resize:$RESIZE_NEEDED"
+    ui_print "  Additional space needed: $(( RESIZE_TOTAL / 1048576 )) MB"
+
+    # Clean up any previous backup
+    rm -f /tmp/dm_tables_backup.txt /tmp/lp_dump.txt /tmp/lp_dump_new.txt
+
+    # Find the super partition
+    SUPER_DEV=""
+    for candidate in /dev/block/by-name/super /dev/block/bootdevice/by-name/super; do
+        if [ -b "$candidate" ]; then
+            SUPER_DEV="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$SUPER_DEV" ]; then
+        ui_print "! ABORT: Dynamic partitions need resizing but super partition not found."
+        ui_print "!  Cannot resize dynamic partitions without super partition."
+        exit 1
+    fi
+
+    SUPER_SIZE=$(blockdev --getsize64 "$SUPER_DEV" 2>/dev/null)
+    if [ -z "$SUPER_SIZE" ] || [ "$SUPER_SIZE" = "0" ]; then
+        ui_print "! ABORT: Cannot determine super partition size"
+        exit 1
+    fi
+
+    # Calculate total space used by all dynamic partition images
+    DYN_TOTAL_NEEDED=0
+    for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
+        eval "PNAME=\$PART_${{i}}_NAME"
+        eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
+        if is_dynamic_partition "$PNAME"; then
+            DYN_TOTAL_NEEDED=$(( DYN_TOTAL_NEEDED + PSIZE ))
+        fi
+    done
+
+    ui_print "  Super partition: $(( SUPER_SIZE / 1048576 )) MB"
+    ui_print "  Dynamic images total: $(( DYN_TOTAL_NEEDED / 1048576 )) MB"
+
+    if [ "$DYN_TOTAL_NEEDED" -gt "$SUPER_SIZE" ]; then
+        ui_print "! ABORT: Dynamic partition images ($(( DYN_TOTAL_NEEDED / 1048576 )) MB) exceed super partition ($(( SUPER_SIZE / 1048576 )) MB)"
+        exit 1
+    fi
+
+    # Save dm table info for all dynamic partitions BEFORE unmapping
+    # We need this for the dmsetup fallback path
+    for pname in $DYNAMIC_PART_NAMES; do
+        DM_TABLE=$(dmsetup table "$pname" 2>/dev/null | head -1)
+        if [ -n "$DM_TABLE" ]; then
+            echo "$pname $DM_TABLE" >> /tmp/dm_tables_backup.txt
+        fi
+    done
+
+    # Unmap all dynamic partitions before resize
+    ui_print "  Unmapping dynamic partitions..."
+    for pname in $DYNAMIC_PART_NAMES; do
+        dmsetup remove "$pname" 2>/dev/null
+    done
+
+    # Resize each partition that needs it using lpmake
+    # First, gather all current partition info from the super metadata
+    HAS_LPMAKE=0
+    which lpmake >/dev/null 2>&1 && HAS_LPMAKE=1
+
+    if [ "$HAS_LPMAKE" = "1" ]; then
+        ui_print "  Using lpmake to rebuild super partition metadata..."
+
+        # Dump current metadata to parse partition layout
+        lpdump "$SUPER_DEV" > /tmp/lp_dump.txt 2>/dev/null
+
+        # Build lpmake arguments for all partitions in super
+        # We need to preserve existing partitions that are NOT in our ZIP,
+        # and resize the ones that are.
+        LPMAKE_GROUPS=""
+        LPMAKE_PARTS=""
+        PART_GROUP_SIZE=0
+
+        # Parse lpdump output to get partition layout
+        # Format: Partition name: <name>  Group: <group>  Attributes: <attrs>  Size: <size>
+        CURRENT_SECTION=""
+        CUR_NAME=""
+        CUR_GROUP=""
+        CUR_ATTRS=""
+        CUR_SIZE=""
+
+        while IFS= read -r line; do
+            case "$line" in
+                "Partition name:"*)
+                    # Flush previous partition
+                    if [ -n "$CUR_NAME" ]; then
+                        ATTR_STR="readonly"
+                        if echo "$CUR_ATTRS" | grep -q "0"; then
+                            ATTR_STR="none"
+                        fi
+                        LPMAKE_PARTS="$LPMAKE_PARTS --partition $CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP"
+                        PART_GROUP_SIZE=$(( PART_GROUP_SIZE + CUR_SIZE ))
+                    fi
+                    CUR_NAME=$(echo "$line" | sed 's/Partition name: *//' | tr -d ' ')
+                    CURRENT_SECTION="partition"
+                    ;;
+                "Group:"*)
+                    CUR_GROUP=$(echo "$line" | sed 's/.*Group: *//' | awk '{{print $1}}' | tr -d ' ')
+                    ;;
+                "Attributes:"*)
+                    CUR_ATTRS=$(echo "$line" | sed 's/Attributes: *//' | tr -d ' ')
+                    ;;
+                "Size:"*|"size:"*)
+                    CUR_SIZE=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
+                    ;;
+            esac
+        done < /tmp/lp_dump.txt
+
+        # Flush last partition
+        if [ -n "$CUR_NAME" ]; then
+            ATTR_STR="readonly"
+            if echo "$CUR_ATTRS" | grep -q "0"; then
+                ATTR_STR="none"
+            fi
+            LPMAKE_PARTS="$LPMAKE_PARTS --partition $CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP"
+            PART_GROUP_SIZE=$(( PART_GROUP_SIZE + CUR_SIZE ))
+        fi
+
+        # Now override sizes for partitions in our ZIP that need resizing
+        for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
+            eval "PNAME=\$PART_${{i}}_NAME"
+            eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
+            if is_dynamic_partition "$PNAME"; then
+                # Replace the partition size in LPMAKE_PARTS
+                # Parse and rebuild
+                NEW_PARTS=""
+                OLD_IFS="$IFS"
+                IFS='--'
+                for part_entry in $LPMAKE_PARTS; do
+                    part_entry=$(echo "$part_entry" | sed 's/^ *//' | sed 's/ *$//')
+                    if [ -z "$part_entry" ]; then
+                        continue
+                    fi
+                    # Check if this entry is for the partition we want to resize
+                    entry_name=$(echo "$part_entry" | awk -F: '{{print $1}}' | awk '{{print $2}}')
+                    if [ "$entry_name" = "$PNAME" ]; then
+                        # Get attributes from existing entry
+                        entry_attrs=$(echo "$part_entry" | awk -F: '{{print $2}}')
+                        entry_group=$(echo "$part_entry" | awk -F: '{{print $4}}')
+                        NEW_PARTS="$NEW_PARTS --partition $PNAME:$entry_attrs:$PSIZE:$entry_group"
+                    else
+                        NEW_PARTS="$NEW_PARTS --$part_entry"
+                    fi
+                done
+                IFS="$OLD_IFS"
+                LPMAKE_PARTS="$NEW_PARTS"
+            fi
+        done
+
+        LPMAKE_GROUPS="--group $CUR_GROUP:$PART_GROUP_SIZE"
+
+        # Write new metadata to super
+        lpmake \
+            --device-size "$SUPER_SIZE" \
+            --metadata-size 65536 \
+            --metadata-slots 2 \
+            --device "$SUPER_DEV" \
+            $LPMAKE_GROUPS \
+            $LPMAKE_PARTS 2>/dev/null
+
+        if [ $? -ne 0 ]; then
+            ui_print "! WARNING: lpmake failed, trying fallback approach..."
+
+            # Fallback: try dmsetup create with expanded size using saved tables
+            FALLBACK_OK=1
+            for pname in $RESIZE_NEEDED; do
+                pname=$(echo "$pname" | tr -d ' ')
+                [ -z "$pname" ] && continue
+
+                # Find the partition index to get its UNC_SIZE
+                FOUND_IDX=-1
+                for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
+                    eval "CHECK_NAME=\$PART_${{j}}_NAME"
+                    if [ "$CHECK_NAME" = "$pname" ]; then
+                        FOUND_IDX=$j
+                        break
+                    fi
+                done
+
+                if [ "$FOUND_IDX" -lt 0 ]; then
+                    continue
+                fi
+
+                eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
+                NEW_SECTORS=$(( PNAME_SZ / 512 ))
+
+                # Read saved dm table for this partition
+                DM_SAVED=$(grep "^$pname " /tmp/dm_tables_backup.txt 2>/dev/null | head -1)
+                if [ -n "$DM_SAVED" ]; then
+                    # Parse: <name> 0 <sectors> linear <major:minor> <start>
+                    DM_START=$(echo "$DM_SAVED" | awk '{{print $NF}}')
+                    DM_UNDERLYING=$(echo "$DM_SAVED" | awk '{{print $(NF-1)}}')
+
+                    dmsetup create "$pname" --table "0 $NEW_SECTORS linear $DM_UNDERLYING $DM_START" 2>/dev/null
+                    if [ $? -ne 0 ]; then
+                        ui_print "! Fallback resize also failed for $pname"
+                        FALLBACK_OK=0
+                    else
+                        ui_print "  $pname resized via dmsetup: $NEW_SECTORS sectors"
+                    fi
+                else
+                    ui_print "! No saved dm table for $pname"
+                    FALLBACK_OK=0
+                fi
+            done
+
+            if [ "$FALLBACK_OK" != "1" ]; then
+                ui_print "! ABORT: Cannot resize dynamic partitions."
+                ui_print "!  lpmake and dmsetup fallback both failed."
+                ui_print "!  Try flashing via fastbootd or use a device with larger partitions."
+                exit 1
+            fi
+        else
+            ui_print "  Super partition metadata rebuilt successfully."
+        fi
+
+        # Remap all dynamic partitions from new metadata
+        ui_print "  Remapping dynamic partitions..."
+        # After lpmake, re-dump metadata to create proper dm mappings
+        lpdump "$SUPER_DEV" > /tmp/lp_dump_new.txt 2>/dev/null
+
+        # Parse new metadata and create dmsetup mappings
+        while IFS= read -r line; do
+            case "$line" in
+                "Partition name:"*)
+                    CUR_PART=$(echo "$line" | sed 's/Partition name: *//' | tr -d ' ')
+                    ;;
+                "Size:"*|"size:"*)
+                    if [ -n "$CUR_PART" ]; then
+                        CUR_SZ=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
+                        CUR_SZ_SECTORS=$(( CUR_SZ / 512 ))
+                        # Create dm device with the right size
+                        dmsetup mknodes "$CUR_PART" 2>/dev/null
+                    fi
+                    ;;
+            esac
+        done < /tmp/lp_dump_new.txt
+
+    else
+        # No lpmake available — try dmsetup fallback using saved tables
+        ui_print "! lpmake not available in this recovery."
+        ui_print "  Attempting dmsetup fallback for resize..."
+
+        FALLBACK_OK=1
+        for pname in $RESIZE_NEEDED; do
+            pname=$(echo "$pname" | tr -d ' ')
+            [ -z "$pname" ] && continue
+
+            # Find the partition index to get its UNC_SIZE
+            FOUND_IDX=-1
+            for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
+                eval "CHECK_NAME=\$PART_${{j}}_NAME"
+                if [ "$CHECK_NAME" = "$pname" ]; then
+                    FOUND_IDX=$j
+                    break
+                fi
+            done
+
+            if [ "$FOUND_IDX" -lt 0 ]; then
+                continue
+            fi
+
+            eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
+            NEW_SECTORS=$(( PNAME_SZ / 512 ))
+
+            # Read saved dm table for this partition
+            DM_SAVED=$(grep "^$pname " /tmp/dm_tables_backup.txt 2>/dev/null | head -1)
+            if [ -n "$DM_SAVED" ]; then
+                # Parse: <name> 0 <sectors> linear <major:minor> <start>
+                DM_START=$(echo "$DM_SAVED" | awk '{{print $NF}}')
+                DM_UNDERLYING=$(echo "$DM_SAVED" | awk '{{print $(NF-1)}}')
+
+                dmsetup create "$pname" --table "0 $NEW_SECTORS linear $DM_UNDERLYING $DM_START" 2>/dev/null
+                if [ $? -ne 0 ]; then
+                    ui_print "! dmsetup resize failed for $pname"
+                    FALLBACK_OK=0
+                else
+                    ui_print "  $pname resized via dmsetup: $NEW_SECTORS sectors"
+                fi
+            else
+                ui_print "! No saved dm table for $pname"
+                FALLBACK_OK=0
+            fi
+        done
+
+        if [ "$FALLBACK_OK" != "1" ]; then
+            ui_print "! ABORT: Cannot resize dynamic partitions."
+            ui_print "!  This recovery does not have lpmake and dmsetup fallback failed."
+            ui_print "!  Solutions:"
+            ui_print "!  1. Flash via fastbootd instead of recovery"
+            ui_print "!  2. Use a recovery that includes lpmake (e.g. newer TWRP/OrangeFox)"
+            ui_print "!  3. Manually resize partitions before flashing"
+            exit 1
+        fi
+    fi
+
+    ui_print "  Dynamic partition resize complete."
+    ui_print ""
+fi
+"#,
+        resize_step = resize_step,
         total_steps = total_steps,
     ));
 
