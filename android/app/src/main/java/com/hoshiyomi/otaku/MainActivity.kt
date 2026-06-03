@@ -40,6 +40,7 @@ import android.app.NotificationManager
 import android.app.Activity
 import android.app.PendingIntent
 import androidx.core.app.NotificationCompat
+import com.hoshiyomi.otaku.service.OTAService
 
 /**
  * MainActivity — OTAku Android.
@@ -106,7 +107,9 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var partitionNames: List<String> = emptyList()
 
         // Notification management (survives Activity recreation)
-        private const val NOTIFICATION_ID = 1001
+        // Use the same NOTIFICATION_ID as OTAService so progress updates modify
+        // the foreground service notification in-place.
+        private val NOTIFICATION_ID = com.hoshiyomi.otaku.service.OTAService.NOTIFICATION_ID
         @Volatile private var appContext: Context? = null
 
         // Cached dependency check result (updated at init, used for pre-build validation)
@@ -120,6 +123,10 @@ class MainActivity : AppCompatActivity() {
         // Native initialization flag: true after initializeNative() has run once.
         // Prevents duplicate "Initializing OTAku…" log lines on Activity recreation.
         @Volatile var nativeInitialized = false
+
+        // Suppress repeated "Build in progress (returned from background)" log.
+        // Only log once per continuous build session, not on every Activity recreation.
+        @Volatile private var resumedWhileBuildingLogged = false
 
         /** Show ongoing progress notification with determinate progress bar. */
         fun showProgressNotification(message: String, percent: Int) {
@@ -927,6 +934,7 @@ class MainActivity : AppCompatActivity() {
         lastProgressPercent = -1
         lastNotifPercent = -1
         lastProgressTime = System.currentTimeMillis()  // Start heartbeat
+        resumedWhileBuildingLogged = false  // Reset: new build session
         isBuilding = true
         isExecuting = true
         appContext = applicationContext
@@ -936,10 +944,16 @@ class MainActivity : AppCompatActivity() {
         setupSplitProgressBar(sortedNames)
         showProgressNotification("Preparing…", 0)
 
+        // Start foreground service — gives the process "foreground priority"
+        // which prevents Doze/App Standby from killing it during long builds.
+        // WakeLock alone is insufficient; only a foreground service guarantees survival.
+        OTAService.start(applicationContext)
+
         // Execute in application-scoped scope (survives Activity destruction)
         buildScope.launch {
             try {
-                // Acquire WakeLock with application context
+                // Acquire WakeLock with application context as a secondary safeguard.
+                // The foreground service also holds a WakeLock — this is belt-and-suspenders.
                 val act = activityRef?.get()
                 if (act != null) {
                     val pm = act.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -1110,6 +1124,11 @@ class MainActivity : AppCompatActivity() {
                 try { wakeLock?.release() } catch (_: Exception) {}
                 wakeLock = null
                 isBuilding = false
+
+                // Stop foreground service — build is no longer running.
+                // The service's stopForeground(STOP_FOREGROUND_DETACH) keeps the
+                // completion notification visible until the user dismisses it.
+                try { OTAService.stop(appContext ?: applicationContext) } catch (_: Exception) {}
 
                 val current = activityRef?.get()
                 if (current != null && !current.isFinishing && !current.isDestroyed) {
@@ -1297,6 +1316,8 @@ class MainActivity : AppCompatActivity() {
                 // No progress for > 2 minutes — process was killed by OS
                 isBuilding = false
                 isExecuting = false
+                // Stop foreground service if still running (shouldn't be, but safety net)
+                try { OTAService.stop(applicationContext) } catch (_: Exception) {}
                 cancelBuildNotification()
                 showLog("\nBuild was interrupted — process killed (idle timeout).", LogLevel.ERROR)
                 showLog("The device may have entered Doze mode and killed the background process.", LogLevel.WARN)
@@ -1329,7 +1350,13 @@ class MainActivity : AppCompatActivity() {
                 // Process still alive — reconnect UI
                 isExecuting = true
                 setUIExecuting(true)
-                showLog("Build in progress (returned from background).")
+                // Only log "returned from background" once per continuous build session,
+                // not on every Activity recreation (which can happen multiple times
+                // when the user switches between apps rapidly).
+                if (!resumedWhileBuildingLogged) {
+                    resumedWhileBuildingLogged = true
+                    showLog("Build in progress (returned from background).")
+                }
                 // Re-sync notification with current progress state
                 if (lastProgressMessage.isNotEmpty() && lastNotifPercent >= 0) {
                     showProgressNotification(lastProgressMessage, lastNotifPercent)
