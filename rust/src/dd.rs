@@ -803,7 +803,7 @@ else
         # Detect the dynamic partition group name for this slot.
         # lptools outputs "Best group seems to be <name>" on stdout during auto-detect.
         # We capture it to help debugging, but lptools handles group selection internally.
-        LP_GROUP=$(lptools unlimited-group 2>/dev/null | grep -o 'Best group seems to be [^ ]*' | head -1 | awk '{print $NF}')
+        LP_GROUP=$(lptools unlimited-group 2>/dev/null | grep -o 'Best group seems to be [^ ]*' | head -1 | awk '{{print $NF}}')
         if [ -n "$LP_GROUP" ]; then
             ui_print "  Detected group: $LP_GROUP"
         fi
@@ -812,7 +812,7 @@ else
         lptools clear-cow >/dev/null 2>&1
 
         # Check available free space before resizing
-        LP_FREE=$(lptools free 2>/dev/null | grep -o 'Free space: [0-9]*' | awk '{print $3}')
+        LP_FREE=$(lptools free 2>/dev/null | grep -o 'Free space: [0-9]*' | awk '{{print $3}}')
         if [ -n "$LP_FREE" ]; then
             ui_print "  Super free space: $(( LP_FREE / 1048576 )) MB"
         fi
