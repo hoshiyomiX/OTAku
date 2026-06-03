@@ -1,7 +1,9 @@
 package com.hoshiyomi.otaku.service
 
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -9,28 +11,31 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.hoshiyomi.otaku.OTABridge
-import com.hoshiyomi.otaku.OTAResult
 import com.hoshiyomi.otaku.OTAkuApp
-import com.hoshiyomi.otaku.ProgressUpdate
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 
 /**
- * OTAService — Foreground service that keeps the build process alive.
+ * OTAService — Foreground service that keeps the build process alive during Doze.
  *
- * Android can kill background coroutines (lifecycleScope) under memory pressure,
- * especially during long compression operations. This service:
- *   1. Runs as a foreground service with a persistent notification
- *   2. Holds a WakeLock to prevent CPU sleep during heavy I/O
- *   3. Executes the build via OTABridge.dd() and updates notification status
- *   4. Broadcasts results back to MainActivity via LocalBroadcastManager-style intent extras
+ * Android can kill background coroutines under Doze/App Standby, even when
+ * the app holds a WakeLock and is whitelisted for battery optimization.
+ * A foreground service gives the process "foreground priority" which prevents
+ * the OS from killing it during long compression operations.
  *
- * The service is started by MainActivity and stops itself when the operation completes.
+ * Architecture:
+ *   - This service is a lightweight "lifecycle protector" — it does NOT run
+ *     the build itself. The build coroutine continues in MainActivity.buildScope.
+ *   - onStartCommand() calls startForeground() to elevate process priority.
+ *   - The service holds a PARTIAL_WAKE_LOCK (3 hours) to prevent CPU sleep.
+ *   - MainActivity updates the foreground notification directly via NotificationManager
+ *     (same NOTIFICATION_ID = 1001), which updates the service's foreground notification.
+ *   - The service stops itself when told to via ACTION_STOP_BUILD or when the build
+ *     completes (called by MainActivity).
+ *
+ * Why not run the build IN the service?
+ *   - The build uses a companion-object coroutine scope (buildScope) that survives
+ *     Activity recreation. Moving it here would require major refactoring of progress
+ *     tracking, split progress bars, log text, etc.
+ *   - The service's only job is to keep the process alive — separating concerns.
  */
 class OTAService : Service() {
 
@@ -38,112 +43,64 @@ class OTAService : Service() {
         private const val TAG = "OTAService"
         const val NOTIFICATION_ID = 1001
 
-        // Intent action broadcast back to MainActivity
-        const val ACTION_BUILD_RESULT = "com.hoshiyomi.otaku.ACTION_BUILD_RESULT"
-        const val ACTION_BUILD_PROGRESS = "com.hoshiyomi.otaku.ACTION_BUILD_PROGRESS"
-        const val EXTRA_SUCCESS = "success"
-        const val EXTRA_OUTPUT = "output"
-        const val EXTRA_ERROR = "error"
-        const val EXTRA_DURATION_MS = "duration_ms"
-        const val EXTRA_PROGRESS_PERCENT = "progress_percent"
-        const val EXTRA_PROGRESS_MESSAGE = "progress_message"
+        // Intent actions
+        const val ACTION_START_BUILD = "com.hoshiyomi.otaku.ACTION_START_BUILD"
+        const val ACTION_STOP_BUILD = "com.hoshiyomi.otaku.ACTION_STOP_BUILD"
 
-        // Notification ID constants for updating
-        private const val NOTIFICATION_TITLE = "OTAku"
+        /** Start the foreground service for build protection. */
+        fun start(context: Context) {
+            val intent = Intent(context, OTAService::class.java).apply {
+                action = ACTION_START_BUILD
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /** Stop the foreground service after build completes. */
+        fun stop(context: Context) {
+            val intent = Intent(context, OTAService::class.java).apply {
+                action = ACTION_STOP_BUILD
+            }
+            context.startService(intent)
+        }
     }
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var operationJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var notificationManager: NotificationManager
 
     override fun onCreate() {
         super.onCreate()
         notificationManager = getSystemService(NotificationManager::class.java)
-        acquireWakeLock()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Start foreground immediately with "preparing" notification
-        startForegroundNotification("Preparing build operation...")
-
-        operationJob = serviceScope.launch {
-            executeBuild(intent)
-        }
-
-        return START_NOT_STICKY
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Core execution
-    // ═══════════════════════════════════════════════════════════════
-
-    private suspend fun executeBuild(intent: Intent?) {
-        val images: Map<String, String> =
-            @Suppress("DEPRECATION")
-            (intent?.getSerializableExtra("images") as? Map<*, *>)?.mapKeys { it.key.toString() }
-                ?.mapValues { it.value.toString() } ?: emptyMap()
-
-        val device = intent?.getStringExtra("device") ?: "generic"
-        val compression = intent?.getStringExtra("compression") ?: "gzip"
-        val level = intent?.getIntExtra("level", 0) ?: 0
-        val outputPath = intent?.getStringExtra("output_path") ?: ""
-
-        if (images.isEmpty() || outputPath.isBlank()) {
-            updateNotification("Build failed: missing parameters", isError = true)
-            broadcastResult(OTAResult.error("Missing images or output path"))
-            stopSelf()
-            return
-        }
-
-        val partitionInfo = images.keys.sorted().joinToString(", ")
-        updateNotification("Building: $partitionInfo [$compression]...")
-
-        val result = OTABridge.dd(
-            images = images,
-            device = device,
-            compression = compression,
-            level = level,
-            outputPath = outputPath,
-            onProgress = { progress ->
-                // Update notification with per-partition info
-                val notifText = if (progress.current > 0 && progress.total > 0 &&
-                    progress.partitionPercent in 1..99) {
-                    "${progress.message} (${progress.current}/${progress.total}) — ${progress.partitionPercent}%"
-                } else {
-                    "${progress.message} — ${progress.percent}%"
-                }
-                updateNotification(notifText, progress.percent)
-                // Broadcast progress to MainActivity for progress bar
-                broadcastProgress(progress)
-            },
-            onOutputLine = { line ->
-                // Log Rust backend output lines
-                Log.d(TAG, line)
+        when (intent?.action) {
+            ACTION_STOP_BUILD -> {
+                stopBuild()
+                return START_NOT_STICKY
             }
-        )
-
-        // Update notification with final status
-        if (result.success) {
-            updateNotification(
-                "Build completed in ${formatDuration(result.durationMs)}",
-                isSuccess = true
-            )
-        } else {
-            updateNotification(
-                "Build failed after ${formatDuration(result.durationMs)}",
-                isError = true
-            )
+            ACTION_START_BUILD -> {
+                // Start foreground immediately — this is what prevents Doze from killing us
+                startForegroundNotification("Preparing build…")
+                acquireWakeLock()
+                return START_NOT_STICKY
+            }
+            else -> {
+                // No action specified — default: start foreground
+                startForegroundNotification("Preparing build…")
+                acquireWakeLock()
+                return START_NOT_STICKY
+            }
         }
-
-        broadcastResult(result)
-        stopSelf()
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Notification management
+    //  Foreground notification — process lifecycle protection
     // ═══════════════════════════════════════════════════════════════
 
     private fun startForegroundNotification(text: String) {
@@ -152,7 +109,6 @@ class OTAService : Service() {
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             } else {
-                // Below API 34: no type required (FOREGROUND_SERVICE permission suffices)
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
@@ -160,60 +116,33 @@ class OTAService : Service() {
             try {
                 startForeground(NOTIFICATION_ID, notification)
             } catch (e2: Exception) {
-                Log.e(TAG, "startForeground plain also failed: ${e2.message}")
+                Log.e(TAG, "startForeground also failed: ${e2.message}")
             }
         }
-    }
-
-    private fun updateNotification(text: String, percent: Int = 0, isSuccess: Boolean = false, isError: Boolean = false) {
-        val notification = buildNotification(text, percent, isSuccess, isError)
-        notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
     private fun buildNotification(
         text: String,
-        percent: Int = 0,
-        isSuccess: Boolean = false,
-        isError: Boolean = false
+        percent: Int = 0
     ): android.app.Notification {
+        // ContentIntent: tapping the notification opens the app
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pi = launchIntent?.let {
+            PendingIntent.getActivity(this, 0, it,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        }
         return NotificationCompat.Builder(this, OTAkuApp.CHANNEL_ID)
-            .setContentTitle(NOTIFICATION_TITLE)
+            .setContentTitle("OTAku")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setProgress(100, percent.coerceIn(0, 100), percent == 0 && !isSuccess && !isError)
+            .setProgress(100, percent.coerceIn(0, 100), percent == 0)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(!isSuccess && !isError) // Non-swipeable while running
-            .setSilent(true) // No sound for status updates
-            .apply {
-                if (isSuccess || isError) {
-                    setAutoCancel(true) // Allow dismiss on completion
-                }
-            }
+            .setOngoing(true)  // Non-swipeable while service is in foreground
+            .setSilent(true)   // No sound for status updates
+            .apply { pi?.let { setContentIntent(it) } }
             .build()
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Result broadcast
-    // ═══════════════════════════════════════════════════════════════
-
-    private fun broadcastResult(result: OTAResult) {
-        val broadcast = Intent(ACTION_BUILD_RESULT).apply {
-            putExtra(EXTRA_SUCCESS, result.success)
-            putExtra(EXTRA_OUTPUT, result.output)
-            putExtra(EXTRA_ERROR, result.error)
-            putExtra(EXTRA_DURATION_MS, result.durationMs)
-            setPackage(packageName)
-        }
-        sendBroadcast(broadcast)
-    }
-
-    private fun broadcastProgress(progress: ProgressUpdate) {
-        val broadcast = Intent(ACTION_BUILD_PROGRESS).apply {
-            putExtra(EXTRA_PROGRESS_PERCENT, progress.percent)
-            putExtra(EXTRA_PROGRESS_MESSAGE, progress.message)
-            setPackage(packageName)
-        }
-        sendBroadcast(broadcast)
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -221,13 +150,14 @@ class OTAService : Service() {
     // ═══════════════════════════════════════════════════════════════
 
     private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return  // Already acquired
         val powerManager = getSystemService(PowerManager::class.java)
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "OTAku::BuildWakeLock"
         ).apply {
             setReferenceCounted(false)
-            acquire(30 * 60 * 1000L) // 30 minute max timeout safety
+            acquire(3 * 60 * 60 * 1000L) // 3 hours — enough for any compression job
         }
     }
 
@@ -239,24 +169,29 @@ class OTAService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Lifecycle
+    //  Lifecycle — stop build and clean up
     // ═══════════════════════════════════════════════════════════════
 
-    override fun onDestroy() {
-        operationJob?.cancel()
-        serviceScope.cancel()
+    private fun stopBuild() {
         releaseWakeLock()
-        notificationManager.cancel(NOTIFICATION_ID)
-        super.onDestroy()
+        // Detach notification from foreground service so completion notification
+        // (posted by MainActivity.showCompletionNotification) stays visible.
+        // STOP_FOREGROUND_DETACH keeps the notification visible but no longer
+        // tied to the service lifecycle.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(false)
+        }
+        stopSelf()
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  Utilities
-    // ═══════════════════════════════════════════════════════════════
-
-    private fun formatDuration(ms: Long): String {
-        val seconds = ms / 1000
-        return if (seconds < 60) "${seconds}s"
-        else "${seconds / 60}m ${seconds % 60}s"
+    override fun onDestroy() {
+        releaseWakeLock()
+        // Do NOT cancel the notification here — the completion notification
+        // (posted by MainActivity) should remain visible until the user dismisses it.
+        // Only cancel if no completion notification was posted (e.g. process killed).
+        super.onDestroy()
     }
 }
