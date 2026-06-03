@@ -775,8 +775,8 @@ else
         PART_GROUP_SIZE=0
 
         # Parse lpdump output to get partition layout
-        # Format: Partition name: <name>  Group: <group>  Attributes: <attrs>  Size: <size>
-        CURRENT_SECTION=""
+        # Each partition stored as: name:attrs:size:group (one per line in /tmp/lp_parts.txt)
+        rm -f /tmp/lp_parts.txt
         CUR_NAME=""
         CUR_GROUP=""
         CUR_ATTRS=""
@@ -791,11 +791,10 @@ else
                         if echo "$CUR_ATTRS" | grep -q "0"; then
                             ATTR_STR="none"
                         fi
-                        LPMAKE_PARTS="$LPMAKE_PARTS --partition $CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP"
+                        echo "$CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP" >> /tmp/lp_parts.txt
                         PART_GROUP_SIZE=$(( PART_GROUP_SIZE + CUR_SIZE ))
                     fi
                     CUR_NAME=$(echo "$line" | sed 's/Partition name: *//' | tr -d ' ')
-                    CURRENT_SECTION="partition"
                     ;;
                 "Group:"*)
                     CUR_GROUP=$(echo "$line" | sed 's/.*Group: *//' | awk '{{print $1}}' | tr -d ' ')
@@ -815,40 +814,29 @@ else
             if echo "$CUR_ATTRS" | grep -q "0"; then
                 ATTR_STR="none"
             fi
-            LPMAKE_PARTS="$LPMAKE_PARTS --partition $CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP"
+            echo "$CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP" >> /tmp/lp_parts.txt
             PART_GROUP_SIZE=$(( PART_GROUP_SIZE + CUR_SIZE ))
         fi
 
-        # Now override sizes for partitions in our ZIP that need resizing
+        # Now override sizes for partitions in our ZIP that are dynamic
         for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             eval "PNAME=\$PART_${{i}}_NAME"
             eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
             if is_dynamic_partition "$PNAME"; then
-                # Replace the partition size in LPMAKE_PARTS
-                # Parse and rebuild
-                NEW_PARTS=""
-                OLD_IFS="$IFS"
-                IFS='--'
-                for part_entry in $LPMAKE_PARTS; do
-                    part_entry=$(echo "$part_entry" | sed 's/^ *//' | sed 's/ *$//')
-                    if [ -z "$part_entry" ]; then
-                        continue
-                    fi
-                    # Check if this entry is for the partition we want to resize
-                    entry_name=$(echo "$part_entry" | awk -F: '{{print $1}}' | awk '{{print $2}}')
-                    if [ "$entry_name" = "$PNAME" ]; then
-                        # Get attributes from existing entry
-                        entry_attrs=$(echo "$part_entry" | awk -F: '{{print $2}}')
-                        entry_group=$(echo "$part_entry" | awk -F: '{{print $4}}')
-                        NEW_PARTS="$NEW_PARTS --partition $PNAME:$entry_attrs:$PSIZE:$entry_group"
-                    else
-                        NEW_PARTS="$NEW_PARTS --$part_entry"
-                    fi
-                done
-                IFS="$OLD_IFS"
-                LPMAKE_PARTS="$NEW_PARTS"
+                # Replace the size for this partition in /tmp/lp_parts.txt
+                if grep -q "^$PNAME:" /tmp/lp_parts.txt 2>/dev/null; then
+                    OLD_SIZE=$(grep "^$PNAME:" /tmp/lp_parts.txt | cut -d: -f3)
+                    PART_GROUP_SIZE=$(( PART_GROUP_SIZE - OLD_SIZE + PSIZE ))
+                    sed -i "s/^$PNAME:\([^:]*\):[^:]*:\([^:]*\)$/$PNAME:\1:$PSIZE:\2/" /tmp/lp_parts.txt
+                fi
             fi
         done
+
+        # Build LPMAKE_PARTS from the updated file
+        LPMAKE_PARTS=""
+        while IFS=: read -r pname attrs size group; do
+            LPMAKE_PARTS="$LPMAKE_PARTS --partition $pname:$attrs:$size:$group"
+        done < /tmp/lp_parts.txt
 
         LPMAKE_GROUPS="--group $CUR_GROUP:$PART_GROUP_SIZE"
 
@@ -885,7 +873,7 @@ else
                 fi
 
                 eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
-                NEW_SECTORS=$(( PNAME_SZ / 512 ))
+                NEW_SECTORS=$(( (PNAME_SZ + 511) / 512 ))
 
                 # Read saved dm table for this partition
                 DM_SAVED=$(grep "^$pname " /tmp/dm_tables_backup.txt 2>/dev/null | head -1)
@@ -913,31 +901,58 @@ else
                 ui_print "!  Try flashing via fastbootd or use a device with larger partitions."
                 exit 1
             fi
+
+            # Remap non-resized dynamic partitions from saved tables
+            while IFS=' ' read -r saved_name saved_start saved_sectors saved_linear saved_underlying saved_offset; do
+                case " $RESIZE_NEEDED " in
+                    *" $saved_name "*) continue ;;  # already resized above
+                esac
+                dmsetup create "$saved_name" --table "$saved_start $saved_sectors $saved_linear $saved_underlying $saved_offset" 2>/dev/null
+            done < /tmp/dm_tables_backup.txt
         else
             ui_print "  Super partition metadata rebuilt successfully."
+
+            # After lpmake, remap ALL dynamic partitions from new metadata
+            # Parse lpdump output and create proper dmsetup linear mappings
+            ui_print "  Remapping dynamic partitions..."
+            lpdump "$SUPER_DEV" > /tmp/lp_dump_new.txt 2>/dev/null
+
+            # lpdump shows extents with offset info we need for dmsetup create
+            # Format includes partition name, size, and extent info
+            CUR_PART=""
+            CUR_SECTORS=0
+            CUR_OFFSET=0
+
+            while IFS= read -r line; do
+                case "$line" in
+                    "Partition name:"*)
+                        # Flush previous partition
+                        if [ -n "$CUR_PART" ] && [ "$CUR_SECTORS" -gt 0 ]; then
+                            dmsetup create "$CUR_PART" --table "0 $CUR_SECTORS linear $SUPER_DEV $CUR_OFFSET" 2>/dev/null
+                            if [ $? -ne 0 ]; then
+                                ui_print "!  Failed to remap $CUR_PART"
+                            fi
+                        fi
+                        CUR_PART=$(echo "$line" | sed 's/Partition name: *//' | tr -d ' ')
+                        CUR_SECTORS=0
+                        CUR_OFFSET=0
+                        ;;
+                    "Size:"*|"size:"*)
+                        SZ=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
+                        CUR_SECTORS=$(( SZ / 512 ))
+                        ;;
+                    *". ."*"super"*)
+                        # Extent line: e.g. "    0..2047 : super 0"
+                        CUR_OFFSET=$(echo "$line" | awk '{{print $NF}}')
+                        ;;
+                esac
+            done < /tmp/lp_dump_new.txt
+
+            # Flush last partition
+            if [ -n "$CUR_PART" ] && [ "$CUR_SECTORS" -gt 0 ]; then
+                dmsetup create "$CUR_PART" --table "0 $CUR_SECTORS linear $SUPER_DEV $CUR_OFFSET" 2>/dev/null
+            fi
         fi
-
-        # Remap all dynamic partitions from new metadata
-        ui_print "  Remapping dynamic partitions..."
-        # After lpmake, re-dump metadata to create proper dm mappings
-        lpdump "$SUPER_DEV" > /tmp/lp_dump_new.txt 2>/dev/null
-
-        # Parse new metadata and create dmsetup mappings
-        while IFS= read -r line; do
-            case "$line" in
-                "Partition name:"*)
-                    CUR_PART=$(echo "$line" | sed 's/Partition name: *//' | tr -d ' ')
-                    ;;
-                "Size:"*|"size:"*)
-                    if [ -n "$CUR_PART" ]; then
-                        CUR_SZ=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
-                        CUR_SZ_SECTORS=$(( CUR_SZ / 512 ))
-                        # Create dm device with the right size
-                        dmsetup mknodes "$CUR_PART" 2>/dev/null
-                    fi
-                    ;;
-            esac
-        done < /tmp/lp_dump_new.txt
 
     else
         # No lpmake available — try dmsetup fallback using saved tables
@@ -964,7 +979,7 @@ else
             fi
 
             eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
-            NEW_SECTORS=$(( PNAME_SZ / 512 ))
+            NEW_SECTORS=$(( (PNAME_SZ + 511) / 512 ))
 
             # Read saved dm table for this partition
             DM_SAVED=$(grep "^$pname " /tmp/dm_tables_backup.txt 2>/dev/null | head -1)
@@ -995,6 +1010,14 @@ else
             ui_print "!  3. Manually resize partitions before flashing"
             exit 1
         fi
+
+        # Remap non-resized dynamic partitions from saved tables
+        while IFS=' ' read -r saved_name saved_start saved_sectors saved_linear saved_underlying saved_offset; do
+            case " $RESIZE_NEEDED " in
+                *" $saved_name "*) continue ;;  # already resized above
+            esac
+            dmsetup create "$saved_name" --table "$saved_start $saved_sectors $saved_linear $saved_underlying $saved_offset" 2>/dev/null
+        done < /tmp/dm_tables_backup.txt
     fi
 
     ui_print "  Dynamic partition resize complete."
