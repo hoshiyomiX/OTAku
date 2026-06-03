@@ -88,6 +88,9 @@ class MainActivity : AppCompatActivity() {
         // Track last progress percent to avoid logging on every chunk
         @Volatile private var lastProgressPercent: Int = -1
 
+        // Track last notification progress bar percent for dedup
+        @Volatile private var lastNotifPercent: Int = -1
+
         // Persisted log text (survives Activity recreation)
         @Volatile private var savedLogText: StringBuffer = StringBuffer()
 
@@ -922,6 +925,7 @@ class MainActivity : AppCompatActivity() {
         lastOutputPath = outPath
         lastProgressMessage = ""
         lastProgressPercent = -1
+        lastNotifPercent = -1
         lastProgressTime = System.currentTimeMillis()  // Start heartbeat
         isBuilding = true
         isExecuting = true
@@ -989,9 +993,24 @@ class MainActivity : AppCompatActivity() {
                             } else {
                                 "${progress.message} — ${progress.percent}%"
                             }
-                            if (notifMsg != lastProgressMessage) {
+
+                            // Map Rust's internal progress range (0-97%) to notification
+                            // progress bar range (0-100%) so the user sees 0→100% completion:
+                            //   Rust 0-94% (compression)  → notification 0-90%
+                            //   Rust 95% (scripts)        → notification 92%
+                            //   Rust 97% (writing ZIP)    → notification 95%
+                            //   Build complete            → notification 100%
+                            val notifPercent = when {
+                                progress.percent >= 97 -> 95   // Writing ZIP
+                                progress.percent >= 95 -> 92   // Building scripts
+                                else -> (progress.percent * 90.0 / 94.0).toInt().coerceIn(0, 90)
+                            }
+
+                            // Always update notification when percent or message changes
+                            if (notifMsg != lastProgressMessage || notifPercent != lastNotifPercent) {
                                 lastProgressMessage = notifMsg
-                                showProgressNotification(notifMsg, progress.percent)
+                                lastNotifPercent = notifPercent
+                                showProgressNotification(notifMsg, notifPercent)
                             }
 
                             // Update split progress bars (per-partition).
@@ -1111,6 +1130,8 @@ class MainActivity : AppCompatActivity() {
         if (success) {
             val duration = if (durationMs < 60000) "${durationMs / 1000}s"
                 else "${durationMs / 60000}m ${durationMs % 60000 / 1000}s"
+            // Show 100% progress bar briefly before switching to completion notification
+            showProgressNotification("Build complete!", 100)
             showCompletionNotification(true, "Finished in $duration")
         } else {
             showLog("${error ?: "Unknown error"}", LogLevel.ERROR)
@@ -1309,6 +1330,10 @@ class MainActivity : AppCompatActivity() {
                 isExecuting = true
                 setUIExecuting(true)
                 showLog("Build in progress (returned from background).")
+                // Re-sync notification with current progress state
+                if (lastProgressMessage.isNotEmpty() && lastNotifPercent >= 0) {
+                    showProgressNotification(lastProgressMessage, lastNotifPercent)
+                }
                 // Re-create split progress bars with current state
                 if (partitionCount > 0) {
                     val savedProgress = partitionProgress.copyOf()
