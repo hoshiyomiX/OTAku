@@ -223,7 +223,6 @@ fn build_update_script(
     skip_verify: bool,
 ) -> String {
     let decomp_cmd = decomp_cmd_for_id(compress_id);
-    let decomp_ext = decomp_ext_for_id(compress_id);
 
     // Build partition variable assignments
     let mut part_vars = String::new();
@@ -1242,43 +1241,30 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     ui_print "  Compressed: $(( PCSIZE / 1048576 )) MB | Offset: $POFFSET"
 
     PTARGET=$(resolve_target "$PNAME")
-    TMP_COMP="/tmp/ddpart_${{i}}{decomp_ext}"
 
-    # Step A: Extract compressed data from bundle
-    # Use bs=4096 for the bulk of the data (much faster than bs=1),
-    # then handle the unaligned head bytes with bs=1.
-    ui_print "  Extracting compressed data..."
-    EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
-    EXTRACT_BS=4096
-    EXTRACT_FULL_BLOCKS=$(( EXTRACT_SKIP / EXTRACT_BS ))
-    EXTRACT_REMAINDER=$(( EXTRACT_SKIP % EXTRACT_BS ))
-    # Use bs=1 only for the initial unaligned skip portion
-    # then bs=4096 for the actual data (count is in blocks of EXTRACT_BS)
-    DATA_FULL_BLOCKS=$(( PCSIZE / EXTRACT_BS ))
-    DATA_REMAINDER=$(( PCSIZE % EXTRACT_BS ))
-    if [ "$EXTRACT_REMAINDER" -gt 0 ] || [ "$DATA_REMAINDER" -gt 0 ]; then
-        # Fallback to bs=1 for precision when offsets are unaligned
-        dd if="$BUNDLE" of="$TMP_COMP" bs=1 skip=$EXTRACT_SKIP count=$PCSIZE 2>/dev/null
-    else
-        # Fast path: aligned offset and size — use bs=4096
-        dd if="$BUNDLE" of="$TMP_COMP" bs=$EXTRACT_BS skip=$EXTRACT_FULL_BLOCKS count=$DATA_FULL_BLOCKS 2>/dev/null
-    fi
-    if [ $? -ne 0 ]; then
-        ui_print "! ABORT: Failed to extract compressed data for $PNAME"
-        exit 1
-    fi
-
-    # Step B: Pipe decompress directly to dd
-    # IMPORTANT: Do NOT use conv=fsync here!
+    # Step A+B: Extract → decompress → write pipeline
+    # Always use bs=4096 for extraction — much faster than bs=1.
+    # The read count is rounded UP to include the last partial block;
+    # decompressors (xz/gzip/bzip2) gracefully handle trailing bytes,
+    # and for uncompressed data (cat), extra bytes (max 4095) are
+    # harmless since partitions are sized >= UNC_SIZE.
+    # No temp file needed — direct pipeline is faster and uses less RAM.
+    #
+    # IMPORTANT: Do NOT use conv=fsync on dd write!
     # conv=fsync forces an fsync() after every write block, which makes
     # writing large partitions (2+ GB) extremely slow on eMMC/UFS storage.
     # For a 2327 MB partition with bs=4096, that's ~597,000 fsync calls.
-    # Instead, we use conv=notrunc (safe default) and sync after the entire write.
-    ui_print "  Writing to $PTARGET..."
-    $DECOMP_CMD -d < "$TMP_COMP" | dd of="$PTARGET" bs=1048576 conv=notrunc 2>/dev/null
+    # Instead, we use conv=notrunc (safe default) and sync once after
+    # ALL partitions are written (see after the loop below).
+    EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
+    SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
+    READ_COUNT=$(( (PCSIZE + 4095) / 4096 ))
+
+    ui_print "  Flashing $PNAME to $PTARGET..."
+    dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+        $DECOMP_CMD -d 2>/dev/null | \
+        dd of="$PTARGET" bs=1048576 conv=notrunc 2>/dev/null
     DD_STATUS=$?
-    sync
-    rm -f "$TMP_COMP"
 
     if [ $DD_STATUS -ne 0 ]; then
         ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS)"
@@ -1290,6 +1276,11 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     ui_print ""
 done
 
+# Sync ALL partition writes at once (deferred from individual writes).
+# This is far more efficient than syncing after each partition —
+# one fsync pass vs NUM_PARTS separate stalls.
+sync
+
 # ── Done ────────────────────────────────────────────────────
 ui_print "──────────────────────────────────────────"
 ui_print " All $NUM_PARTS partition(s) flashed {verified_word} successfully!"
@@ -1300,7 +1291,6 @@ exit 0
         flash_step_offset = flash_step_offset,
         num_parts_minus_1 = if num_parts > 0 { num_parts - 1 } else { 0 },
         total_steps = total_steps,
-        decomp_ext = decomp_ext,
         verify_block = verify_block.trim(),
         verified_word = verified_word,
     ));
