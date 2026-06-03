@@ -659,7 +659,7 @@ validate_target() {{
         if [ "$is_dynamic" = "1" ]; then
             # Dynamic partitions can be resized — defer to resize step
             ui_print "  $name ($target): $(( PART_SIZE / 1048576 )) MB [NEEDS RESIZE: $(( PART_SIZE / 1048576 )) -> $(( min_size / 1048576 )) MB]"
-            RESIZE_NEEDED="$RESIZE_NEEDED $name"
+            RESIZE_NEEDED="${{RESIZE_NEEDED:+$RESIZE_NEEDED }}$name"
             RESIZE_TOTAL=$(( RESIZE_TOTAL + min_size - PART_SIZE ))
             return 0
         else
@@ -736,8 +736,15 @@ else
     ui_print "  Super partition: $(( SUPER_SIZE / 1048576 )) MB"
     ui_print "  Dynamic images total: $(( DYN_TOTAL_NEEDED / 1048576 )) MB"
 
-    if [ "$DYN_TOTAL_NEEDED" -gt "$SUPER_SIZE" ]; then
-        ui_print "! ABORT: Dynamic partition images ($(( DYN_TOTAL_NEEDED / 1048576 )) MB) exceed super partition ($(( SUPER_SIZE / 1048576 )) MB)"
+    # Account for metadata overhead: super reserves space for metadata slots
+    # (2 copies of metadata, each with META_SLOTS slots of META_SIZE bytes).
+    # Default: 2 * 2 * 65536 = 262144 bytes (0.25 MB) — negligible but correct.
+    # Use conservative estimate since we don't know META_SLOTS yet.
+    META_OVERHEAD=$(( 2 * 3 * 65536 ))
+    SUPER_USABLE=$(( SUPER_SIZE - META_OVERHEAD ))
+
+    if [ "$DYN_TOTAL_NEEDED" -gt "$SUPER_USABLE" ]; then
+        ui_print "! ABORT: Dynamic partition images ($(( DYN_TOTAL_NEEDED / 1048576 )) MB) exceed usable super space ($(( SUPER_USABLE / 1048576 )) MB)"
         exit 1
     fi
 
@@ -765,7 +772,16 @@ else
         ui_print "  Using lpmake to rebuild super partition metadata..."
 
         # Dump current metadata to parse partition layout
+        if ! which lpdump >/dev/null 2>&1; then
+            ui_print "! ABORT: lpdump not found — cannot parse super partition metadata."
+            ui_print "!  lpmake is available but lpdump is required to read current layout."
+            exit 1
+        fi
         lpdump "$SUPER_DEV" > /tmp/lp_dump.txt 2>/dev/null
+        if [ ! -s /tmp/lp_dump.txt ]; then
+            ui_print "! ABORT: lpdump produced no output — cannot parse super partition layout."
+            exit 1
+        fi
 
         # Build lpmake arguments for all partitions in super
         # We need to preserve existing partitions that are NOT in our ZIP,
@@ -776,7 +792,10 @@ else
 
         # Parse lpdump output to get partition layout
         # Each partition stored as: name:attrs:size:group (one per line in /tmp/lp_parts.txt)
+        # Also extract metadata-slot count and metadata-size from lpdump header
         rm -f /tmp/lp_parts.txt
+        META_SLOTS=2
+        META_SIZE=65536
         CUR_NAME=""
         CUR_GROUP=""
         CUR_ATTRS=""
@@ -784,7 +803,9 @@ else
 
         while IFS= read -r line; do
             case "$line" in
-                "Partition name:"*)
+                # AOSP lpdump uses "Name:" for partition table entries;
+                # some custom recoveries use "Partition name:" — support both
+                "Name:"*|"Partition name:"*)
                     # Flush previous partition
                     if [ -n "$CUR_NAME" ]; then
                         ATTR_STR="readonly"
@@ -794,7 +815,7 @@ else
                         echo "$CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP" >> /tmp/lp_parts.txt
                         PART_GROUP_SIZE=$(( PART_GROUP_SIZE + CUR_SIZE ))
                     fi
-                    CUR_NAME=$(echo "$line" | sed 's/Partition name: *//' | tr -d ' ')
+                    CUR_NAME=$(echo "$line" | sed 's/Name: *//;s/Partition name: *//' | tr -d ' ')
                     ;;
                 "Group:"*)
                     CUR_GROUP=$(echo "$line" | sed 's/.*Group: *//' | awk '{{print $1}}' | tr -d ' ')
@@ -802,8 +823,23 @@ else
                 "Attributes:"*)
                     CUR_ATTRS=$(echo "$line" | sed 's/Attributes: *//' | tr -d ' ')
                     ;;
+                # AOSP lpdump uses "Maximum size:" for groups, "Size:" for block devices
+                # For partitions, size is computed from extents — but some lpdump versions
+                # include a size line; also match "Maximum size:" to avoid group-size confusion
                 "Size:"*|"size:"*)
+                    # Skip group max-size lines (they contain "Maximum")
+                    case "$line" in
+                        *"Maximum"*|*"maximum"*) continue ;;
+                    esac
                     CUR_SIZE=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
+                    ;;
+                # Extract metadata slot count from lpdump header
+                "Metadata slot count:"*)
+                    META_SLOTS=$(echo "$line" | sed 's/Metadata slot count: *//' | tr -d ' ')
+                    ;;
+                # Extract metadata max size from lpdump header
+                "Metadata max size:"*|"metadata max size:"*)
+                    META_SIZE=$(echo "$line" | sed 's/[Mm]etadata max [Ss]ize: *//' | tr -d ' ')
                     ;;
             esac
         done < /tmp/lp_dump.txt
@@ -827,7 +863,9 @@ else
                 if grep -q "^$PNAME:" /tmp/lp_parts.txt 2>/dev/null; then
                     OLD_SIZE=$(grep "^$PNAME:" /tmp/lp_parts.txt | cut -d: -f3)
                     PART_GROUP_SIZE=$(( PART_GROUP_SIZE - OLD_SIZE + PSIZE ))
-                    sed -i "s/^$PNAME:\([^:]*\):[^:]*:\([^:]*\)$/$PNAME:\1:$PSIZE:\2/" /tmp/lp_parts.txt
+                    # Use safe tmpfile pattern instead of sed -i (not reliable on all tmpfs/busybox)
+                    sed "s/^$PNAME:\([^:]*\):[^:]*:\([^:]*\)$/$PNAME:\1:$PSIZE:\2/" /tmp/lp_parts.txt > /tmp/lp_parts_new.txt
+                    mv /tmp/lp_parts_new.txt /tmp/lp_parts.txt
                 fi
             fi
         done
@@ -841,10 +879,14 @@ else
         LPMAKE_GROUPS="--group $CUR_GROUP:$PART_GROUP_SIZE"
 
         # Write new metadata to super
+        # Use metadata-slot count and metadata-size parsed from lpdump output;
+        # Virtual A/B devices need 3 slots (A + B + snapshot), non-A/B need 2.
+        # Fallback defaults: 2 slots, 65536 bytes — safe for all known devices.
+        ui_print "  Metadata: slots=$META_SLOTS, size=$META_SIZE"
         lpmake \
             --device-size "$SUPER_SIZE" \
-            --metadata-size 65536 \
-            --metadata-slots 2 \
+            --metadata-size "$META_SIZE" \
+            --metadata-slots "$META_SLOTS" \
             --device "$SUPER_DEV" \
             $LPMAKE_GROUPS \
             $LPMAKE_PARTS 2>/dev/null
@@ -917,39 +959,69 @@ else
             ui_print "  Remapping dynamic partitions..."
             lpdump "$SUPER_DEV" > /tmp/lp_dump_new.txt 2>/dev/null
 
-            # lpdump shows extents with offset info we need for dmsetup create
-            # Format includes partition name, size, and extent info
+            # Parse lpdump output — handle both AOSP format and custom recovery format:
+            #   AOSP:      "Name: system_a" / "Partition name: system_a"
+            #   Extent:    "0 .. 2104887 linear super 2048"  (AOSP)
+            #              "0..2047 : super 0"                (some recoveries)
             CUR_PART=""
             CUR_SECTORS=0
             CUR_OFFSET=0
+            CUR_EXTENT_COUNT=0
 
             while IFS= read -r line; do
                 case "$line" in
-                    "Partition name:"*)
+                    # Partition name — AOSP uses "Name:", some recoveries use "Partition name:"
+                    "Name:"*|"Partition name:"*)
                         # Flush previous partition
                         if [ -n "$CUR_PART" ] && [ "$CUR_SECTORS" -gt 0 ]; then
+                            if [ "$CUR_EXTENT_COUNT" -gt 1 ]; then
+                                ui_print "!  WARNING: $CUR_PART has $CUR_EXTENT_COUNT extents — may need manual remap"
+                            fi
                             dmsetup create "$CUR_PART" --table "0 $CUR_SECTORS linear $SUPER_DEV $CUR_OFFSET" 2>/dev/null
                             if [ $? -ne 0 ]; then
                                 ui_print "!  Failed to remap $CUR_PART"
                             fi
                         fi
-                        CUR_PART=$(echo "$line" | sed 's/Partition name: *//' | tr -d ' ')
+                        CUR_PART=$(echo "$line" | sed 's/Name: *//;s/Partition name: *//' | tr -d ' ')
                         CUR_SECTORS=0
                         CUR_OFFSET=0
+                        CUR_EXTENT_COUNT=0
                         ;;
                     "Size:"*|"size:"*)
+                        # Skip group max-size lines
+                        case "$line" in
+                            *"Maximum"*|*"maximum"*) continue ;;
+                        esac
                         SZ=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
-                        CUR_SECTORS=$(( SZ / 512 ))
+                        CUR_SECTORS=$(( (SZ + 511) / 512 ))
                         ;;
-                    *". ."*"super"*)
-                        # Extent line: e.g. "    0..2047 : super 0"
+                    # Extent lines — both AOSP and custom recovery formats
+                    *" linear "*"super"*|*". ."*"super"*)
+                        # AOSP format: "0 .. 2104887 linear super 2048"
+                        # Old format:  "0..2047 : super 0"
+                        # Extract offset (last field in both formats)
                         CUR_OFFSET=$(echo "$line" | awk '{{print $NF}}')
+                        CUR_EXTENT_COUNT=$(( CUR_EXTENT_COUNT + 1 ))
+                        # If no Size: line was found, compute sectors from extent range
+                        if [ "$CUR_SECTORS" -eq 0 ]; then
+                            # Parse start and end sector from extent line
+                            # Handle both "0 .. 2104887" and "0..2047" formats
+                            EXTENT_RANGE=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/linear.*$//' | sed 's/:.*$//' | sed 's/ \.\./../')
+                            EXT_START=$(echo "$EXTENT_RANGE" | awk -F'\\.\\.' '{{print $1}}' | tr -d ' ')
+                            EXT_END=$(echo "$EXTENT_RANGE" | awk -F'\\.\\.' '{{print $2}}' | tr -d ' ')
+                            if [ -n "$EXT_START" ] && [ -n "$EXT_END" ]; then
+                                CUR_SECTORS=$(( EXT_END - EXT_START + 1 ))
+                            fi
+                        fi
                         ;;
                 esac
             done < /tmp/lp_dump_new.txt
 
             # Flush last partition
             if [ -n "$CUR_PART" ] && [ "$CUR_SECTORS" -gt 0 ]; then
+                if [ "$CUR_EXTENT_COUNT" -gt 1 ]; then
+                    ui_print "!  WARNING: $CUR_PART has $CUR_EXTENT_COUNT extents — may need manual remap"
+                fi
                 dmsetup create "$CUR_PART" --table "0 $CUR_SECTORS linear $SUPER_DEV $CUR_OFFSET" 2>/dev/null
             fi
         fi
