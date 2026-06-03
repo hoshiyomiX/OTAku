@@ -779,7 +779,7 @@ else
     ui_print "  Unmapping dynamic partitions..."
     if [ "$HAS_LPTOOLS" = "1" ]; then
         for pname in $DYNAMIC_PART_NAMES; do
-            lptools unmap "$pname" 2>/dev/null
+            lptools unmap "$pname" >/dev/null 2>&1
         done
     elif [ "$HAS_DMSETUP" = "1" ]; then
         for pname in $DYNAMIC_PART_NAMES; do
@@ -792,20 +792,36 @@ else
     # natively on-device: resize, map, unmap, unlimited-group, etc.
     # It auto-detects slot suffix and updates ALL metadata slots.
     # Available in many OrangeFox/TWRP builds (opt-in flag required).
+    # IMPORTANT: lptools size arguments are in BYTES (not KB, not sectors).
+    # Source: phhusson/vendor_lptools — strtoll(argv[3], NULL, 0) → ResizePartition(bytes)
     HAS_LPTOOLS=0
     which lptools >/dev/null 2>&1 && HAS_LPTOOLS=1
 
     if [ "$HAS_LPTOOLS" = "1" ]; then
         ui_print "  Using lptools to resize dynamic partitions..."
 
-        # Set group size to unlimited — allows partitions to grow beyond original group size
-        lptools unlimited-group 2>/dev/null
+        # Detect the dynamic partition group name for this slot.
+        # lptools outputs "Best group seems to be <name>" on stdout during auto-detect.
+        # We capture it to help debugging, but lptools handles group selection internally.
+        LP_GROUP=$(lptools unlimited-group 2>/dev/null | grep -o 'Best group seems to be [^ ]*' | head -1 | awk '{print $NF}')
+        if [ -n "$LP_GROUP" ]; then
+            ui_print "  Detected group: $LP_GROUP"
+        fi
 
         # Clear COW partitions if this is a Virtual A/B device
-        lptools clear-cow 2>/dev/null
+        lptools clear-cow >/dev/null 2>&1
+
+        # Check available free space before resizing
+        LP_FREE=$(lptools free 2>/dev/null | grep -o 'Free space: [0-9]*' | awk '{print $3}')
+        if [ -n "$LP_FREE" ]; then
+            ui_print "  Super free space: $(( LP_FREE / 1048576 )) MB"
+        fi
 
         # Resize each partition that needs it
         RESIZE_OK=1
+        # Track partitions that were created via remove+create fallback
+        # (lptools create auto-maps, so we must skip re-mapping them later)
+        CREATED_PARTS=""
         for pname in $RESIZE_NEEDED; do
             pname=$(echo "$pname" | tr -d ' ')
             [ -z "$pname" ] && continue
@@ -825,24 +841,36 @@ else
             fi
 
             eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
-            # lptools resize takes size in KB
-            NEW_SIZE_KB=$(( (PNAME_SZ + 1023) / 1024 ))
+            # lptools size arguments are in BYTES (not KB!)
+            # phhusson/vendor_lptools: strtoll(argv[3], NULL, 0) → ResizePartition(partition, uint64_t bytes)
+            NEW_SIZE_BYTES=$PNAME_SZ
 
-            ui_print "  Resizing $pname to $(( NEW_SIZE_KB / 1024 )) MB..."
-            lptools resize "$pname" "$NEW_SIZE_KB" 2>/dev/null
+            ui_print "  Resizing $pname to $(( NEW_SIZE_BYTES / 1048576 )) MB..."
+
+            # Try lptools resize first (preserves existing data in metadata)
+            # Note: original phhusson lptools resize does NOT re-map after resize
+            lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
             if [ $? -ne 0 ]; then
                 ui_print "!  lptools resize failed for $pname — trying remove+create fallback"
                 # Fallback: remove then create with new size
-                lptools remove "$pname" 2>/dev/null
-                lptools create "$pname" "$NEW_SIZE_KB" 2>/dev/null
+                # lptools remove auto-unmaps before removing
+                # lptools create auto-maps after creating (creates dm device immediately)
+                lptools remove "$pname" >/dev/null 2>&1
+                lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                 if [ $? -ne 0 ]; then
                     ui_print "!  lptools remove+create also failed for $pname"
                     RESIZE_OK=0
                 else
-                    ui_print "  $pname recreated at $(( NEW_SIZE_KB / 1024 )) MB"
+                    ui_print "  $pname recreated at $(( NEW_SIZE_BYTES / 1048576 )) MB"
+                    # Track that this partition was created (and thus auto-mapped)
+                    CREATED_PARTS="$CREATED_PARTS $pname "
                 fi
             else
-                ui_print "  $pname resized to $(( NEW_SIZE_KB / 1024 )) MB"
+                ui_print "  $pname resized to $(( NEW_SIZE_BYTES / 1048576 )) MB"
+                # After successful resize, re-map the partition (resize doesn't auto-map
+                # in the original phhusson version)
+                lptools unmap "$pname" >/dev/null 2>&1
+                lptools map "$pname" >/dev/null 2>&1
             fi
         done
 
@@ -852,10 +880,15 @@ else
             exit 1
         fi
 
-        # Remap ALL dynamic partitions after lptools resize
+        # Remap dynamic partitions that were NOT already mapped by lptools create.
+        # lptools create auto-maps the partition, so we must skip those to avoid double-mapping.
         ui_print "  Remapping dynamic partitions..."
         for pname in $DYNAMIC_PART_NAMES; do
-            lptools map "$pname" 2>/dev/null
+            case "$CREATED_PARTS" in
+                *" $pname "*) continue ;;  # already mapped by lptools create
+            esac
+            lptools unmap "$pname" >/dev/null 2>&1
+            lptools map "$pname" >/dev/null 2>&1
         done
 
         ui_print "  lptools resize complete."
@@ -1212,17 +1245,39 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     TMP_COMP="/tmp/ddpart_${{i}}{decomp_ext}"
 
     # Step A: Extract compressed data from bundle
+    # Use bs=4096 for the bulk of the data (much faster than bs=1),
+    # then handle the unaligned head bytes with bs=1.
     ui_print "  Extracting compressed data..."
-    dd if="$BUNDLE" of="$TMP_COMP" bs=1 skip=$(( DATA_OFFSET + POFFSET )) count="$PCSIZE" 2>/dev/null
+    EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
+    EXTRACT_BS=4096
+    EXTRACT_FULL_BLOCKS=$(( EXTRACT_SKIP / EXTRACT_BS ))
+    EXTRACT_REMAINDER=$(( EXTRACT_SKIP % EXTRACT_BS ))
+    # Use bs=1 only for the initial unaligned skip portion
+    # then bs=4096 for the actual data (count is in blocks of EXTRACT_BS)
+    DATA_FULL_BLOCKS=$(( PCSIZE / EXTRACT_BS ))
+    DATA_REMAINDER=$(( PCSIZE % EXTRACT_BS ))
+    if [ "$EXTRACT_REMAINDER" -gt 0 ] || [ "$DATA_REMAINDER" -gt 0 ]; then
+        # Fallback to bs=1 for precision when offsets are unaligned
+        dd if="$BUNDLE" of="$TMP_COMP" bs=1 skip=$EXTRACT_SKIP count=$PCSIZE 2>/dev/null
+    else
+        # Fast path: aligned offset and size — use bs=4096
+        dd if="$BUNDLE" of="$TMP_COMP" bs=$EXTRACT_BS skip=$EXTRACT_FULL_BLOCKS count=$DATA_FULL_BLOCKS 2>/dev/null
+    fi
     if [ $? -ne 0 ]; then
         ui_print "! ABORT: Failed to extract compressed data for $PNAME"
         exit 1
     fi
 
     # Step B: Pipe decompress directly to dd
+    # IMPORTANT: Do NOT use conv=fsync here!
+    # conv=fsync forces an fsync() after every write block, which makes
+    # writing large partitions (2+ GB) extremely slow on eMMC/UFS storage.
+    # For a 2327 MB partition with bs=4096, that's ~597,000 fsync calls.
+    # Instead, we use conv=notrunc (safe default) and sync after the entire write.
     ui_print "  Writing to $PTARGET..."
-    $DECOMP_CMD -d < "$TMP_COMP" | dd of="$PTARGET" bs=4096 conv=fsync 2>/dev/null
+    $DECOMP_CMD -d < "$TMP_COMP" | dd of="$PTARGET" bs=1048576 conv=notrunc 2>/dev/null
     DD_STATUS=$?
+    sync
     rm -f "$TMP_COMP"
 
     if [ $DD_STATUS -ne 0 ]; then
