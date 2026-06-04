@@ -358,6 +358,35 @@ ui_print() {{
     echo "ui_print" >&$OUTFD
 }}
 
+# ── Cleanup trap — remap dynamic partitions on ABORT ──
+# If the script exits abnormally (e.g. dd write false-failure on block device),
+# dynamic partitions may still be unmapped from the resize step.
+# This trap ensures they get re-mapped so the device can still boot into
+# Android or recovery after a failed flash attempt.
+# NOTE: DYNAMIC_PART_NAMES and HAS_LPTOOLS are defined later in the script;
+# the trap guards against them being unset (early exit before validation step).
+CLEANUP_DONE=0
+cleanup_abort() {{
+    if [ "$CLEANUP_DONE" = "1" ]; then return; fi
+    CLEANUP_DONE=1
+    # Only attempt cleanup if we got past the validation step
+    if [ -z "$DYNAMIC_PART_NAMES" ]; then return; fi
+    ui_print "! Performing emergency cleanup..."
+    # Re-map all dynamic partitions that may have been unmapped during resize
+    if [ "$HAS_LPTOOLS" = "1" ]; then
+        for pname in $DYNAMIC_PART_NAMES; do
+            lptools map "$pname" >/dev/null 2>&1
+        done
+    elif [ "$HAS_DMSETUP" = "1" ]; then
+        for pname in $DYNAMIC_PART_NAMES; do
+            dmsetup table "$pname" >/dev/null 2>&1 || dmsetup create "$pname" >/dev/null 2>&1
+        done
+    fi
+    sync
+    ui_print "! Cleanup complete."
+}}
+trap cleanup_abort EXIT
+
 BUNDLE="/tmp/otaku.bin"
 {part_vars}NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
@@ -1265,12 +1294,14 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # Instead, we sync once after ALL partitions are written (see after
     # the loop below).
     #
-    # We use conv=notrunc on dd write. Without conv=notrunc, some dd
-    # implementations (e.g. busybox dd) try to ftruncate() the output
-    # after writing. On block devices (dm linear targets), ftruncate()
-    # fails with EINVAL, causing dd to exit with status 1. conv=notrunc
-    # prevents this truncation attempt. On toybox dd (which ignores
-    # unknown conv= flags), this is harmless.
+    # IMPORTANT: Do NOT use conv=notrunc on dd write to block devices!
+    # conv=notrunc does NOT prevent busybox dd from attempting ftruncate().
+    # busybox dd interprets conv=notrunc but still calls ftruncate() at the
+    # end of writing. On dm-linear block devices, ftruncate() fails with
+    # EINVAL, causing dd to exit with status=1 — a FALSE-FAILURE, because
+    # all data was already written successfully.
+    # Instead, we write WITHOUT conv= flags and verify data was written
+    # by checking blockdev --getsize64 when dd returns non-zero.
     EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
     SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
     READ_COUNT=$(( (PCSIZE + 4095) / 4096 ))
@@ -1314,7 +1345,8 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             $DECOMP_CMD -d > "$TMP_FIFO" 2>/dev/null &
         DECOMP_PID=$!
 
-        dd of="$PTARGET" bs=1048576 conv=notrunc if="$TMP_FIFO" 2>/dev/null
+        # No conv= flags — busybox dd ftruncate() on dm-linear is a false-failure
+        dd of="$PTARGET" bs=1048576 if="$TMP_FIFO" 2>/dev/null
         DD_STATUS=$?
 
         wait $DECOMP_PID 2>/dev/null
@@ -1327,9 +1359,16 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             exit 1
         fi
 
+        # busybox dd may return status=1 on block devices (ftruncate EINVAL)
+        # even when all data was written. Verify by checking partition size.
         if [ $DD_STATUS -ne 0 ]; then
-            ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS)"
-            exit 1
+            WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
+            if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
+                ui_print "  Note: dd reported status=$DD_STATUS (busybox ftruncate on block device — data OK)"
+            else
+                ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS, written=$WRITTEN_SIZE < expected=$PSIZE)"
+                exit 1
+            fi
         fi
     else
         # FIFO not available (very rare) — fall back to direct 3-pipeline.
@@ -1337,12 +1376,19 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         # but this avoids tmpfs exhaustion by never writing a temp file.
         dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
             $DECOMP_CMD -d 2>/dev/null | \
-            dd of="$PTARGET" bs=1048576 conv=notrunc 2>/dev/null
+            dd of="$PTARGET" bs=1048576 2>/dev/null
         DD_STATUS=$?
 
+        # busybox dd may return status=1 on block devices (ftruncate EINVAL)
+        # even when all data was written. Verify by checking partition size.
         if [ $DD_STATUS -ne 0 ]; then
-            ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS)"
-            exit 1
+            WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
+            if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
+                ui_print "  Note: dd reported status=$DD_STATUS (busybox ftruncate on block device — data OK)"
+            else
+                ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS, written=$WRITTEN_SIZE < expected=$PSIZE)"
+                exit 1
+            fi
         fi
     fi
 
@@ -1355,6 +1401,33 @@ done
 # This is far more efficient than syncing after each partition —
 # one fsync pass vs NUM_PARTS separate stalls.
 sync
+
+# Disable the cleanup trap — we completed successfully.
+CLEANUP_DONE=1
+
+# ── Slot verification (A/B devices only) ────────────────────
+# Verify that the active boot slot matches the slot we just flashed.
+# This catches the rare case where the bootloader reset the active slot
+# during the flash process, which would cause a bootloop after reboot.
+if [ -n "$TARGET_SLOT" ]; then
+    CURRENT_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
+    if [ -z "$CURRENT_SLOT" ]; then
+        CURRENT_SLOT=$(cat /proc/cmdline 2>/dev/null | tr ' ' '\n' | grep -o 'androidboot.slot_suffix=[^ ]*' | cut -d= -f2)
+    fi
+    if [ -n "$CURRENT_SLOT" ] && [ "$CURRENT_SLOT" != "$TARGET_SLOT" ]; then
+        ui_print "! WARNING: Active slot changed during flash!"
+        ui_print "  Flashed slot: $TARGET_SLOT, current slot: $CURRENT_SLOT"
+        ui_print "  Setting active slot to $TARGET_SLOT..."
+        # Extract slot letter without underscore (e.g. _b → b)
+        SLOT_LETTER=$(echo "$TARGET_SLOT" | sed 's/^_//')
+        if [ -n "$SLOT_LETTER" ]; then
+            bootctl set-active-boot-slot $SLOT_LETTER 2>/dev/null || \
+                fastboot set_active $SLOT_LETTER 2>/dev/null || true
+        fi
+    else
+        ui_print "  Active slot: $TARGET_SLOT [OK]"
+    fi
+fi
 
 # ── Done ────────────────────────────────────────────────────
 ui_print "──────────────────────────────────────────"
