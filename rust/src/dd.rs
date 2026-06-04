@@ -774,6 +774,16 @@ else
         ui_print "  Saved $DM_SAVED_COUNT dm table(s) for fallback"
     fi
 
+    # ── Detect lptools BEFORE using it ──
+    # lptools is a single binary that handles dynamic partition management
+    # natively on-device: resize, map, unmap, unlimited-group, etc.
+    # It auto-detects slot suffix and updates ALL metadata slots.
+    # Available in many OrangeFox/TWRP builds (opt-in flag required).
+    # IMPORTANT: lptools size arguments are in BYTES (not KB, not sectors).
+    # Source: phhusson/vendor_lptools — strtoll(argv[3], NULL, 0) → ResizePartition(bytes)
+    HAS_LPTOOLS=0
+    which lptools >/dev/null 2>&1 && HAS_LPTOOLS=1
+
     # Unmap all dynamic partitions before resize
     ui_print "  Unmapping dynamic partitions..."
     if [ "$HAS_LPTOOLS" = "1" ]; then
@@ -785,16 +795,6 @@ else
             dmsetup remove "$pname" 2>/dev/null
         done
     fi
-
-    # ── RESIZE METHOD 1: lptools (best for on-device recovery use) ──
-    # lptools is a single binary that handles dynamic partition management
-    # natively on-device: resize, map, unmap, unlimited-group, etc.
-    # It auto-detects slot suffix and updates ALL metadata slots.
-    # Available in many OrangeFox/TWRP builds (opt-in flag required).
-    # IMPORTANT: lptools size arguments are in BYTES (not KB, not sectors).
-    # Source: phhusson/vendor_lptools — strtoll(argv[3], NULL, 0) → ResizePartition(bytes)
-    HAS_LPTOOLS=0
-    which lptools >/dev/null 2>&1 && HAS_LPTOOLS=1
 
     if [ "$HAS_LPTOOLS" = "1" ]; then
         ui_print "  Using lptools to resize dynamic partitions..."
@@ -882,13 +882,22 @@ else
         # Remap dynamic partitions that were NOT already mapped by lptools create.
         # lptools create auto-maps the partition, so we must skip those to avoid double-mapping.
         ui_print "  Remapping dynamic partitions..."
+        REMAP_FAILED=""
         for pname in $DYNAMIC_PART_NAMES; do
             case "$CREATED_PARTS" in
                 *" $pname "*) continue ;;  # already mapped by lptools create
             esac
             lptools unmap "$pname" >/dev/null 2>&1
             lptools map "$pname" >/dev/null 2>&1
+            if [ $? -ne 0 ]; then
+                REMAP_FAILED="$REMAP_FAILED $pname"
+            fi
         done
+
+        if [ -n "$REMAP_FAILED" ]; then
+            ui_print "! WARNING: lptools map failed for:$REMAP_FAILED"
+            ui_print "  Attempting to continue — dd write may fail if device not ready."
+        fi
 
         ui_print "  lptools resize complete."
 
@@ -1242,7 +1251,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 
     PTARGET=$(resolve_target "$PNAME")
 
-    # Step A+B: Extract → decompress → write pipeline
+    # Step A+B+C: Extract → decompress → write via FIFO pipeline
     # Always use bs=4096 for extraction — much faster than bs=1.
     # The read count is rounded UP to include the last partial block;
     # decompressors (xz/gzip/bzip2) gracefully handle trailing bytes,
@@ -1256,9 +1265,12 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # Instead, we sync once after ALL partitions are written (see after
     # the loop below).
     #
-    # Also do NOT use conv=notrunc on dm (device-mapper) targets —
-    # dm linear devices are not regular files and don't support ftruncate(),
-    # which conv=notrunc may invoke, causing dd to fail with exit code 1.
+    # We use conv=notrunc on dd write. Without conv=notrunc, some dd
+    # implementations (e.g. busybox dd) try to ftruncate() the output
+    # after writing. On block devices (dm linear targets), ftruncate()
+    # fails with EINVAL, causing dd to exit with status 1. conv=notrunc
+    # prevents this truncation attempt. On toybox dd (which ignores
+    # unknown conv= flags), this is harmless.
     EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
     SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
     READ_COUNT=$(( (PCSIZE + 4095) / 4096 ))
@@ -1280,26 +1292,58 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     fi
     ui_print "  Flashing $PNAME to $PTARGET..."
 
-    # Use a 2-stage approach: extract+decompress to temp file, then dd write.
-    # This isolates errors — in sh, $? only captures the last pipe's exit code,
-    # so a 3-stage pipeline would mask decompression failures.
-    TMP_COMP="/tmp/ddpart_${{i}}.tmp"
-    dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
-        $DECOMP_CMD -d > "$TMP_COMP" 2>/dev/null
-    DECOMP_STATUS=$?
-    if [ $DECOMP_STATUS -ne 0 ]; then
-        ui_print "! ABORT: Decompression failed for $PNAME (status=$DECOMP_STATUS)"
-        rm -f "$TMP_COMP"
-        exit 1
-    fi
+    # Use a FIFO pipeline: extract+decompress → FIFO → dd write.
+    # This avoids writing the decompressed data to a temp file in /tmp,
+    # which would exhaust tmpfs for large partitions (e.g. 2327 MB
+    # decompressed data + 2045 MB bundle = 4372 MB in /tmp).
+    # The FIFO uses only ~64 KB of kernel pipe buffer — data flows
+    # directly from decompressor to the block device.
+    #
+    # Error handling: we run the extract+decompress in the background
+    # so we can capture BOTH the decompressor exit code and the dd
+    # write exit code. In sh, $? only captures the last pipe stage,
+    # so a naive 3-pipeline would mask decompression failures.
+    TMP_FIFO="/tmp/ddpart_${{i}}.fifo"
+    rm -f "$TMP_FIFO"
+    mkfifo "$TMP_FIFO" 2>/dev/null
+    FIFO_OK=$?
 
-    dd of="$PTARGET" bs=1048576 if="$TMP_COMP" 2>/dev/null
-    DD_STATUS=$?
-    rm -f "$TMP_COMP"
+    if [ "$FIFO_OK" = "0" ]; then
+        # FIFO available — pipeline via FIFO with full error capture
+        dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+            $DECOMP_CMD -d > "$TMP_FIFO" 2>/dev/null &
+        DECOMP_PID=$!
 
-    if [ $DD_STATUS -ne 0 ]; then
-        ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS)"
-        exit 1
+        dd of="$PTARGET" bs=1048576 conv=notrunc if="$TMP_FIFO" 2>/dev/null
+        DD_STATUS=$?
+
+        wait $DECOMP_PID 2>/dev/null
+        DECOMP_STATUS=$?
+
+        rm -f "$TMP_FIFO"
+
+        if [ $DECOMP_STATUS -ne 0 ]; then
+            ui_print "! ABORT: Decompression failed for $PNAME (status=$DECOMP_STATUS)"
+            exit 1
+        fi
+
+        if [ $DD_STATUS -ne 0 ]; then
+            ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS)"
+            exit 1
+        fi
+    else
+        # FIFO not available (very rare) — fall back to direct 3-pipeline.
+        # We lose decompressor error detection (sh $? = last pipe stage only),
+        # but this avoids tmpfs exhaustion by never writing a temp file.
+        dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+            $DECOMP_CMD -d 2>/dev/null | \
+            dd of="$PTARGET" bs=1048576 conv=notrunc 2>/dev/null
+        DD_STATUS=$?
+
+        if [ $DD_STATUS -ne 0 ]; then
+            ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS)"
+            exit 1
+        fi
     fi
 
     # Step C: Post-verify (conditional)
