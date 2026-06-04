@@ -1248,23 +1248,54 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # decompressors (xz/gzip/bzip2) gracefully handle trailing bytes,
     # and for uncompressed data (cat), extra bytes (max 4095) are
     # harmless since partitions are sized >= UNC_SIZE.
-    # No temp file needed — direct pipeline is faster and uses less RAM.
     #
     # IMPORTANT: Do NOT use conv=fsync on dd write!
     # conv=fsync forces an fsync() after every write block, which makes
     # writing large partitions (2+ GB) extremely slow on eMMC/UFS storage.
     # For a 2327 MB partition with bs=4096, that's ~597,000 fsync calls.
-    # Instead, we use conv=notrunc (safe default) and sync once after
-    # ALL partitions are written (see after the loop below).
+    # Instead, we sync once after ALL partitions are written (see after
+    # the loop below).
+    #
+    # Also do NOT use conv=notrunc on dm (device-mapper) targets —
+    # dm linear devices are not regular files and don't support ftruncate(),
+    # which conv=notrunc may invoke, causing dd to fail with exit code 1.
     EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
     SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
     READ_COUNT=$(( (PCSIZE + 4095) / 4096 ))
 
+    # Verify block device exists and is writable before flashing.
+    # After lptools resize + remap, the dm device may take a moment to
+    # appear, or the by-name symlink may not be updated yet.
+    if [ ! -e "$PTARGET" ]; then
+        ui_print "  Waiting for $PTARGET to appear..."
+        WAIT_COUNT=0
+        while [ ! -e "$PTARGET" ] && [ $WAIT_COUNT -lt 30 ]; do
+            sleep 1
+            WAIT_COUNT=$(( WAIT_COUNT + 1 ))
+        done
+        if [ ! -e "$PTARGET" ]; then
+            ui_print "! ABORT: Block device $PTARGET not found after 30s wait"
+            exit 1
+        fi
+    fi
     ui_print "  Flashing $PNAME to $PTARGET..."
+
+    # Use a 2-stage approach: extract+decompress to temp file, then dd write.
+    # This isolates errors — in sh, $? only captures the last pipe's exit code,
+    # so a 3-stage pipeline would mask decompression failures.
+    TMP_COMP="/tmp/ddpart_${{i}}.tmp"
     dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
-        $DECOMP_CMD -d 2>/dev/null | \
-        dd of="$PTARGET" bs=1048576 conv=notrunc 2>/dev/null
+        $DECOMP_CMD -d > "$TMP_COMP" 2>/dev/null
+    DECOMP_STATUS=$?
+    if [ $DECOMP_STATUS -ne 0 ]; then
+        ui_print "! ABORT: Decompression failed for $PNAME (status=$DECOMP_STATUS)"
+        rm -f "$TMP_COMP"
+        exit 1
+    fi
+
+    dd of="$PTARGET" bs=1048576 if="$TMP_COMP" 2>/dev/null
     DD_STATUS=$?
+    rm -f "$TMP_COMP"
 
     if [ $DD_STATUS -ne 0 ]; then
         ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS)"
