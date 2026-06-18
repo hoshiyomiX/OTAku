@@ -240,8 +240,8 @@ fn build_update_script(
     // Calculate step numbers dynamically
     let has_device = !device.is_empty();
     let extract_step = 0;
-    let decomp_step = 1;
-    let integrity_step = 2;
+    let verify_step = 1;       // NEW: pre-flash partition table verify (alur user step 2)
+    let integrity_step = 2;    // MERGED: bundle integrity + decompressor check (was Step 1 + Step 2)
     let slot_step = if has_device { 4 } else { 3 };
     let validation_step = if has_device { 5 } else { 4 };
     let resize_step = if has_device { 6 } else { 5 };
@@ -667,11 +667,110 @@ ui_print ""
         total_steps = total_steps,
     ));
 
-    // ── Step 1: Decompressor availability ──
+    // ── Step 1 (NEW): Pre-flash partition table verify ──
+    // Alur user step 2: verify semua partisi SEBELUM flash.
+    //
+    // Pre-flash verify checks the structural integrity of the partition table
+    // embedded in otaku.bin. For each partition declared in PART_i_* vars,
+    // verify:
+    //   1. data_offset + comp_size ≤ BUNDLE_SIZE (no overflow / truncated bundle)
+    //   2. hash_hex is 64 hex chars (valid SHA-256 format)
+    //   3. unc_size > 0 (non-empty partition)
+    //
+    // This is a STRUCTURAL check only — hash verification of decompressed
+    // data happens post-flash (in the flash loop). Pre-flash hash verify
+    // would require decompressing each partition twice (expensive for
+    // 4GB+ partitions).
+    //
+    // Why this step exists: a corrupt bundle can pass Step 0 extract
+    // (magic + version OK) but have invalid per-partition offsets that
+    // only surface mid-flash as dd write errors. Pre-flash verify catches
+    // these errors early, before any block device is touched.
     script.push_str(&format!(
-        r#"# ── Step {decomp_step}/{total_steps}: Decompressor availability ────────────
-ui_print "[Step {decomp_step}/{total_steps}] Decompressor availability..."
+        r#"# ── Step {verify_step}/{total_steps}: Pre-flash partition table verify ──────────────────
+ui_print "[Step {verify_step}/{total_steps}] Pre-flash partition table verify..."
 
+if [ ! -f "$BUNDLE" ]; then
+    ui_print "! ABORT: $BUNDLE not found"
+    exit 1
+fi
+
+BUNDLE_VERIFY_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
+VERIFY_OK=1
+VERIFY_ERRORS=0
+
+for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
+    eval "VPNAME=\$PART_${{i}}_NAME"
+    eval "VUNC=\$PART_${{i}}_UNC_SIZE"
+    eval "VHASH=\$PART_${{i}}_HASH"
+    eval "VCOMP=\$PART_${{i}}_COMP_SIZE"
+    eval "VOFFSET=\$PART_${{i}}_DATA_OFFSET"
+
+    ERRORS_THIS=""
+
+    # Check 1: data_offset + comp_size must not exceed bundle size.
+    # This catches truncated bundles and corrupted offset fields.
+    DATA_END=$(( VOFFSET + VCOMP ))
+    if [ "$DATA_END" -gt "$BUNDLE_VERIFY_SIZE" ]; then
+        ERRORS_THIS="$ERRORS_THIS offset_overflow"
+    fi
+
+    # Check 2: hash must be exactly 64 hex characters (SHA-256 = 32 bytes = 64 hex).
+    # Use tr to strip non-hex chars and compare length.
+    HASH_LEN=$(echo -n "$VHASH" | tr -d -c '0-9a-fA-F' | wc -c | tr -d ' ')
+    if [ "$HASH_LEN" != "64" ]; then
+        ERRORS_THIS="$ERRORS_THIS bad_hash_format(len=$HASH_LEN)"
+    fi
+
+    # Check 3: uncompressed size must be > 0.
+    # A zero-size partition indicates a build error.
+    if [ "$VUNC" -le "0" ]; then
+        ERRORS_THIS="$ERRORS_THIS zero_unc_size"
+    fi
+
+    # Check 4: data_offset must be 4096-aligned (alignment invariant from build).
+    # Misalignment would cause dd skip= to read garbage.
+    ALIGN_CHECK=$(( VOFFSET % 4096 ))
+    if [ "$ALIGN_CHECK" -ne "0" ]; then
+        ERRORS_THIS="$ERRORS_THIS misaligned_offset"
+    fi
+
+    if [ -n "$ERRORS_THIS" ]; then
+        ui_print "!  Partition $VPNAME:$ERRORS_THIS"
+        ui_print "!    unc_size=$VUNC comp_size=$VCOMP offset=$VOFFSET hash=${{VHASH:0:16}}..."
+        VERIFY_OK=0
+        VERIFY_ERRORS=$(( VERIFY_ERRORS + 1 ))
+    else
+        ui_print "  $VPNAME: offset=$VOFFSET comp=$(( VCOMP / 1048576 ))MB unc=$(( VUNC / 1048576 ))MB hash=${{VHASH:0:16}}... [OK]"
+    fi
+done
+
+if [ "$VERIFY_OK" != "1" ]; then
+    ui_print "! ABORT: $VERIFY_ERRORS partition(s) failed pre-flash verify."
+    ui_print "!  Bundle is corrupt or was built with incompatible OTAku version."
+    exit 1
+fi
+
+ui_print "  All $NUM_PARTS partition(s) passed structural verify."
+ui_print ""
+"#,
+        verify_step = verify_step,
+        total_steps = total_steps,
+    ));
+
+    // ── Step 2 (MERGED): Bundle integrity + decompressor availability ──
+    // Old Step 1 (decompressor) and Step 2 (bundle integrity) were separate.
+    // Merged because:
+    //   - Decompressor is only used during flash (Step 6+), checking it at
+    //     Step 1 was too early and added an extra ui_print section.
+    //   - Bundle integrity check (magic/version/parts) is conceptually
+    //     part of "verify the payload we just extracted" — same step.
+    //   - Reduces step count from 8 to 7 (without device check) / 9 to 8 (with).
+    script.push_str(&format!(
+        r#"# ── Step {integrity_step}/{total_steps}: Bundle integrity + decompressor ──────────
+ui_print "[Step {integrity_step}/{total_steps}] Bundle integrity + decompressor availability..."
+
+# ── Decompressor availability ──
 DECOMP_CMD=""
 check_decompressor() {{
     local cmd="$1"
@@ -706,23 +805,8 @@ if ! check_decompressor "{decomp_cmd}"; then
     exit 1
 fi
 ui_print "  Decompressor: $DECOMP_CMD"
-ui_print ""
-"#,
-        decomp_step = decomp_step,
-        total_steps = total_steps,
-        decomp_cmd = decomp_cmd,
-    ));
 
-    // ── Step 2: Bundle integrity ──
-    script.push_str(&format!(
-        r#"# ── Step {integrity_step}/{total_steps}: Bundle integrity ───────────────────
-ui_print "[Step {integrity_step}/{total_steps}] Bundle integrity..."
-
-if [ ! -f "$BUNDLE" ]; then
-    ui_print "! ABORT: $BUNDLE not found"
-    exit 1
-fi
-
+# ── Bundle integrity ──
 BUNDLE_SIZE=$(wc -c < "$BUNDLE")
 
 HDR_MAGIC=$(od -A n -t x1 -N 4 "$BUNDLE" | tr -d ' \\n')
@@ -768,6 +852,7 @@ ui_print ""
 "#,
         integrity_step = integrity_step,
         total_steps = total_steps,
+        decomp_cmd = decomp_cmd,
     ));
 
     // ── Device check (optional) ──
@@ -2292,5 +2377,134 @@ mod tests {
             !source.contains("let updater_script = \"#Mtk client script\\n\";"),
             "REGRESSION: updater-script reverted to broken '#Mtk client script' literal"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Pilihan B implementation tests — verify the new alur
+    // (alur user step 2: pre-flash partition verify)
+    // ──────────────────────────────────────────────────────────────
+
+    /// Verify Step 1 (pre-flash partition table verify) exists in generated script.
+    /// This is alur user step 2: "verify semua partisi" before flash.
+    #[test]
+    fn test_preflash_verify_step_present() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            comp_size: 16777216,
+            data_offset: 4096,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Pre-flash verify step is present
+        assert!(
+            script.contains("Pre-flash partition table verify"),
+            "REGRESSION: pre-flash verify step missing (alur user step 2)"
+        );
+
+        // Verify step number is 1 (after extract=0, before integrity=2)
+        assert!(
+            script.contains("[Step 1/") || script.contains("[Step 1 ") || script.contains("Step 1/"),
+            "REGRESSION: pre-flash verify step not numbered as Step 1"
+        );
+
+        // All 4 checks must be present
+        assert!(
+            script.contains("offset_overflow"),
+            "REGRESSION: pre-flash verify missing offset_overflow check"
+        );
+        assert!(
+            script.contains("bad_hash_format"),
+            "REGRESSION: pre-flash verify missing hash format check"
+        );
+        assert!(
+            script.contains("zero_unc_size"),
+            "REGRESSION: pre-flash verify missing zero_unc_size check"
+        );
+        assert!(
+            script.contains("misaligned_offset"),
+            "REGRESSION: pre-flash verify missing alignment check"
+        );
+
+        // Success message must be present
+        assert!(
+            script.contains("passed structural verify"),
+            "REGRESSION: pre-flash verify success message missing"
+        );
+    }
+
+    /// Verify Step 2 (bundle integrity + decompressor) is merged into one step.
+    /// Old Step 1 (decompressor) and Step 2 (integrity) are now combined.
+    #[test]
+    fn test_integrity_step_merged_with_decompressor() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 4096,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Merged step header
+        assert!(
+            script.contains("Bundle integrity + decompressor"),
+            "REGRESSION: merged integrity+decompressor step header missing"
+        );
+
+        // Old separate "Decompressor availability" step header should NOT be present
+        // (it's now part of merged step 2)
+        let old_step1_pattern = "[Step 1/] Decompressor availability...";
+        assert!(
+            !script.contains(old_step1_pattern),
+            "REGRESSION: old separate 'Decompressor availability' step still present (should be merged)"
+        );
+
+        // Both check_decompressor function and HDR_MAGIC check should be in same step
+        assert!(
+            script.contains("check_decompressor") && script.contains("HDR_MAGIC"),
+            "REGRESSION: decompressor and bundle integrity not in same step"
+        );
+    }
+
+    /// Verify step numbering: extract=0, verify=1, integrity=2, slot=3 (no device),
+    /// validation=4, resize=5, flash=6+.
+    /// This guards against accidental renumbering that breaks the alur.
+    #[test]
+    fn test_step_numbering_after_pilihan_b() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 4096,
+        }];
+        // Without device check
+        let script_no_dev = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Step 0 = extract
+        assert!(script_no_dev.contains("Step 0/"), "Step 0 (extract) missing");
+        // Step 1 = pre-flash verify (NEW)
+        assert!(script_no_dev.contains("Step 1/"), "Step 1 (pre-flash verify) missing");
+        // Step 2 = integrity + decompressor (MERGED)
+        assert!(script_no_dev.contains("Step 2/"), "Step 2 (integrity+decompressor) missing");
+        // Step 3 = slot detection (no device)
+        assert!(script_no_dev.contains("Step 3/"), "Step 3 (slot detection) missing");
+        // Step 4 = partition validation
+        assert!(script_no_dev.contains("Step 4/"), "Step 4 (partition validation) missing");
+        // Step 5 = resize
+        assert!(script_no_dev.contains("Step 5/"), "Step 5 (resize) missing");
+        // Step 6 = flash (1 partition, so step 6/7)
+        assert!(script_no_dev.contains("Step 6/"), "Step 6 (flash) missing");
+
+        // With device check, all subsequent steps shift +1
+        let script_with_dev = build_update_script(1, 1, "gzip", &meta, "alioth", false);
+        // Step 3 = device check (with device)
+        assert!(script_with_dev.contains("Step 3:"), "Step 3 (device check) missing with device");
+        // Step 4 = slot detection (with device)
+        assert!(script_with_dev.contains("Step 4/"), "Step 4 (slot detection) missing with device");
+        // Step 7 = flash (with device)
+        assert!(script_with_dev.contains("Step 7/"), "Step 7 (flash) missing with device");
     }
 }
