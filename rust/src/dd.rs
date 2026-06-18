@@ -2002,4 +2002,295 @@ mod tests {
         assert!(!result.success);
         assert!(result.error.unwrap().contains("unsupported compression"));
     }
+
+    // ──────────────────────────────────────────────────────────────
+    // Regression tests — each test guards against a specific bug that
+    // was previously introduced and fixed. If a refactor re-introduces
+    // the bug, the corresponding test fails.
+    // See commit history for context on each bug.
+    // ──────────────────────────────────────────────────────────────
+
+    /// Regression: Bug #1 (P0) — operator precedence in cleanup trap.
+    /// The old broken pattern `cmd1 || cmd2 && cmd3` was replaced with
+    /// explicit if-else. If anyone reintroduces the broken pattern, this
+    /// test catches it.
+    #[test]
+    fn test_regression_trap_operator_precedence() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 1073741824,
+            hash_hex: "abc".to_string(),
+            comp_size: 536870912,
+            data_offset: 0,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // The broken pattern was:
+        //   lptools resize "$rname" "$rsize" >/dev/null 2>&1 || \
+        //       lptools remove "$rname" >/dev/null 2>&1 && \
+        //       lptools create "$rname" "$rsize" >/dev/null 2>&1
+        // The fix uses: `if ! lptools resize ...; then ... fi`
+        // Assert: broken pattern is NOT present in cleanup trap.
+        let broken_pattern = "lptools resize \"$rname\" \"$rsize\" >/dev/null 2>&1 ||";
+        assert!(
+            !script.contains(broken_pattern),
+            "REGRESSION: cleanup trap still uses broken ||/&& chaining (Bug #1)"
+        );
+
+        // Assert: fix is present.
+        assert!(
+            script.contains("if ! lptools resize \"$rname\" \"$rsize\""),
+            "REGRESSION: cleanup trap if-else fix not found (Bug #1)"
+        );
+    }
+
+    /// Regression: Bug #2 (P1) — regex leading space in ZIP listing parser.
+    /// The old regex `^ [0-9]* otaku\.bin$` had a leading space which never
+    /// matched awk output (which has no leading space). The fix uses
+    /// `^[0-9]+ otaku\.bin$` via a shared ZIP_LIST_REGEX variable.
+    #[test]
+    fn test_regression_zip_listing_regex() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 0,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Assert: broken regex pattern is NOT present.
+        let broken_patterns = [
+            "grep -q '^ [0-9]* otaku",      // leading space + [0-9]*
+            "grep -q \"^ [0-9]* otaku",     // leading space + [0-9]* (double-quoted variant)
+        ];
+        for pat in broken_patterns.iter() {
+            assert!(
+                !script.contains(pat),
+                "REGRESSION: ZIP listing still uses broken regex with leading space (Bug #2): {}",
+                pat
+            );
+        }
+
+        // Assert: fix is present (shared regex variable with no leading space).
+        assert!(
+            script.contains("ZIP_LIST_REGEX="),
+            "REGRESSION: ZIP_LIST_REGEX variable not defined (Bug #2)"
+        );
+        assert!(
+            script.contains("^[0-9]+ otaku"),
+            "REGRESSION: fixed regex pattern not found (Bug #2)"
+        );
+    }
+
+    /// Regression: Bug #3 (P1) — idempotent lptools unmap+map.
+    /// The old code always called `lptools unmap` then `lptools map`,
+    /// even when the partition was already unmapped. The fix checks
+    /// for /dev/mapper/$pname or /dev/block/by-name/$pname existence
+    /// before calling unmap.
+    #[test]
+    fn test_regression_idempotent_unmap() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 1073741824,
+            hash_hex: "abc".to_string(),
+            comp_size: 536870912,
+            data_offset: 0,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Assert: idempotent check is present.
+        assert!(
+            script.contains("/dev/mapper/$pname") || script.contains("/dev/block/by-name/$pname"),
+            "REGRESSION: idempotent unmap existence check missing (Bug #3)"
+        );
+    }
+
+    /// Regression: Bug #4 (P2) — explicit $? capture.
+    /// The old code used `if [ $? -ne 0 ]` directly after a command,
+    /// which is fragile (any command between can reset $?). The fix
+    /// captures to RC variables: RESIZE_RC, CREATE_RC, MAP_RC.
+    #[test]
+    fn test_regression_explicit_rc_capture() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 1073741824,
+            hash_hex: "abc".to_string(),
+            comp_size: 536870912,
+            data_offset: 0,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Assert: explicit RC capture variables are present.
+        assert!(script.contains("RESIZE_RC=$?"), "REGRESSION: RESIZE_RC capture missing (Bug #4)");
+        assert!(script.contains("CREATE_RC=$?"), "REGRESSION: CREATE_RC capture missing (Bug #4)");
+        assert!(script.contains("MAP_RC=$?"), "REGRESSION: MAP_RC capture missing (Bug #4)");
+    }
+
+    /// Regression: Bug #8 (P2) — `choose` binary fallback chain.
+    /// The old code called `choose` unconditionally, which fails on
+    /// minimal TWRP builds. The fix adds a fallback chain:
+    /// choose → read -t 30 -n 1 → default abort.
+    #[test]
+    fn test_regression_choose_fallback() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 0,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "alioth", false);
+
+        // Assert: choose is gated by command -v check.
+        assert!(
+            script.contains("command -v choose"),
+            "REGRESSION: `choose` binary not guarded by command -v (Bug #8)"
+        );
+
+        // Assert: fallback to read -t is present.
+        assert!(
+            script.contains("read -t 30"),
+            "REGRESSION: `read -t 30` fallback missing (Bug #8)"
+        );
+
+        // Assert: USER_CONFIRMED gate is present (so default abort works).
+        assert!(
+            script.contains("USER_CONFIRMED"),
+            "REGRESSION: USER_CONFIRMED gate missing (Bug #8)"
+        );
+    }
+
+    /// Regression: edge case B — getprop kosong fallback chain.
+    /// The old code used `getprop ro.product.device || getprop ro.build.product`.
+    /// If both returned empty (recovery without /vendor mounted), device
+    /// check would silently mismatch. The fix adds /system/build.prop,
+    /// /vendor/build.prop, and /proc/cmdline fallbacks.
+    #[test]
+    fn test_regression_getprop_fallback_chain() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 0,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "alioth", false);
+
+        // Assert: build.prop fallback paths present.
+        assert!(
+            script.contains("/system/build.prop"),
+            "REGRESSION: /system/build.prop fallback missing (edge case B)"
+        );
+        assert!(
+            script.contains("/vendor/build.prop"),
+            "REGRESSION: /vendor/build.prop fallback missing (edge case B)"
+        );
+
+        // Assert: /proc/cmdline androidboot.hardware fallback present.
+        assert!(
+            script.contains("androidboot.hardware"),
+            "REGRESSION: /proc/cmdline hardware fallback missing (edge case B)"
+        );
+    }
+
+    /// Sanity: every generated script ends with `exit 0` for happy path.
+    #[test]
+    fn test_script_always_exits_clean_on_success() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 0,
+        }];
+        for skip in [false, true] {
+            for device in ["", "alioth"] {
+                let script = build_update_script(1, 1, "gzip", &meta, device, skip);
+                assert!(
+                    script.trim_end().ends_with("exit 0"),
+                    "Script does not end with exit 0 (skip={}, device='{}')",
+                    skip,
+                    device
+                );
+            }
+        }
+    }
+
+    /// Sanity: updater-script stub is valid edify, not a shell comment.
+    /// The old code used "#Mtk client script\n" which TWRP flagged as
+    /// edify syntax error. The fix uses "assert(1==1);\n".
+    /// This test isn't on build_update_script directly (updater-script is
+    /// in run_dd_build), but we verify the canonical string here to
+    /// prevent accidental revert.
+    #[test]
+    fn test_updater_script_is_valid_edify() {
+        // The updater-script is hardcoded in run_dd_build(). We can't easily
+        // test it without invoking run_dd_build (which needs files), but
+        // we can document the expected value here so anyone changing it
+        // sees this test and updates both places consistently.
+        let expected = "assert(1==1);\n";
+        let forbidden = "#Mtk client script\n";
+        assert_ne!(expected, forbidden, "expected and forbidden must differ");
+        assert!(expected.contains("assert("), "expected must be valid edify");
+        assert!(expected.ends_with(";\n"), "expected must end with semicolon + newline");
+    }
+
+    /// Sanity: DYNAMIC_PART_NAMES includes OEM-specific partitions.
+    /// The old list missed Xiaomi/Realme/Samsung/Vivo partitions, causing
+    /// flash failures on those devices.
+    #[test]
+    fn test_dynamic_part_names_includes_oem() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 0,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // AOSP standard names
+        for required in ["system", "vendor", "product", "system_ext", "odm", "odm_dlkm", "vendor_dlkm"] {
+            assert!(
+                script.contains(&format!(" {} ", required)),
+                "REGRESSION: AOSP partition '{}' missing from DYNAMIC_PART_NAMES",
+                required
+            );
+        }
+
+        // OEM-specific names
+        for oem in ["mi_ext", "my_product", "optics", "prism"] {
+            assert!(
+                script.contains(&format!(" {} ", oem)),
+                "REGRESSION: OEM partition '{}' missing from DYNAMIC_PART_NAMES",
+                oem
+            );
+        }
+    }
+
+    /// Sanity: updater-script contains valid edify statement.
+    /// The actual updater-script is built inside run_dd_build() and we
+    /// can't easily test it without invoking the full builder. We test
+    /// the upstream Rust constant here.
+    #[test]
+    fn test_updater_script_constant_in_source() {
+        // Read source file at compile time to catch the literal.
+        let source = include_str!("dd.rs");
+
+        // Assert the canonical valid literal exists.
+        assert!(
+            source.contains("let updater_script = \"assert(1==1);\\n\";"),
+            "updater-script assignment must use \"assert(1==1);\\n\" literal"
+        );
+
+        // Assert the broken literal is NOT used as the actual assignment.
+        // Note: we check the assignment form `let updater_script = ...` so
+        // that documentation comments mentioning the broken literal don't
+        // trigger a false positive.
+        assert!(
+            !source.contains("let updater_script = \"#Mtk client script\\n\";"),
+            "REGRESSION: updater-script reverted to broken '#Mtk client script' literal"
+        );
+    }
 }

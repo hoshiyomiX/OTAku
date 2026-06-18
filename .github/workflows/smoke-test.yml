@@ -1,0 +1,255 @@
+name: Smoke Test
+
+# Runs BEFORE the main build workflow. Catches shell-level bugs and
+# Rust unit test failures early — a build takes ~10 minutes per ABI,
+# so failing fast saves CI minutes and gives faster feedback.
+#
+# Triggers:
+#   - Any push to main (excluding docs-only changes)
+#   - Any PR to main
+#   - Manual dispatch
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-test:
+    name: Smoke Test (shellcheck + Rust unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 1: Rust unit tests (host target — no NDK needed) ──
+      # These tests run on the host x86_64-linux, not Android. They verify
+      # the build_update_script() generator produces correct shell scripts
+      # without actually running them. The unit tests include regression
+      # tests that catch specific bugs we previously fixed.
+      - name: Install Rust toolchain (stable, host only)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-smoke-
+
+      - name: Run cargo test (host target, no Android cross-compile)
+        working-directory: rust
+        run: cargo test --verbose --lib 2>&1
+
+      - name: Show test summary on failure
+        if: failure()
+        working-directory: rust
+        run: |
+          echo "=== Test failure — see output above ==="
+          echo "Common causes:"
+          echo "  1. Refactor reintroduced a previously-fixed bug (check regression tests)"
+          echo "  2. Format string in build_update_script() changed without updating tests"
+          echo "  3. New code path added but not covered by tests"
+          exit 1
+
+      # ── Step 2: Extract generated shell script from Rust source ──
+      # We can't run cargo run (would need full app context), so we extract
+      # the embedded shell scripts from dd.rs source and lint them with
+      # shellcheck. This catches shell-level bugs that Rust unit tests
+      # can't easily verify (syntax errors, missing quotes, etc).
+      - name: Extract embedded shell scripts from dd.rs
+        run: |
+          set -e
+          mkdir -p /tmp/extracted
+          python3 << 'PYEOF'
+          import re
+          from pathlib import Path
+
+          src = Path("rust/src/dd.rs").read_text()
+
+          # Find all raw string literals r#"..."# in the source.
+          # These contain the embedded shell scripts.
+          # For each, write to a separate .sh file for shellcheck.
+          pattern = re.compile(r'r#"(.*?)"#', re.DOTALL)
+          matches = pattern.findall(src)
+
+          if not matches:
+              print("ERROR: no raw string literals found in dd.rs")
+              exit(1)
+
+          shell_count = 0
+          for i, raw in enumerate(matches):
+              # Heuristic: only lint strings that look like shell (contain '#!/sbin/sh' or 'ui_print')
+              if "#!/sbin/sh" in raw or "ui_print" in raw or "lptools" in raw:
+                  # Unescape Rust string escapes that affect shell parsing
+                  # {{  -> {  (Rust format string escape)
+                  # }}  -> }
+                  # \\  -> \  (escaped backslash)
+                  shell = raw.replace("{{", "{").replace("}}", "}")
+                  # Don't unescape \\ — backslashes in shell regex are intentional
+                  out_path = Path(f"/tmp/extracted/script_{shell_count}.sh")
+                  out_path.write_text(shell)
+                  print(f"  Extracted: {out_path} ({len(shell)} bytes)")
+                  shell_count += 1
+
+          if shell_count == 0:
+              print("ERROR: no shell-like raw strings found")
+              exit(1)
+
+          print(f"\nTotal shell scripts extracted: {shell_count}")
+          PYEOF
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --version
+
+      - name: Run shellcheck on extracted scripts
+        run: |
+          set +e  # don't fail immediately — collect all errors
+          EXIT_CODE=0
+          for f in /tmp/extracted/*.sh; do
+            echo "=========================================="
+            echo "Linting: $f"
+            echo "=========================================="
+            # SC2086 (word splitting unquoted vars) — false positive in many places,
+            # we intentionally rely on word splitting for $LPMAKE_PARTS etc.
+            # SC2154 (var referenced but not assigned) — false positive: vars are
+            # assigned in parent script scope (e.g. PSIZE from eval).
+            # SC2034 (var appears unused) — false positive: vars used in templated
+            # context that shellcheck can't see.
+            # SC1090/SC1091 (sourcing) — N/A, no source statements
+            # SC2128 (expand array as ${arr}) — N/A
+            # SC2236 (use -z over ! -n) — style preference, not a bug
+            shellcheck \
+              --exclude=SC2086,SC2154,SC2034,SC1090,SC1091,SC2128,SC2236,SC2155,SC2046,SC2004 \
+              --shell=sh \
+              "$f"
+            RC=$?
+            if [ $RC -ne 0 ]; then
+              echo "FAIL: $f (exit $RC)"
+              EXIT_CODE=$RC
+            else
+              echo "PASS: $f"
+            fi
+            echo ""
+          done
+          exit $EXIT_CODE
+
+      # ── Step 3: Brace balance check on Rust source ──
+      # Catches a class of bugs where format!() substitution breaks
+      # because {{ or }} is missing/unbalanced. This is hard to verify
+      # without compiling — we run cargo test above, but brace imbalance
+      # would surface as compile error. This is a redundant safety net.
+      - name: Verify Rust brace balance
+        run: |
+          python3 << 'PYEOF'
+          content = open("rust/src/dd.rs").read()
+          bo = content.count("{")
+          bc = content.count("}")
+          diff = bo - bc
+          if diff != 0:
+              print(f"FAIL: brace imbalance — {{ = {bo}, }} = {bc}, diff = {diff}")
+              exit(1)
+          print(f"PASS: brace balance {bo}/{bc}")
+
+          # Also check raw string literals are balanced
+          ro = content.count('r#"')
+          rc = content.count('"#')
+          # Note: '"#' can appear inside raw strings, so this is approximate
+          print(f"Info: raw string open r#\" = {ro}, close \"# = {rc}")
+          PYEOF
+
+      # ── Step 4: Sanity check — verify all format!() args are present ──
+      # build_update_script uses named args: {script_version}, {header_info},
+      # {part_vars}, etc. If any arg is missing in the format!() call but
+      # referenced in the string, compilation fails. We can't easily
+      # verify this without compiling, but we already did cargo test above.
+      - name: Sanity check format args
+        run: |
+          python3 << 'PYEOF'
+          content = open("rust/src/dd.rs").read()
+
+          # All named format args used in build_update_script
+          required_args = [
+              "script_version", "header_info", "part_vars", "num_parts", "compress_id",
+              "extract_step", "decomp_step", "integrity_step", "slot_step",
+              "validation_step", "resize_step", "flash_step_offset",
+              "num_parts_minus_1", "total_steps", "verify_block", "verified_word",
+              "device_check_step", "device",
+          ]
+          missing = []
+          for arg in required_args:
+              if arg not in content:
+                  missing.append(arg)
+
+          if missing:
+              print(f"FAIL: missing format args in dd.rs: {missing}")
+              exit(1)
+          print(f"PASS: all {len(required_args)} format args present")
+          PYEOF
+
+      # ── Step 5: Verify ZIP structure of a sample build ──
+      # We can't run the full Rust build pipeline in smoke test (it needs
+      # Android NDK), but we CAN verify the ZIP layout that run_dd_build
+      # produces by checking the expected entries are documented in source.
+      - name: Verify ZIP structure expectations in source
+        run: |
+          python3 << 'PYEOF'
+          content = open("rust/src/dd.rs").read()
+
+          # All expected ZIP entries that run_dd_build must create
+          required_entries = [
+              ("otaku.bin", "bundle binary"),
+              ("flash_info.txt", "human-readable metadata"),
+              ("META-INF/com/google/android/update-binary", "TWRP/OrangeFox flasher script"),
+              ("META-INF/com/google/android/updater-script", "edify stub"),
+          ]
+          missing = []
+          for entry, desc in required_entries:
+              if entry not in content:
+                  missing.append(f"{entry} ({desc})")
+
+          if missing:
+              print(f"FAIL: missing ZIP entry references in dd.rs: {missing}")
+              exit(1)
+          print(f"PASS: all {len(required_entries)} ZIP entries referenced in source")
+          PYEOF
+
+      # ── Step 6: Summary ──
+      - name: Smoke test summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "  Smoke Test Summary"
+          echo "=========================================="
+          echo "  Workflow: ${{ github.workflow }}"
+          echo "  Commit:   ${{ github.sha }}"
+          echo "  Branch:   ${{ github.ref_name }}"
+          echo "  Actor:    ${{ github.actor }}"
+          echo ""
+          echo "Steps completed:"
+          echo "  1. Rust unit tests (host target)"
+          echo "  2. Shellcheck on extracted shell scripts"
+          echo "  3. Rust brace balance check"
+          echo "  4. Format args presence check"
+          echo "  5. ZIP structure expectations check"
+          echo "=========================================="
