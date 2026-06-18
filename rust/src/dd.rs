@@ -255,7 +255,29 @@ fn build_update_script(
             r#"
 # ── Step {device_check_step}: Device compatibility ──────────────────
 TARGET_DEVICE="{device}"
-CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null || getprop ro.build.product 2>/dev/null)
+CURRENT_DEVICE=""
+
+# Try multiple sources for the device codename — getprop can return empty
+# in recoveries that don't mount /vendor or that boot from fastboot boot
+# (no full system initialization). Fall back to build.prop files which
+# are static and always available if the partition is mounted.
+CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null)
+if [ -z "$CURRENT_DEVICE" ]; then
+    CURRENT_DEVICE=$(getprop ro.build.product 2>/dev/null)
+fi
+# Fallback 1: parse /system/build.prop (mounted /system)
+if [ -z "$CURRENT_DEVICE" ] && [ -f /system/build.prop ]; then
+    CURRENT_DEVICE=$(grep -E '^ro\.product\.device=' /system/build.prop 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' \r')
+fi
+# Fallback 2: parse /vendor/build.prop (mounted /vendor)
+if [ -z "$CURRENT_DEVICE" ] && [ -f /vendor/build.prop ]; then
+    CURRENT_DEVICE=$(grep -E '^ro\.product\.device=' /vendor/build.prop 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' \r')
+fi
+# Fallback 3: /proc/cmdline androidboot.hardware (last resort — not exact device,
+# but at least identifies the SoC family)
+if [ -z "$CURRENT_DEVICE" ]; then
+    CURRENT_DEVICE=$(cat /proc/cmdline 2>/dev/null | tr ' ' '\n' | grep -o 'androidboot\.hardware=[^ ]*' | cut -d= -f2)
+fi
 
 # Support comma-separated device list
 DEVICE_MATCH=0
@@ -275,16 +297,39 @@ if [ -n "$TARGET_DEVICE" ]; then
         ui_print ""
         ui_print "  WARNING: Device mismatch!"
         ui_print "  Expected : $TARGET_DEVICE"
-        ui_print "  Current  : $CURRENT_DEVICE"
+        ui_print "  Current  : ${{CURRENT_DEVICE:-(unknown)}}"
         ui_print ""
         ui_print "  Flashing on wrong device may BRICK it."
-        ui_print "  Press Power to continue, Vol- to abort."
-        ui_print ""
-        choose -t 30 "Continue?" "Yes" "No"
-        if [ $? -ne 0 ]; then
+
+        # Interactive confirmation with fallback chain:
+        #   1. `choose` binary (TWRP native, supported by OrangeFox)
+        #   2. `read -t -n 1` (busybox/toybox interactive read)
+        #   3. Default ABORT (safer than silently continuing)
+        # If `choose` is missing (minimal TWRP builds), the old code would
+        # auto-abort because the failed `choose` returned non-zero. Now we
+        # fall through to read, then to a default abort.
+        USER_CONFIRMED=0
+        if command -v choose >/dev/null 2>&1; then
+            ui_print "  Press Power to continue, Vol- to abort."
+            choose -t 30 "Continue?" "Yes" "No" 2>/dev/null
+            [ $? -eq 0 ] && USER_CONFIRMED=1
+        elif command -v read >/dev/null 2>&1; then
+            ui_print "  Press Y to continue, any other key to abort (30s timeout):"
+            # `read -t 30 -n 1` reads 1 char with 30s timeout.
+            # Exit code 0 = char read, non-zero = timeout/EOF.
+            ANSWER=""
+            read -t 30 -n 1 ANSWER 2>/dev/null
+            RC=$?
+            if [ $RC -eq 0 ] && ([ "$ANSWER" = "y" ] || [ "$ANSWER" = "Y" ]); then
+                USER_CONFIRMED=1
+            fi
+        fi
+
+        if [ "$USER_CONFIRMED" != "1" ]; then
             ui_print "! ABORT: User cancelled (device mismatch)"
             exit 1
         fi
+        ui_print "  User confirmed — continuing despite device mismatch."
     else
         ui_print "  Device: $CURRENT_DEVICE [OK]"
     fi
@@ -463,9 +508,16 @@ cleanup_abort() {{
             [ -z "$rname" ] && continue
             [ -z "$rsize" ] && continue
             ui_print "  Restoring $rname to original size..."
-            lptools resize "$rname" "$rsize" >/dev/null 2>&1 || \
-                lptools remove "$rname" >/dev/null 2>&1 && \
+            # IMPORTANT: Use explicit if-else, NOT ||/&& chaining.
+            # Shell || and && have SAME precedence and left-to-right associativity,
+            # so `a || b && c` parses as `(a || b) && c` — meaning if `a` fails
+            # and `b` succeeds, `c` runs unconditionally. That would create a
+            # partition we don't want. Use if-else to make intent explicit.
+            if ! lptools resize "$rname" "$rsize" >/dev/null 2>&1; then
+                # resize failed — try remove+create as fallback
+                lptools remove "$rname" >/dev/null 2>&1
                 lptools create "$rname" "$rsize" >/dev/null 2>&1
+            fi
         done
     fi
     # Re-map all dynamic partitions that may have been unmapped during resize.
@@ -519,21 +571,28 @@ ZIP_LIST_OK=0
 # Try system unzip first, then busybox, then toybox.
 # `unzip -l` output is parsed by looking for a line whose last token is "otaku.bin".
 # The first numeric token on that line is the uncompressed size in bytes.
+# Use a single robust regex: ^[0-9]+ otaku\.bin$
+# (no leading space — `awk '{{print $1, $NF}}'` outputs "$1 $NF" with single space,
+# not " $1 $NF"). The previous `^ [0-9]*` pattern required a leading space and
+# never matched, so the whole ZIP listing check was silently skipped.
+# `[0-9]+` instead of `[0-9]*` to reject empty size (malformed line).
+ZIP_LIST_REGEX='^[0-9]+ otaku\.bin$'
+
 if which unzip >/dev/null 2>&1; then
-    if unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q '^ [0-9]* otaku\.bin$'; then
-        EXPECTED_BUNDLE_SIZE=$(unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep ' otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
+    if unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q "$ZIP_LIST_REGEX"; then
+        EXPECTED_BUNDLE_SIZE=$(unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep 'otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
         ZIP_LIST_OK=1
     fi
 fi
 if [ "$ZIP_LIST_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
-    if busybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q '^ [0-9]* otaku\.bin$'; then
-        EXPECTED_BUNDLE_SIZE=$(busybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep ' otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
+    if busybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q "$ZIP_LIST_REGEX"; then
+        EXPECTED_BUNDLE_SIZE=$(busybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep 'otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
         ZIP_LIST_OK=1
     fi
 fi
 if [ "$ZIP_LIST_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
-    if toybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q '^ [0-9]* otaku\.bin$'; then
-        EXPECTED_BUNDLE_SIZE=$(toybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep ' otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
+    if toybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q "$ZIP_LIST_REGEX"; then
+        EXPECTED_BUNDLE_SIZE=$(toybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep 'otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
         ZIP_LIST_OK=1
     fi
 fi
@@ -581,7 +640,19 @@ if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BU
         ui_print "!  Difference: $(( EXPECTED_BUNDLE_SIZE - BUNDLE_EXTRACT_SIZE )) bytes"
         ui_print "!  Likely cause: tmpfs full, ZIP CRC error, or interrupted write."
         ui_print "!  Free space in /tmp:"
-        df -h /tmp 2>/dev/null | tail -1 | awk '{{print "    total="$2" used="$3" free="$4}}'
+        # df -h output format varies: coreutils has header line, busybox doesn't.
+        # Try `df /tmp` (POSIX, no -h flag needed) and extract free space (column 4).
+        # Some Android recoveries don't have df at all — silently skip in that case.
+        if command -v df >/dev/null 2>&1; then
+            TMP_FREE=$(df /tmp 2>/dev/null | tail -1 | awk '{{print $4}}')
+            if [ -n "$TMP_FREE" ]; then
+                ui_print "    Free: $TMP_FREE (1K-blocks)"
+            fi
+            # Also try `df -h /tmp` for human-readable — best-effort, ignore failure.
+            df -h /tmp 2>/dev/null | tail -1 | awk '{{print "    total="$2" used="$3" free="$4}}' 2>/dev/null
+        else
+            ui_print "    (df not available in this recovery)"
+        fi
         # Clean up the corrupt file so we don't leave partial state.
         rm -f "$BUNDLE"
         exit 1
@@ -1008,14 +1079,16 @@ else
         # Try lptools resize first (preserves existing data in metadata)
         # Note: original phhusson lptools resize does NOT re-map after resize
         lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-        if [ $? -ne 0 ]; then
+        RESIZE_RC=$?
+        if [ $RESIZE_RC -ne 0 ]; then
             ui_print "!  lptools resize failed for $pname — trying remove+create fallback"
             # Fallback: remove then create with new size.
             # lptools remove auto-unmaps before removing.
             # lptools create auto-maps after creating (creates dm device immediately).
             lptools remove "$pname" >/dev/null 2>&1
             lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-            if [ $? -ne 0 ]; then
+            CREATE_RC=$?
+            if [ $CREATE_RC -ne 0 ]; then
                 ui_print "!  lptools remove+create also failed for $pname"
                 RESIZE_OK=0
                 # Rollback entry from RESIZED_ORIGINAL — resize didn't happen,
@@ -1028,8 +1101,12 @@ else
         else
             ui_print "  $pname resized to $(( NEW_SIZE_BYTES / 1048576 )) MB"
             # After successful resize, re-map the partition (resize doesn't auto-map
-            # in the original phhusson version)
-            lptools unmap "$pname" >/dev/null 2>&1
+            # in the original phhusson version).
+            # Idempotent: only unmap if currently mapped (avoid error noise on
+            # lptools variants that auto-unmap during resize).
+            if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
+                lptools unmap "$pname" >/dev/null 2>&1
+            fi
             lptools map "$pname" >/dev/null 2>&1
         fi
     done
@@ -1042,15 +1119,19 @@ else
 
     # Remap dynamic partitions that were NOT already mapped by lptools create.
     # lptools create auto-maps the partition, so we must skip those to avoid double-mapping.
+    # Idempotent: only unmap if currently mapped (skip if already unmapped by resize).
     ui_print "  Remapping dynamic partitions..."
     REMAP_FAILED=""
     for pname in $DYNAMIC_PART_NAMES; do
         case "$CREATED_PARTS" in
             *" $pname "*) continue ;;  # already mapped by lptools create
         esac
-        lptools unmap "$pname" >/dev/null 2>&1
+        if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
+            lptools unmap "$pname" >/dev/null 2>&1
+        fi
         lptools map "$pname" >/dev/null 2>&1
-        if [ $? -ne 0 ]; then
+        MAP_RC=$?
+        if [ $MAP_RC -ne 0 ]; then
             REMAP_FAILED="$REMAP_FAILED $pname"
         fi
     done
