@@ -363,8 +363,10 @@ ui_print() {{
 # dynamic partitions may still be unmapped from the resize step.
 # This trap ensures they get re-mapped so the device can still boot into
 # Android or recovery after a failed flash attempt.
-# NOTE: DYNAMIC_PART_NAMES and HAS_LPTOOLS are defined later in the script;
-# the trap guards against them being unset (early exit before validation step).
+# Defaults are set here so the trap is safe even if exit happens before
+# the resize step (which would normally populate them).
+DYNAMIC_PART_NAMES=""
+HAS_LPTOOLS=0
 CLEANUP_DONE=0
 cleanup_abort() {{
     if [ "$CLEANUP_DONE" = "1" ]; then return; fi
@@ -372,14 +374,11 @@ cleanup_abort() {{
     # Only attempt cleanup if we got past the validation step
     if [ -z "$DYNAMIC_PART_NAMES" ]; then return; fi
     ui_print "! Performing emergency cleanup..."
-    # Re-map all dynamic partitions that may have been unmapped during resize
+    # Re-map all dynamic partitions that may have been unmapped during resize.
+    # lptools is the ONLY supported tool for dynamic partition management.
     if [ "$HAS_LPTOOLS" = "1" ]; then
         for pname in $DYNAMIC_PART_NAMES; do
             lptools map "$pname" >/dev/null 2>&1
-        done
-    elif [ "$HAS_DMSETUP" = "1" ]; then
-        for pname in $DYNAMIC_PART_NAMES; do
-            dmsetup table "$pname" >/dev/null 2>&1 || dmsetup create "$pname" >/dev/null 2>&1
         done
     fi
     sync
@@ -619,8 +618,12 @@ resolve_target() {{
         r#"# ── Step {validation_step}/{total_steps}: Partition validation ─────────────────────
 ui_print "[Step {validation_step}/{total_steps}] Partition validation..."
 
-# Known dynamic partition names (live inside super partition, resizable)
-DYNAMIC_PART_NAMES="system vendor product system_ext odm odm_dlkm vendor_dlkm"
+# Known dynamic partition names (live inside super partition, resizable).
+# Includes AOSP-standard names plus OEM-specific dynamic partitions used by
+# Xiaomi, Realme/OPPO, Samsung, Vivo/iQOO, and others. Adding a name here
+# is safe — if the device has no such partition, is_dynamic_partition() just
+# returns false for it and the resize step skips it.
+DYNAMIC_PART_NAMES="system vendor product system_ext odm odm_dlkm vendor_dlkm mi_ext my_product my_engineering my_stock my_carrier my_region my_bigball my_preload my_company optics prism cache userdata"
 
 is_dynamic_partition() {{
     local name="$1"
@@ -727,10 +730,36 @@ else
     ui_print "  Partitions needing resize:$RESIZE_NEEDED"
     ui_print "  Additional space needed: $(( RESIZE_TOTAL / 1048576 )) MB"
 
-    # Clean up any previous backup
-    rm -f /tmp/dm_tables_backup.txt /tmp/lp_dump.txt /tmp/lp_dump_new.txt
+    # ── Detect lptools ──
+    # lptools is the ONLY supported tool for dynamic partition management.
+    # dmsetup/lpmake/lpdump fallbacks were removed because:
+    #   - lpmake: multi-group parsing was broken (only 1 group passed),
+    #             PART_GROUP_SIZE was sum-of-partitions not group max size,
+    #             and HAS_LPMAKE was never set (dead code).
+    #   - dmsetup: create did not check for duplicate devices, masking
+    #              silent failures; manual linear table mapping is fragile
+    #              across OEM metadata formats.
+    #   - lpdump: only needed by lpmake — removed together.
+    # lptools handles all of this natively (group detection, slot suffix,
+    # metadata slot updates, COW clearing, map/unmap) and is available in
+    # most modern OrangeFox/TWRP builds with OF_ENABLE_LPTOOLS=1.
+    # IMPORTANT: lptools size arguments are in BYTES (not KB, not sectors).
+    # Source: phhusson/vendor_lptools — strtoll(argv[3], NULL, 0) → ResizePartition(bytes)
+    HAS_LPTOOLS=0
+    which lptools >/dev/null 2>&1 && HAS_LPTOOLS=1
 
-    # Find the super partition
+    if [ "$HAS_LPTOOLS" != "1" ]; then
+        ui_print "! ABORT: lptools not found in this recovery."
+        ui_print "!  OTAku requires lptools for dynamic partition resize."
+        ui_print "!  dmsetup/lpmake/lpdump fallbacks have been removed."
+        ui_print "!  Solutions:"
+        ui_print "!  1. Use a recovery with lptools enabled (OF_ENABLE_LPTOOLS=1)"
+        ui_print "!  2. Flash via fastbootd instead of recovery"
+        ui_print "!  3. Manually resize partitions before flashing"
+        exit 1
+    fi
+
+    # Report super partition info (informational only — lptools handles it)
     SUPER_DEV=""
     for candidate in /dev/block/by-name/super /dev/block/bootdevice/by-name/super; do
         if [ -b "$candidate" ]; then
@@ -738,522 +767,114 @@ else
             break
         fi
     done
-
-    if [ -z "$SUPER_DEV" ]; then
-        ui_print "! ABORT: Dynamic partitions need resizing but super partition not found."
-        ui_print "!  Cannot resize dynamic partitions without super partition."
-        exit 1
-    fi
-
-    SUPER_SIZE=$(blockdev --getsize64 "$SUPER_DEV" 2>/dev/null)
-    if [ -z "$SUPER_SIZE" ] || [ "$SUPER_SIZE" = "0" ]; then
-        ui_print "! ABORT: Cannot determine super partition size"
-        exit 1
-    fi
-
-    # Calculate total space used by all dynamic partition images
-    DYN_TOTAL_NEEDED=0
-    for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
-        eval "PNAME=\$PART_${{i}}_NAME"
-        eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
-        if is_dynamic_partition "$PNAME"; then
-            DYN_TOTAL_NEEDED=$(( DYN_TOTAL_NEEDED + PSIZE ))
+    if [ -n "$SUPER_DEV" ]; then
+        SUPER_SIZE=$(blockdev --getsize64 "$SUPER_DEV" 2>/dev/null)
+        if [ -n "$SUPER_SIZE" ] && [ "$SUPER_SIZE" != "0" ]; then
+            ui_print "  Super partition: $(( SUPER_SIZE / 1048576 )) MB"
         fi
-    done
-
-    ui_print "  Super partition: $(( SUPER_SIZE / 1048576 )) MB"
-    ui_print "  Dynamic images total: $(( DYN_TOTAL_NEEDED / 1048576 )) MB"
-
-    # Account for metadata overhead: super reserves space for metadata slots
-    # (2 copies of metadata, each with META_SLOTS slots of META_SIZE bytes).
-    # Default: 2 * 2 * 65536 = 262144 bytes (0.25 MB) — negligible but correct.
-    # Use conservative estimate since we don't know META_SLOTS yet.
-    META_OVERHEAD=$(( 2 * 3 * 65536 ))
-    SUPER_USABLE=$(( SUPER_SIZE - META_OVERHEAD ))
-
-    if [ "$DYN_TOTAL_NEEDED" -gt "$SUPER_USABLE" ]; then
-        ui_print "! ABORT: Dynamic partition images ($(( DYN_TOTAL_NEEDED / 1048576 )) MB) exceed usable super space ($(( SUPER_USABLE / 1048576 )) MB)"
-        exit 1
     fi
 
-    # ── Save dm table info for ALL dynamic partitions BEFORE any changes ──
-    # We need this for the dmsetup fallback path (last resort).
-    # Some recoveries don't have dmsetup — check first and try multiple methods.
-    HAS_DMSETUP=0
-    which dmsetup >/dev/null 2>&1 && HAS_DMSETUP=1
-
-    if [ "$HAS_DMSETUP" = "1" ]; then
-        # Save individual partition tables by name
-        for pname in $DYNAMIC_PART_NAMES; do
-            DM_TABLE=$(dmsetup table "$pname" 2>/dev/null | head -1)
-            if [ -n "$DM_TABLE" ]; then
-                echo "$pname $DM_TABLE" >> /tmp/dm_tables_backup.txt
-            fi
-        done
-        # If no tables found by name, try dmsetup table (all devices)
-        # which outputs format: "<name>: <start> <sectors> linear <major:minor> <offset>"
-        if [ ! -s /tmp/dm_tables_backup.txt ]; then
-            dmsetup table 2>/dev/null | while IFS=': ' read -r dname dtable; do
-                case " $DYNAMIC_PART_NAMES " in
-                    *" $dname "*) echo "$dname $dtable" >> /tmp/dm_tables_backup.txt ;;
-                esac
-            done
+    # Optional space pre-check (lptools free may not be available on all builds)
+    LP_FREE=$(lptools free 2>/dev/null | grep -o 'Free space: [0-9]*' | awk '{{print $3}}')
+    if [ -n "$LP_FREE" ]; then
+        ui_print "  Super free space: $(( LP_FREE / 1048576 )) MB"
+        if [ "$LP_FREE" -lt "$RESIZE_TOTAL" ]; then
+            ui_print "! ABORT: Insufficient free space in super partition."
+            ui_print "!  Need: $(( RESIZE_TOTAL / 1048576 )) MB, available: $(( LP_FREE / 1048576 )) MB"
+            exit 1
         fi
-        DM_SAVED_COUNT=$(wc -l < /tmp/dm_tables_backup.txt 2>/dev/null)
-        ui_print "  Saved $DM_SAVED_COUNT dm table(s) for fallback"
     fi
 
-    # ── Detect lptools BEFORE using it ──
-    # lptools is a single binary that handles dynamic partition management
-    # natively on-device: resize, map, unmap, unlimited-group, etc.
-    # It auto-detects slot suffix and updates ALL metadata slots.
-    # Available in many OrangeFox/TWRP builds (opt-in flag required).
-    # IMPORTANT: lptools size arguments are in BYTES (not KB, not sectors).
-    # Source: phhusson/vendor_lptools — strtoll(argv[3], NULL, 0) → ResizePartition(bytes)
-    HAS_LPTOOLS=0
-    which lptools >/dev/null 2>&1 && HAS_LPTOOLS=1
+    # Clear COW partitions if this is a Virtual A/B device
+    lptools clear-cow >/dev/null 2>&1
 
     # Unmap all dynamic partitions before resize
     ui_print "  Unmapping dynamic partitions..."
-    if [ "$HAS_LPTOOLS" = "1" ]; then
-        for pname in $DYNAMIC_PART_NAMES; do
-            lptools unmap "$pname" >/dev/null 2>&1
-        done
-    elif [ "$HAS_DMSETUP" = "1" ]; then
-        for pname in $DYNAMIC_PART_NAMES; do
-            dmsetup remove "$pname" 2>/dev/null
-        done
-    fi
+    for pname in $DYNAMIC_PART_NAMES; do
+        lptools unmap "$pname" >/dev/null 2>&1
+    done
 
-    if [ "$HAS_LPTOOLS" = "1" ]; then
-        ui_print "  Using lptools to resize dynamic partitions..."
+    # Resize each partition that needs it
+    ui_print "  Using lptools to resize dynamic partitions..."
+    RESIZE_OK=1
+    # Track partitions created via remove+create fallback (lptools create auto-maps)
+    CREATED_PARTS=""
+    for pname in $RESIZE_NEEDED; do
+        pname=$(echo "$pname" | tr -d ' ')
+        [ -z "$pname" ] && continue
 
-        # Detect the dynamic partition group name for this slot.
-        # lptools outputs "Best group seems to be <name>" on stdout during auto-detect.
-        # We capture it to help debugging, but lptools handles group selection internally.
-        LP_GROUP=$(lptools unlimited-group 2>/dev/null | grep -o 'Best group seems to be [^ ]*' | head -1 | awk '{{print $NF}}')
-        if [ -n "$LP_GROUP" ]; then
-            ui_print "  Detected group: $LP_GROUP"
-        fi
-
-        # Clear COW partitions if this is a Virtual A/B device
-        lptools clear-cow >/dev/null 2>&1
-
-        # Check available free space before resizing
-        LP_FREE=$(lptools free 2>/dev/null | grep -o 'Free space: [0-9]*' | awk '{{print $3}}')
-        if [ -n "$LP_FREE" ]; then
-            ui_print "  Super free space: $(( LP_FREE / 1048576 )) MB"
-        fi
-
-        # Resize each partition that needs it
-        RESIZE_OK=1
-        # Track partitions that were created via remove+create fallback
-        # (lptools create auto-maps, so we must skip re-mapping them later)
-        CREATED_PARTS=""
-        for pname in $RESIZE_NEEDED; do
-            pname=$(echo "$pname" | tr -d ' ')
-            [ -z "$pname" ] && continue
-
-            # Find the partition index to get its UNC_SIZE
-            FOUND_IDX=-1
-            for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
-                eval "CHECK_NAME=\$PART_${{j}}_NAME"
-                if [ "$CHECK_NAME" = "$pname" ]; then
-                    FOUND_IDX=$j
-                    break
-                fi
-            done
-
-            if [ "$FOUND_IDX" -lt 0 ]; then
-                continue
+        # Find the partition index to get its UNC_SIZE
+        FOUND_IDX=-1
+        for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
+            eval "CHECK_NAME=\$PART_${{j}}_NAME"
+            if [ "$CHECK_NAME" = "$pname" ]; then
+                FOUND_IDX=$j
+                break
             fi
+        done
 
-            eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
-            # lptools size arguments are in BYTES (not KB!)
-            # phhusson/vendor_lptools: strtoll(argv[3], NULL, 0) → ResizePartition(partition, uint64_t bytes)
-            NEW_SIZE_BYTES=$PNAME_SZ
+        if [ "$FOUND_IDX" -lt 0 ]; then
+            continue
+        fi
 
-            ui_print "  Resizing $pname to $(( NEW_SIZE_BYTES / 1048576 )) MB..."
+        eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
+        NEW_SIZE_BYTES=$PNAME_SZ
 
-            # Try lptools resize first (preserves existing data in metadata)
-            # Note: original phhusson lptools resize does NOT re-map after resize
-            lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+        ui_print "  Resizing $pname to $(( NEW_SIZE_BYTES / 1048576 )) MB..."
+
+        # Try lptools resize first (preserves existing data in metadata)
+        # Note: original phhusson lptools resize does NOT re-map after resize
+        lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            ui_print "!  lptools resize failed for $pname — trying remove+create fallback"
+            # Fallback: remove then create with new size.
+            # lptools remove auto-unmaps before removing.
+            # lptools create auto-maps after creating (creates dm device immediately).
+            lptools remove "$pname" >/dev/null 2>&1
+            lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
             if [ $? -ne 0 ]; then
-                ui_print "!  lptools resize failed for $pname — trying remove+create fallback"
-                # Fallback: remove then create with new size
-                # lptools remove auto-unmaps before removing
-                # lptools create auto-maps after creating (creates dm device immediately)
-                lptools remove "$pname" >/dev/null 2>&1
-                lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-                if [ $? -ne 0 ]; then
-                    ui_print "!  lptools remove+create also failed for $pname"
-                    RESIZE_OK=0
-                else
-                    ui_print "  $pname recreated at $(( NEW_SIZE_BYTES / 1048576 )) MB"
-                    # Track that this partition was created (and thus auto-mapped)
-                    CREATED_PARTS="$CREATED_PARTS $pname "
-                fi
+                ui_print "!  lptools remove+create also failed for $pname"
+                RESIZE_OK=0
             else
-                ui_print "  $pname resized to $(( NEW_SIZE_BYTES / 1048576 )) MB"
-                # After successful resize, re-map the partition (resize doesn't auto-map
-                # in the original phhusson version)
-                lptools unmap "$pname" >/dev/null 2>&1
-                lptools map "$pname" >/dev/null 2>&1
+                ui_print "  $pname recreated at $(( NEW_SIZE_BYTES / 1048576 )) MB"
+                CREATED_PARTS="$CREATED_PARTS $pname "
             fi
-        done
-
-        if [ "$RESIZE_OK" != "1" ]; then
-            ui_print "! ABORT: lptools resize failed for one or more partitions."
-            ui_print "!  Try flashing via fastbootd or use a different recovery."
-            exit 1
-        fi
-
-        # Remap dynamic partitions that were NOT already mapped by lptools create.
-        # lptools create auto-maps the partition, so we must skip those to avoid double-mapping.
-        ui_print "  Remapping dynamic partitions..."
-        REMAP_FAILED=""
-        for pname in $DYNAMIC_PART_NAMES; do
-            case "$CREATED_PARTS" in
-                *" $pname "*) continue ;;  # already mapped by lptools create
-            esac
+        else
+            ui_print "  $pname resized to $(( NEW_SIZE_BYTES / 1048576 )) MB"
+            # After successful resize, re-map the partition (resize doesn't auto-map
+            # in the original phhusson version)
             lptools unmap "$pname" >/dev/null 2>&1
             lptools map "$pname" >/dev/null 2>&1
-            if [ $? -ne 0 ]; then
-                REMAP_FAILED="$REMAP_FAILED $pname"
-            fi
-        done
-
-        if [ -n "$REMAP_FAILED" ]; then
-            ui_print "! WARNING: lptools map failed for:$REMAP_FAILED"
-            ui_print "  Attempting to continue — dd write may fail if device not ready."
         fi
+    done
 
-        ui_print "  lptools resize complete."
-
-    elif [ "$HAS_LPMAKE" = "1" ]; then
-        ui_print "  Using lpmake to rebuild super partition metadata..."
-
-        # Dump current metadata to parse partition layout
-        if ! which lpdump >/dev/null 2>&1; then
-            ui_print "! ABORT: lpdump not found — cannot parse super partition metadata."
-            ui_print "!  lpmake is available but lpdump is required to read current layout."
-            exit 1
-        fi
-        lpdump "$SUPER_DEV" > /tmp/lp_dump.txt 2>/dev/null
-        if [ ! -s /tmp/lp_dump.txt ]; then
-            ui_print "! ABORT: lpdump produced no output — cannot parse super partition layout."
-            exit 1
-        fi
-
-        # Build lpmake arguments for all partitions in super
-        # We need to preserve existing partitions that are NOT in our ZIP,
-        # and resize the ones that are.
-        LPMAKE_GROUPS=""
-        LPMAKE_PARTS=""
-        PART_GROUP_SIZE=0
-
-        # Parse lpdump output to get partition layout
-        # Each partition stored as: name:attrs:size:group (one per line in /tmp/lp_parts.txt)
-        # Also extract metadata-slot count and metadata-size from lpdump header
-        rm -f /tmp/lp_parts.txt
-        META_SLOTS=2
-        META_SIZE=65536
-        CUR_NAME=""
-        CUR_GROUP=""
-        CUR_ATTRS=""
-        CUR_SIZE=""
-
-        while IFS= read -r line; do
-            case "$line" in
-                # AOSP lpdump uses "Name:" for partition table entries;
-                # some custom recoveries use "Partition name:" — support both
-                "Name:"*|"Partition name:"*)
-                    # Flush previous partition
-                    if [ -n "$CUR_NAME" ]; then
-                        ATTR_STR="readonly"
-                        if echo "$CUR_ATTRS" | grep -q "0"; then
-                            ATTR_STR="none"
-                        fi
-                        echo "$CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP" >> /tmp/lp_parts.txt
-                        PART_GROUP_SIZE=$(( PART_GROUP_SIZE + CUR_SIZE ))
-                    fi
-                    CUR_NAME=$(echo "$line" | sed 's/Name: *//;s/Partition name: *//' | tr -d ' ')
-                    ;;
-                "Group:"*)
-                    CUR_GROUP=$(echo "$line" | sed 's/.*Group: *//' | awk '{{print $1}}' | tr -d ' ')
-                    ;;
-                "Attributes:"*)
-                    CUR_ATTRS=$(echo "$line" | sed 's/Attributes: *//' | tr -d ' ')
-                    ;;
-                # AOSP lpdump uses "Maximum size:" for groups, "Size:" for block devices
-                # For partitions, size is computed from extents — but some lpdump versions
-                # include a size line; also match "Maximum size:" to avoid group-size confusion
-                "Size:"*|"size:"*)
-                    # Skip group max-size lines (they contain "Maximum")
-                    case "$line" in
-                        *"Maximum"*|*"maximum"*) continue ;;
-                    esac
-                    CUR_SIZE=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
-                    ;;
-                # Extract metadata slot count from lpdump header
-                "Metadata slot count:"*)
-                    META_SLOTS=$(echo "$line" | sed 's/Metadata slot count: *//' | tr -d ' ')
-                    ;;
-                # Extract metadata max size from lpdump header
-                "Metadata max size:"*|"metadata max size:"*)
-                    META_SIZE=$(echo "$line" | sed 's/[Mm]etadata max [Ss]ize: *//' | tr -d ' ')
-                    ;;
-            esac
-        done < /tmp/lp_dump.txt
-
-        # Flush last partition
-        if [ -n "$CUR_NAME" ]; then
-            ATTR_STR="readonly"
-            if echo "$CUR_ATTRS" | grep -q "0"; then
-                ATTR_STR="none"
-            fi
-            echo "$CUR_NAME:$ATTR_STR:$CUR_SIZE:$CUR_GROUP" >> /tmp/lp_parts.txt
-            PART_GROUP_SIZE=$(( PART_GROUP_SIZE + CUR_SIZE ))
-        fi
-
-        # Now override sizes for partitions in our ZIP that are dynamic
-        for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
-            eval "PNAME=\$PART_${{i}}_NAME"
-            eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
-            if is_dynamic_partition "$PNAME"; then
-                # Replace the size for this partition in /tmp/lp_parts.txt
-                if grep -q "^$PNAME:" /tmp/lp_parts.txt 2>/dev/null; then
-                    OLD_SIZE=$(grep "^$PNAME:" /tmp/lp_parts.txt | cut -d: -f3)
-                    PART_GROUP_SIZE=$(( PART_GROUP_SIZE - OLD_SIZE + PSIZE ))
-                    # Use safe tmpfile pattern instead of sed -i (not reliable on all tmpfs/busybox)
-                    sed "s/^$PNAME:\([^:]*\):[^:]*:\([^:]*\)$/$PNAME:\1:$PSIZE:\2/" /tmp/lp_parts.txt > /tmp/lp_parts_new.txt
-                    mv /tmp/lp_parts_new.txt /tmp/lp_parts.txt
-                fi
-            fi
-        done
-
-        # Build LPMAKE_PARTS from the updated file
-        LPMAKE_PARTS=""
-        while IFS=: read -r pname attrs size group; do
-            LPMAKE_PARTS="$LPMAKE_PARTS --partition $pname:$attrs:$size:$group"
-        done < /tmp/lp_parts.txt
-
-        LPMAKE_GROUPS="--group $CUR_GROUP:$PART_GROUP_SIZE"
-
-        # Write new metadata to super
-        # Use metadata-slot count and metadata-size parsed from lpdump output;
-        # Virtual A/B devices need 3 slots (A + B + snapshot), non-A/B need 2.
-        # Fallback defaults: 2 slots, 65536 bytes — safe for all known devices.
-        ui_print "  Metadata: slots=$META_SLOTS, size=$META_SIZE"
-        lpmake \
-            --device-size "$SUPER_SIZE" \
-            --metadata-size "$META_SIZE" \
-            --metadata-slots "$META_SLOTS" \
-            --device "$SUPER_DEV" \
-            $LPMAKE_GROUPS \
-            $LPMAKE_PARTS 2>/dev/null
-
-        if [ $? -ne 0 ]; then
-            ui_print "! WARNING: lpmake failed, trying fallback approach..."
-
-            # Fallback: try dmsetup create with expanded size using saved tables
-            FALLBACK_OK=1
-            for pname in $RESIZE_NEEDED; do
-                pname=$(echo "$pname" | tr -d ' ')
-                [ -z "$pname" ] && continue
-
-                # Find the partition index to get its UNC_SIZE
-                FOUND_IDX=-1
-                for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
-                    eval "CHECK_NAME=\$PART_${{j}}_NAME"
-                    if [ "$CHECK_NAME" = "$pname" ]; then
-                        FOUND_IDX=$j
-                        break
-                    fi
-                done
-
-                if [ "$FOUND_IDX" -lt 0 ]; then
-                    continue
-                fi
-
-                eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
-                NEW_SECTORS=$(( (PNAME_SZ + 511) / 512 ))
-
-                # Read saved dm table for this partition
-                DM_SAVED=$(grep "^$pname " /tmp/dm_tables_backup.txt 2>/dev/null | head -1)
-                if [ -n "$DM_SAVED" ]; then
-                    # Parse: <name> 0 <sectors> linear <major:minor> <start>
-                    DM_START=$(echo "$DM_SAVED" | awk '{{print $NF}}')
-                    DM_UNDERLYING=$(echo "$DM_SAVED" | awk '{{print $(NF-1)}}')
-
-                    dmsetup create "$pname" --table "0 $NEW_SECTORS linear $DM_UNDERLYING $DM_START" 2>/dev/null
-                    if [ $? -ne 0 ]; then
-                        ui_print "! Fallback resize also failed for $pname"
-                        FALLBACK_OK=0
-                    else
-                        ui_print "  $pname resized via dmsetup: $NEW_SECTORS sectors"
-                    fi
-                else
-                    ui_print "! No saved dm table for $pname"
-                    FALLBACK_OK=0
-                fi
-            done
-
-            if [ "$FALLBACK_OK" != "1" ]; then
-                ui_print "! ABORT: Cannot resize dynamic partitions."
-                ui_print "!  lpmake and dmsetup fallback both failed."
-                ui_print "!  Try flashing via fastbootd or use a device with larger partitions."
-                exit 1
-            fi
-
-            # Remap non-resized dynamic partitions from saved tables
-            while IFS=' ' read -r saved_name saved_start saved_sectors saved_linear saved_underlying saved_offset; do
-                case " $RESIZE_NEEDED " in
-                    *" $saved_name "*) continue ;;  # already resized above
-                esac
-                dmsetup create "$saved_name" --table "$saved_start $saved_sectors $saved_linear $saved_underlying $saved_offset" 2>/dev/null
-            done < /tmp/dm_tables_backup.txt
-        else
-            ui_print "  Super partition metadata rebuilt successfully."
-
-            # After lpmake, remap ALL dynamic partitions from new metadata
-            # Parse lpdump output and create proper dmsetup linear mappings
-            ui_print "  Remapping dynamic partitions..."
-            lpdump "$SUPER_DEV" > /tmp/lp_dump_new.txt 2>/dev/null
-
-            # Parse lpdump output — handle both AOSP format and custom recovery format:
-            #   AOSP:      "Name: system_a" / "Partition name: system_a"
-            #   Extent:    "0 .. 2104887 linear super 2048"  (AOSP)
-            #              "0..2047 : super 0"                (some recoveries)
-            CUR_PART=""
-            CUR_SECTORS=0
-            CUR_OFFSET=0
-            CUR_EXTENT_COUNT=0
-
-            while IFS= read -r line; do
-                case "$line" in
-                    # Partition name — AOSP uses "Name:", some recoveries use "Partition name:"
-                    "Name:"*|"Partition name:"*)
-                        # Flush previous partition
-                        if [ -n "$CUR_PART" ] && [ "$CUR_SECTORS" -gt 0 ]; then
-                            if [ "$CUR_EXTENT_COUNT" -gt 1 ]; then
-                                ui_print "!  WARNING: $CUR_PART has $CUR_EXTENT_COUNT extents — may need manual remap"
-                            fi
-                            dmsetup create "$CUR_PART" --table "0 $CUR_SECTORS linear $SUPER_DEV $CUR_OFFSET" 2>/dev/null
-                            if [ $? -ne 0 ]; then
-                                ui_print "!  Failed to remap $CUR_PART"
-                            fi
-                        fi
-                        CUR_PART=$(echo "$line" | sed 's/Name: *//;s/Partition name: *//' | tr -d ' ')
-                        CUR_SECTORS=0
-                        CUR_OFFSET=0
-                        CUR_EXTENT_COUNT=0
-                        ;;
-                    "Size:"*|"size:"*)
-                        # Skip group max-size lines
-                        case "$line" in
-                            *"Maximum"*|*"maximum"*) continue ;;
-                        esac
-                        SZ=$(echo "$line" | sed 's/[Ss]ize: *//' | tr -d ' ')
-                        CUR_SECTORS=$(( (SZ + 511) / 512 ))
-                        ;;
-                    # Extent lines — both AOSP and custom recovery formats
-                    *" linear "*"super"*|*". ."*"super"*)
-                        # AOSP format: "0 .. 2104887 linear super 2048"
-                        # Old format:  "0..2047 : super 0"
-                        # Extract offset (last field in both formats)
-                        CUR_OFFSET=$(echo "$line" | awk '{{print $NF}}')
-                        CUR_EXTENT_COUNT=$(( CUR_EXTENT_COUNT + 1 ))
-                        # If no Size: line was found, compute sectors from extent range
-                        if [ "$CUR_SECTORS" -eq 0 ]; then
-                            # Parse start and end sector from extent line
-                            # Handle both "0 .. 2104887" and "0..2047" formats
-                            EXTENT_RANGE=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/linear.*$//' | sed 's/:.*$//' | sed 's/ \.\./../')
-                            EXT_START=$(echo "$EXTENT_RANGE" | awk -F'\\.\\.' '{{print $1}}' | tr -d ' ')
-                            EXT_END=$(echo "$EXTENT_RANGE" | awk -F'\\.\\.' '{{print $2}}' | tr -d ' ')
-                            if [ -n "$EXT_START" ] && [ -n "$EXT_END" ]; then
-                                CUR_SECTORS=$(( EXT_END - EXT_START + 1 ))
-                            fi
-                        fi
-                        ;;
-                esac
-            done < /tmp/lp_dump_new.txt
-
-            # Flush last partition
-            if [ -n "$CUR_PART" ] && [ "$CUR_SECTORS" -gt 0 ]; then
-                if [ "$CUR_EXTENT_COUNT" -gt 1 ]; then
-                    ui_print "!  WARNING: $CUR_PART has $CUR_EXTENT_COUNT extents — may need manual remap"
-                fi
-                dmsetup create "$CUR_PART" --table "0 $CUR_SECTORS linear $SUPER_DEV $CUR_OFFSET" 2>/dev/null
-            fi
-        fi
-
-    else
-        # No lptools or lpmake available — try dmsetup fallback using saved tables
-        ui_print "! Neither lptools nor lpmake available in this recovery."
-        ui_print "  Attempting dmsetup fallback for resize..."
-
-        FALLBACK_OK=1
-        for pname in $RESIZE_NEEDED; do
-            pname=$(echo "$pname" | tr -d ' ')
-            [ -z "$pname" ] && continue
-
-            # Find the partition index to get its UNC_SIZE
-            FOUND_IDX=-1
-            for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
-                eval "CHECK_NAME=\$PART_${{j}}_NAME"
-                if [ "$CHECK_NAME" = "$pname" ]; then
-                    FOUND_IDX=$j
-                    break
-                fi
-            done
-
-            if [ "$FOUND_IDX" -lt 0 ]; then
-                continue
-            fi
-
-            eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
-            NEW_SECTORS=$(( (PNAME_SZ + 511) / 512 ))
-
-            # Read saved dm table for this partition
-            DM_SAVED=$(grep "^$pname " /tmp/dm_tables_backup.txt 2>/dev/null | head -1)
-            if [ -n "$DM_SAVED" ]; then
-                # Parse: <name> 0 <sectors> linear <major:minor> <start>
-                DM_START=$(echo "$DM_SAVED" | awk '{{print $NF}}')
-                DM_UNDERLYING=$(echo "$DM_SAVED" | awk '{{print $(NF-1)}}')
-
-                dmsetup create "$pname" --table "0 $NEW_SECTORS linear $DM_UNDERLYING $DM_START" 2>/dev/null
-                if [ $? -ne 0 ]; then
-                    ui_print "! dmsetup resize failed for $pname"
-                    FALLBACK_OK=0
-                else
-                    ui_print "  $pname resized via dmsetup: $NEW_SECTORS sectors"
-                fi
-            else
-                ui_print "! No saved dm table for $pname"
-                FALLBACK_OK=0
-            fi
-        done
-
-        if [ "$FALLBACK_OK" != "1" ]; then
-            ui_print "! ABORT: Cannot resize dynamic partitions."
-            ui_print "!  This recovery lacks lptools, lpmake, and dmsetup tables are missing."
-            ui_print "!  Solutions:"
-            ui_print "!  1. Use a recovery with lptools enabled (OF_ENABLE_LPTOOLS=1)"
-            ui_print "!  2. Use a recovery that includes lpmake/lpdump"
-            ui_print "!  3. Flash via fastbootd instead of recovery"
-            ui_print "!  4. Manually resize partitions before flashing"
-            exit 1
-        fi
-
-        # Remap non-resized dynamic partitions from saved tables
-        while IFS=' ' read -r saved_name saved_start saved_sectors saved_linear saved_underlying saved_offset; do
-            case " $RESIZE_NEEDED " in
-                *" $saved_name "*) continue ;;  # already resized above
-            esac
-            dmsetup create "$saved_name" --table "$saved_start $saved_sectors $saved_linear $saved_underlying $saved_offset" 2>/dev/null
-        done < /tmp/dm_tables_backup.txt
+    if [ "$RESIZE_OK" != "1" ]; then
+        ui_print "! ABORT: lptools resize failed for one or more partitions."
+        ui_print "!  Try flashing via fastbootd or use a different recovery."
+        exit 1
     fi
+
+    # Remap dynamic partitions that were NOT already mapped by lptools create.
+    # lptools create auto-maps the partition, so we must skip those to avoid double-mapping.
+    ui_print "  Remapping dynamic partitions..."
+    REMAP_FAILED=""
+    for pname in $DYNAMIC_PART_NAMES; do
+        case "$CREATED_PARTS" in
+            *" $pname "*) continue ;;  # already mapped by lptools create
+        esac
+        lptools unmap "$pname" >/dev/null 2>&1
+        lptools map "$pname" >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            REMAP_FAILED="$REMAP_FAILED $pname"
+        fi
+    done
+
+    if [ -n "$REMAP_FAILED" ]; then
+        ui_print "! WARNING: lptools map failed for:$REMAP_FAILED"
+        ui_print "  Attempting to continue — dd write may fail if device not ready."
+    fi
+
+    ui_print "  lptools resize complete."
 
     ui_print "  Dynamic partition resize complete."
     ui_print ""
@@ -1828,7 +1449,14 @@ pub fn run_dd_build(
             device,
             skip_verify,
         );
-        let updater_script = "#Mtk client script\n";
+        // updater-script is a stub — TWRP/OrangeFox only require the file to
+        // exist and contain a valid edify expression. The actual flash logic
+        // lives in update-binary (a shell script invoked by recovery).
+        // `assert(1==1)` is the canonical no-op edify statement: it parses
+        // cleanly in all recovery edify evaluators and never errors out.
+        // The previous "#Mtk client script" was a shell-style comment that
+        // some TWRP builds warned about as a syntax error.
+        let updater_script = "assert(1==1);\n";
         let flash_info = build_flash_info(
             &compress_name,
             bundle_size,
