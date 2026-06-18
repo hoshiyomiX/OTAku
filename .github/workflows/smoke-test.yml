@@ -252,9 +252,16 @@ jobs:
           content = open("rust/src/dd.rs").read()
 
           # All named format args used in build_update_script
+          # Note: list reflects current alur (post Pilihan B refactor):
+          #   - extract_step (Step 0)
+          #   - verify_step (Step 1 — NEW, pre-flash partition table verify)
+          #   - integrity_step (Step 2 — MERGED: bundle integrity + decompressor)
+          #   - slot_step, validation_step, resize_step, flash_step_offset
+          # 'decomp_step' was REMOVED — old Step 1 merged into Step 2 (integrity_step).
+          # 'verify_step' was ADDED — new pre-flash verify step.
           required_args = [
               "script_version", "header_info", "part_vars", "num_parts", "compress_id",
-              "extract_step", "decomp_step", "integrity_step", "slot_step",
+              "extract_step", "verify_step", "integrity_step", "slot_step",
               "validation_step", "resize_step", "flash_step_offset",
               "num_parts_minus_1", "total_steps", "verify_block", "verified_word",
               "device_check_step", "device",
