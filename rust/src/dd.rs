@@ -2632,11 +2632,11 @@ mod tests {
         // Old broken pattern: bash-specific substring expansion used as
         // ACTIVE code (in ui_print assignment). The comment in source
         // mentions ${VHASH:0:16} for documentation, so we check the
-        // specific usage pattern `hash=${VHASH:0:16}` (with `hash=` prefix)
-        // to avoid false positive from doc comments.
+        // specific usage pattern with `hash=` prefix to avoid false
+        // positive from doc comments.
         assert!(
             !script.contains("hash=${VHASH:0:16}"),
-            "REGRESSION: bash-only hash=${{VHASH:0:16}} still used as active code (Bug NEW-C)"
+            "REGRESSION: bash-only hash substring pattern still used as active code (Bug NEW-C)"
         );
 
         // Fix must be present: printf '%.16s' (POSIX portable)
