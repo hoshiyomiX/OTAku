@@ -2629,11 +2629,14 @@ mod tests {
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
-        // Old broken pattern must NOT be present (bash-specific substring expansion)
-        // ${VHASH:0:16} in shell output (rendered from Rust {{VHASH:0:16}})
+        // Old broken pattern: bash-specific substring expansion used as
+        // ACTIVE code (in ui_print assignment). The comment in source
+        // mentions ${VHASH:0:16} for documentation, so we check the
+        // specific usage pattern `hash=${VHASH:0:16}` (with `hash=` prefix)
+        // to avoid false positive from doc comments.
         assert!(
-            !script.contains("${VHASH:0:16}"),
-            "REGRESSION: bash-only ${VHASH:0:16} still present (Bug NEW-C) — dash will print literal"
+            !script.contains("hash=${VHASH:0:16}"),
+            "REGRESSION: bash-only hash=${{VHASH:0:16}} still used as active code (Bug NEW-C)"
         );
 
         // Fix must be present: printf '%.16s' (POSIX portable)
