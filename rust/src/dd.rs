@@ -708,11 +708,25 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 
     ERRORS_THIS=""
 
+    # Guard: VOFFSET must be non-empty before arithmetic (Bug NEW-A fix).
+    # Empty var in $(( )) is treated as 0, which would silently bypass
+    # the offset_overflow check (0 + 0 = 0, never > BUNDLE_SIZE).
+    if [ -z "$VOFFSET" ]; then
+        ERRORS_THIS="$ERRORS_THIS empty_offset"
+    fi
+    # Guard: VCOMP must be non-empty (same reason as VOFFSET).
+    if [ -z "$VCOMP" ]; then
+        ERRORS_THIS="$ERRORS_THIS empty_comp_size"
+    fi
+
     # Check 1: data_offset + comp_size must not exceed bundle size.
+    # Only run if both vars are non-empty (otherwise we'd compute 0+0=0).
     # This catches truncated bundles and corrupted offset fields.
-    DATA_END=$(( VOFFSET + VCOMP ))
-    if [ "$DATA_END" -gt "$BUNDLE_VERIFY_SIZE" ]; then
-        ERRORS_THIS="$ERRORS_THIS offset_overflow"
+    if [ -n "$VOFFSET" ] && [ -n "$VCOMP" ]; then
+        DATA_END=$(( VOFFSET + VCOMP ))
+        if [ "$DATA_END" -gt "$BUNDLE_VERIFY_SIZE" ]; then
+            ERRORS_THIS="$ERRORS_THIS offset_overflow"
+        fi
     fi
 
     # Check 2: hash must be exactly 64 hex characters (SHA-256 = 32 bytes = 64 hex).
@@ -723,25 +737,40 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     fi
 
     # Check 3: uncompressed size must be > 0.
-    # A zero-size partition indicates a build error.
-    if [ "$VUNC" -le "0" ]; then
+    # Bug NEW-B fix: use ${{VUNC:-0}} default to avoid `[ "" -le "0" ]` shell error
+    # in strict POSIX sh (dash). Empty VUNC now reports zero_unc_size cleanly
+    # instead of producing "integer expression expected" noise in the log.
+    if [ "${{VUNC:-0}}" -le "0" ]; then
         ERRORS_THIS="$ERRORS_THIS zero_unc_size"
     fi
 
     # Check 4: data_offset must be 4096-aligned (alignment invariant from build).
     # Misalignment would cause dd skip= to read garbage.
-    ALIGN_CHECK=$(( VOFFSET % 4096 ))
-    if [ "$ALIGN_CHECK" -ne "0" ]; then
-        ERRORS_THIS="$ERRORS_THIS misaligned_offset"
+    # Guard: only check if VOFFSET is non-empty (empty already flagged above).
+    if [ -n "$VOFFSET" ]; then
+        ALIGN_CHECK=$(( VOFFSET % 4096 ))
+        if [ "$ALIGN_CHECK" -ne "0" ]; then
+            ERRORS_THIS="$ERRORS_THIS misaligned_offset"
+        fi
+    fi
+
+    # Bug NEW-C fix: use printf '%.16s' for portable hash shortening.
+    # ${{VHASH:0:16}} is bash-only (also busybox ash with CONFIG_ASH_BASH_COMPAT),
+    # but dash (Debian/Ubuntu default /bin/sh) doesn't support it and would
+    # print the literal string "${{VHASH:0:16}}". printf '%.16s' is POSIX.
+    if [ -n "$VHASH" ]; then
+        HASH_SHORT=$(printf '%.16s' "$VHASH")
+    else
+        HASH_SHORT="(empty)"
     fi
 
     if [ -n "$ERRORS_THIS" ]; then
         ui_print "!  Partition $VPNAME:$ERRORS_THIS"
-        ui_print "!    unc_size=$VUNC comp_size=$VCOMP offset=$VOFFSET hash=${{VHASH:0:16}}..."
+        ui_print "!    unc_size=${{VUNC:-(empty)}} comp_size=${{VCOMP:-(empty)}} offset=${{VOFFSET:-(empty)}} hash=$HASH_SHORT..."
         VERIFY_OK=0
         VERIFY_ERRORS=$(( VERIFY_ERRORS + 1 ))
     else
-        ui_print "  $VPNAME: offset=$VOFFSET comp=$(( VCOMP / 1048576 ))MB unc=$(( VUNC / 1048576 ))MB hash=${{VHASH:0:16}}... [OK]"
+        ui_print "  $VPNAME: offset=$VOFFSET comp=$(( VCOMP / 1048576 ))MB unc=$(( VUNC / 1048576 ))MB hash=$HASH_SHORT... [OK]"
     fi
 done
 
@@ -2518,6 +2547,105 @@ mod tests {
         assert!(
             script_with_dev.contains("Step 7+0/8") || script_with_dev.contains("Step 7 "),
             "Step 7 (flash) missing with device"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Bug NEW-A/B/C fix tests — guard empty vars + portable substring
+    // ──────────────────────────────────────────────────────────────
+
+    /// Bug NEW-A: Empty VOFFSET/VCOMP must be detected, not silently bypassed.
+    /// Old code: `$(( VOFFSET + VCOMP ))` with empty vars = 0+0 = 0, never > bundle_size.
+    /// Fix: explicit `[ -z "$VOFFSET" ]` / `[ -z "$VCOMP" ]` guards before arithmetic.
+    #[test]
+    fn test_regression_empty_offset_comp_guarded() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            comp_size: 16777216,
+            data_offset: 4096,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Empty-var guards must be present in pre-flash verify step
+        assert!(
+            script.contains("empty_offset"),
+            "REGRESSION: empty_offset guard missing (Bug NEW-A)"
+        );
+        assert!(
+            script.contains("empty_comp_size"),
+            "REGRESSION: empty_comp_size guard missing (Bug NEW-A)"
+        );
+
+        // Arithmetic check must be guarded by `if [ -n "$VOFFSET" ] && [ -n "$VCOMP" ]`
+        // (not unconditional — old bug computed 0+0=0 silently)
+        assert!(
+            script.contains("if [ -n \"$VOFFSET\" ] && [ -n \"$VCOMP\" ]"),
+            "REGRESSION: DATA_END arithmetic not guarded by non-empty check (Bug NEW-A)"
+        );
+    }
+
+    /// Bug NEW-B: Empty VUNC must not cause shell error in `[ "" -le "0" ]`.
+    /// Old code: `[ "$VUNC" -le "0" ]` with empty VUNC = "[ "" -le "0" ]" →
+    ///   dash error "integer expression expected" (exit code 2, treated as truthy).
+    /// Fix: use `${VUNC:-0}` default value (POSIX-compliant).
+    #[test]
+    fn test_regression_empty_vunc_default_value() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abc".to_string(),
+            comp_size: 16777216,
+            data_offset: 4096,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // The fix uses ${VUNC:-0} default — verify it's present
+        // (renders to ${VUNC:-0} in shell output via Rust {{VUNC:-0}} escape)
+        assert!(
+            script.contains("${VUNC:-0}"),
+            "REGRESSION: ${VUNC:-0} default missing (Bug NEW-B) — empty VUNC will cause shell error"
+        );
+
+        // Old broken pattern must NOT be present
+        // (we check for the unguarded form: [ "$VUNC" -le "0" ] without :- default)
+        // The fixed form is [ "${VUNC:-0}" -le "0" ], so the broken form would be
+        // [ "$VUNC" -le "0" ] — but that pattern also matches the fixed form's substring.
+        // Instead we verify the fix IS present (positive assertion above).
+    }
+
+    /// Bug NEW-C: ${VHASH:0:16} is bash-only, not portable to dash.
+    /// Old code: `hash=${VHASH:0:16}...` (bash extension, busybox ash with CONFIG_ASH_BASH_COMPAT).
+    /// Fix: use `printf '%.16s'` (POSIX portable).
+    #[test]
+    fn test_regression_portable_hash_substring() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            comp_size: 16777216,
+            data_offset: 4096,
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Old broken pattern must NOT be present (bash-specific substring expansion)
+        // ${VHASH:0:16} in shell output (rendered from Rust {{VHASH:0:16}})
+        assert!(
+            !script.contains("${VHASH:0:16}"),
+            "REGRESSION: bash-only ${VHASH:0:16} still present (Bug NEW-C) — dash will print literal"
+        );
+
+        // Fix must be present: printf '%.16s' (POSIX portable)
+        assert!(
+            script.contains("printf '%.16s'"),
+            "REGRESSION: printf '%.16s' portable substring missing (Bug NEW-C fix)"
+        );
+
+        // HASH_SHORT variable must be used in ui_print output
+        assert!(
+            script.contains("hash=$HASH_SHORT"),
+            "REGRESSION: HASH_SHORT variable not used in ui_print (Bug NEW-C fix)"
         );
     }
 }
