@@ -147,10 +147,13 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextDevice"
                                     android:layout_width="match_parent"
-                                    android:layout_height="40dp"
+                                    android:layout_height="wrap_content"
                                     android:inputType="text"
                                     android:maxLines="1"
-                                    android:textSize="13sp" />
+                                    android:textSize="13sp"
+                                    android:paddingTop="8dp"
+                                    android:paddingBottom="8dp"
+                                    android:gravity="center_vertical" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -158,7 +161,8 @@
                                 android:id="@+id/buttonAutoDetect"
                                 style="Widget.Material3.Button.TonalButton"
                                 android:layout_width="wrap_content"
-                                android:layout_height="40dp"
+                                android:layout_height="wrap_content"
+                                android:minHeight="40dp"
                                 android:layout_marginStart="8dp"
                                 android:text="@string/button_auto_detect"
                                 android:textSize="10sp"

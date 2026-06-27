@@ -76,6 +76,20 @@ class MainActivity : AppCompatActivity() {
         @Volatile
         private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
 
+        // Active image-loading coroutine job — tracked so it can be cancelled
+        // when the user clicks "Remove All" or removes a specific partition.
+        // Without this, clicking "Remove All" mid-copy would leave the copy
+        // running in the background; when it finishes, it would re-add the
+        // partition to imageFiles, causing the "loading chaos" bug where:
+        //   1. User picks vendor.img → copy starts (coroutine A)
+        //   2. User clicks Remove All → imageFiles.clear(), but coroutine A still running
+        //   3. User picks vendor.img again → copy starts (coroutine B)
+        //   4. Both coroutines write to the SAME destFile (inputDir/vendor.img)
+        //      → file corruption, mixed sizes in the log
+        //   5. Both coroutines finish → "Loaded vendor" appears twice with different sizes
+        @Volatile
+        private var imageLoadingJob: kotlinx.coroutines.Job? = null
+
         // Whether a build is currently running (survives Activity recreation)
         @Volatile var isBuilding = false
             private set
@@ -710,8 +724,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<View>(R.id.buttonRemoveAll)?.setOnClickListener {
+            // Cancel any in-flight image-loading coroutine FIRST.
+            // Without this, the copy keeps running in the background and
+            // re-adds the partition to imageFiles when it finishes —
+            // causing the "loading chaos" bug (duplicate log entries,
+            // concurrent writes to the same destFile, mixed sizes).
+            imageLoadingJob?.cancel()
+            imageLoadingJob = null
+
             imageFiles.clear()
             copyPendingRemovals()
+            // Also clean up any orphaned .part temp files from interrupted copies
+            inputDir.listFiles()?.forEach { file ->
+                if (file.name.endsWith(".part")) file.delete()
+            }
             updateImageListUI()
             updateOutputPreview()
             showLog("All images removed.")
@@ -858,7 +884,16 @@ class MainActivity : AppCompatActivity() {
     private var outputDirPath: String? = null
 
     private fun handleImageFilesSelected(uris: List<Uri>) {
-        lifecycleScope.launch {
+        // Cancel any previous in-flight image-loading coroutine.
+        // This prevents the "loading chaos" bug where:
+        //   1. User picks vendor.img → copy starts (coroutine A)
+        //   2. User clicks Remove All → imageFiles.clear(), but A still running
+        //   3. User picks vendor.img again → copy starts (coroutine B)
+        //   4. Both write to the same destFile → corruption + duplicate log entries
+        // By cancelling the previous job, only the latest picker selection runs.
+        imageLoadingJob?.cancel()
+
+        imageLoadingJob = lifecycleScope.launch {
             // Show "loading" state immediately so the user knows the picker
             // action was registered. Without this, the user sees no feedback
             // until each partition finishes copying — for large partitions
@@ -896,6 +931,14 @@ class MainActivity : AppCompatActivity() {
             }
 
             for (uri in uris) {
+                // Check for cancellation before processing each URI.
+                // If the user clicked "Remove All" or picked new files
+                // (which cancels this job), exit the loop immediately.
+                if (!isActive) {
+                    showLog("Loading cancelled.", LogLevel.WARN)
+                    return@launch
+                }
+
                 val fileName = getFileName(uri) ?: continue
 
                 // Only accept .img files — reject all others
@@ -910,12 +953,23 @@ class MainActivity : AppCompatActivity() {
 
                 val destFile = File(inputDir, fileName)
 
-                // Skip if already added (real file, not placeholder)
+                // Skip if already added (real file, not placeholder).
+                // Also check that the placeholder is still in imageFiles —
+                // if the user clicked "Remove All" mid-loop, the placeholder
+                // is gone and we should skip this file entirely.
+                val placeholderStillPresent = imageFiles.any {
+                    it.first == partitionName && it.second.startsWith("loading:")
+                }
                 if (imageFiles.any { it.first == partitionName && !it.second.startsWith("loading:") }) {
                     showLog("$partitionName already added, skipping.", LogLevel.WARN)
                     // Remove placeholder if present
                     imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
                     runOnUiThread { updateImageListUI() }
+                    continue
+                }
+                if (!placeholderStillPresent) {
+                    // Placeholder was removed (user clicked Remove All) — skip
+                    showLog("Skipped $partitionName — removed before copy completed.", LogLevel.WARN)
                     continue
                 }
 
@@ -924,9 +978,37 @@ class MainActivity : AppCompatActivity() {
                 // from SAF to app-internal storage).
                 showLog("Loading $partitionName …", LogLevel.INFO)
 
+                // Write to a .part temp file first, then atomically rename.
+                // This prevents concurrent writes to the same destFile if
+                // a previous copy is still in progress (defensive — the
+                // imageLoadingJob cancellation above should prevent this,
+                // but the temp-file+rename pattern is a second safety net
+                // against file corruption).
+                val tempFile = File(inputDir, "$fileName.part")
+                tempFile.delete()  // Remove stale .part from previous interrupted copy
+
                 val copyStartTime = System.currentTimeMillis()
-                copyUriToFile(uri, destFile)
+                try {
+                    copyUriToFile(uri, tempFile)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // Coroutine was cancelled — clean up temp file and exit
+                    tempFile.delete()
+                    showLog("Loading cancelled.", LogLevel.WARN)
+                    throw e  // Don't swallow cancellation
+                }
                 val copyDurationMs = System.currentTimeMillis() - copyStartTime
+
+                // Atomic rename: tempFile → destFile
+                destFile.delete()  // Remove any existing file first
+                val renamed = tempFile.renameTo(destFile)
+                if (!renamed) {
+                    showLog("Failed to finalize $partitionName (rename failed)", LogLevel.ERROR)
+                    tempFile.delete()
+                    // Remove placeholder
+                    imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
+                    runOnUiThread { updateImageListUI() }
+                    continue
+                }
 
                 val sizeAfter = destFile.length()
                 val sizeStr = if (sizeAfter > 0) formatFileSize(sizeAfter) else "size unknown"
@@ -935,14 +1017,22 @@ class MainActivity : AppCompatActivity() {
                     String.format("%.1f MB/s", mbPerSec)
                 } else null
 
-                // Replace placeholder with real path
+                // Replace placeholder with real path.
+                // Re-check that the placeholder is still present — the user
+                // may have clicked "Remove All" during the copy. If so, skip
+                // the add (the file is on disk but not in the list, which
+                // is fine — copyPendingRemovals() will clean it up).
                 val placeholderIdx = imageFiles.indexOfFirst {
                     it.first == partitionName && it.second.startsWith("loading:")
                 }
                 if (placeholderIdx >= 0) {
                     imageFiles[placeholderIdx] = partitionName to destFile.absolutePath
                 } else {
-                    imageFiles.add(partitionName to destFile.absolutePath)
+                    // Placeholder was removed during copy — don't re-add.
+                    // Clean up the file we just wrote (it's orphaned).
+                    showLog("$partitionName copy completed but was removed — cleaning up.", LogLevel.WARN)
+                    destFile.delete()
+                    continue
                 }
                 processedCount++
 
@@ -1519,9 +1609,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun copyPendingRemovals() {
-        // Cleanup input dir for removed images
+        // Cleanup input dir for removed images.
+        // Also cleans up orphaned .part temp files from interrupted copies
+        // (e.g. user clicked Remove All mid-copy, or app was killed).
         inputDir.listFiles()?.forEach { file ->
-            if (file.name.endsWith(".img") && !imageFiles.any { it.second == file.absolutePath }) {
+            val isOrphanedImg = file.name.endsWith(".img") &&
+                !imageFiles.any { it.second == file.absolutePath }
+            val isOrphanedPart = file.name.endsWith(".part")
+            if (isOrphanedImg || isOrphanedPart) {
                 file.delete()
             }
         }
