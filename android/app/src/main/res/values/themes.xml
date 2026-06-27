@@ -220,6 +220,14 @@
         <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
     </style>
 
+    <!-- Micro caption — even smaller than Caption.
+         Used for helperText that should look like mini-info hints
+         (e.g. "Leave empty for auto-generated name"). -->
+    <style name="TextAppearance.OTAku.Micro" parent="TextAppearance.Material3.LabelSmall">
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+        <item name="android:textSize">9sp</item>
+    </style>
+
     <!-- Label for form fields -->
     <style name="TextAppearance.OTAku.InputLabel" parent="TextAppearance.Material3.BodyMedium">
         <item name="android:textColor">?attr/colorOnSurfaceVariant</item>

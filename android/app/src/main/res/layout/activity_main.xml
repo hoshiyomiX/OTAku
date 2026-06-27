@@ -58,7 +58,8 @@
         <androidx.core.widget.NestedScrollView
             android:id="@+id/scrollViewSettings"
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
             android:fillViewport="true"
             android:scrollbars="vertical"
             android:fadeScrollbars="true"
@@ -119,12 +120,9 @@
 
                         <!--
                             Device codename input + Auto-Detect button (horizontal layout).
-                            The TextInputLayout takes all available width (weight=1),
-                            the Auto-Detect button sits to its right with a small start
-                            margin. This matches the user's request to move the button
-                            next to the input field (previously it was in the title row
-                            above the input, requiring the user to look up after
-                            focusing the field).
+                            Button is sized to match the input field height (no helperText
+                            on this field — moved to description above). Button font/icon
+                            shrunk to fit the smaller 40dp height.
                         -->
                         <LinearLayout
                             android:layout_width="match_parent"
@@ -144,17 +142,15 @@
                                 app:boxCornerRadiusTopEnd="12dp"
                                 app:boxCornerRadiusBottomStart="12dp"
                                 app:boxCornerRadiusBottomEnd="12dp"
-                                app:boxStrokeColor="?attr/colorOutline"
-                                app:helperText="@string/helper_device_codename"
-                                app:helperTextEnabled="true">
+                                app:boxStrokeColor="?attr/colorOutline">
 
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextDevice"
                                     android:layout_width="match_parent"
-                                    android:layout_height="wrap_content"
+                                    android:layout_height="40dp"
                                     android:inputType="text"
                                     android:maxLines="1"
-                                    android:textSize="14sp" />
+                                    android:textSize="13sp" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -162,17 +158,27 @@
                                 android:id="@+id/buttonAutoDetect"
                                 style="Widget.Material3.Button.TonalButton"
                                 android:layout_width="wrap_content"
-                                android:layout_height="48dp"
+                                android:layout_height="40dp"
                                 android:layout_marginStart="8dp"
                                 android:text="@string/button_auto_detect"
-                                android:textSize="12sp"
+                                android:textSize="10sp"
                                 android:minWidth="0dp"
-                                android:paddingHorizontal="14dp"
+                                android:paddingHorizontal="10dp"
                                 app:icon="@drawable/ic_auto_detect"
-                                app:iconSize="18dp"
+                                app:iconSize="14dp"
+                                app:iconPadding="4dp"
                                 app:cornerRadius="12dp" />
 
                         </LinearLayout>
+
+                        <!-- Helper text below the input (smaller, uses Micro caption style) -->
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/helper_device_codename"
+                            style="@style/TextAppearance.OTAku.Micro"
+                            android:layout_marginStart="4dp"
+                            android:layout_marginBottom="4dp" />
 
                         <!-- Divider -->
                         <View
@@ -346,10 +352,10 @@
                             app:boxStrokeColor="?attr/colorOutline"
                             app:helperText="@string/helper_custom_filename"
                             app:helperTextEnabled="true"
-                            app:helperTextTextAppearance="@style/TextAppearance.OTAku.Caption"
+                            app:helperTextTextAppearance="@style/TextAppearance.OTAku.Micro"
                             app:counterEnabled="true"
                             app:counterMaxLength="128"
-                            app:counterTextAppearance="@style/TextAppearance.OTAku.Caption">
+                            app:counterTextAppearance="@style/TextAppearance.OTAku.Micro">
 
                             <com.google.android.material.textfield.TextInputEditText
                                 android:id="@+id/editTextCustomFilename"
@@ -398,7 +404,8 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:orientation="horizontal"
-                            android:gravity="center_vertical">
+                            android:gravity="center_vertical"
+                            android:layout_marginTop="10dp">
 
                             <com.google.android.material.textfield.TextInputLayout
                                 android:layout_width="0dp"
@@ -465,104 +472,118 @@
                     android:visibility="gone"
                     android:layout_marginBottom="10dp" />
 
-                <!-- ═══════════════════════════════════════════════════ -->
-                <!-- Log Panel — placed below Build button, not locked   -->
-                <!-- ═══════════════════════════════════════════════════ -->
-
-                <com.google.android.material.card.MaterialCardView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    app:cardCornerRadius="16dp"
-                    app:cardElevation="0dp"
-                    app:strokeWidth="1dp"
-                    app:strokeColor="?attr/colorOutlineVariant"
-                    app:cardBackgroundColor="@color/log_background">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical">
-
-                        <!-- Log header bar -->
-                        <LinearLayout
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="horizontal"
-                            android:gravity="center_vertical"
-                            android:paddingHorizontal="12dp"
-                            android:paddingVertical="10dp">
-
-                            <TextView
-                                android:layout_width="0dp"
-                                android:layout_height="wrap_content"
-                                android:layout_weight="1"
-                                android:text="@string/label_output_log"
-                                android:textSize="12sp"
-                                android:textAllCaps="true"
-                                android:letterSpacing="0.08"
-                                android:textColor="@color/log_info" />
-
-                            <com.google.android.material.button.MaterialButton
-                                android:id="@+id/buttonCopyLog"
-                                style="Widget.Material3.Button.TextButton"
-                                android:layout_width="wrap_content"
-                                android:layout_height="32dp"
-                                android:text="@string/button_copy_log"
-                                android:textSize="12sp"
-                                android:minWidth="0dp"
-                                android:paddingHorizontal="12dp" />
-
-                            <com.google.android.material.button.MaterialButton
-                                android:id="@+id/buttonClearLog"
-                                style="Widget.Material3.Button.TextButton"
-                                android:layout_width="wrap_content"
-                                android:layout_height="32dp"
-                                android:text="@string/button_clear_log"
-                                android:textSize="12sp"
-                                android:minWidth="0dp"
-                                android:layout_marginStart="8dp"
-                                android:paddingHorizontal="12dp" />
-
-                        </LinearLayout>
-
-                        <!-- Log divider -->
-                        <View
-                            android:layout_width="match_parent"
-                            android:layout_height="1dp"
-                            android:background="@color/log_divider" />
-
-                        <!-- Scrollable log — scrolls within the card, parent NestedScrollView handles outer scroll -->
-                        <ScrollView
-                            android:id="@+id/scrollViewLog"
-                            android:layout_width="match_parent"
-                            android:layout_height="240dp"
-                            android:fillViewport="true"
-                            android:scrollbars="vertical"
-                            android:fadeScrollbars="true"
-                            android:scrollbarThumbVertical="@android:color/darker_gray"
-                            android:scrollbarSize="4dp">
-
-                            <TextView
-                                android:id="@+id/textViewLog"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:padding="12dp"
-                                android:textColor="@color/log_text"
-                                android:fontFamily="monospace"
-                                android:textSize="11sp"
-                                android:lineSpacingMultiplier="1.3"
-                                android:typeface="monospace"
-                                android:textIsSelectable="true" />
-
-                        </ScrollView>
-
-                    </LinearLayout>
-
-                </com.google.android.material.card.MaterialCardView>
-
             </LinearLayout>
 
         </androidx.core.widget.NestedScrollView>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- Standalone Log Panel — outside NestedScrollView       -->
+        <!--                                                       -->
+        <!-- Sits below the settings scroll area as a sibling,      -->
+        <!-- NOT inside it. This means the log panel is always      -->
+        <!-- visible at the bottom of the screen and scrolls        -->
+        <!-- independently from the settings above. The settings    -->
+        <!-- NestedScrollView has weight=1 (flexible), this log     -->
+        <!-- card has weight=1 (takes ~50% of screen height).       -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginBottom="16dp"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="0dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="?attr/colorOutlineVariant"
+            app:cardBackgroundColor="@color/log_background">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical">
+
+                <!-- Log header bar -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="12dp"
+                    android:paddingVertical="10dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/label_output_log"
+                        android:textSize="12sp"
+                        android:textAllCaps="true"
+                        android:letterSpacing="0.08"
+                        android:textColor="@color/log_info" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/buttonCopyLog"
+                        style="Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:text="@string/button_copy_log"
+                        android:textSize="12sp"
+                        android:minWidth="0dp"
+                        android:paddingHorizontal="12dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/buttonClearLog"
+                        style="Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:text="@string/button_clear_log"
+                        android:textSize="12sp"
+                        android:minWidth="0dp"
+                        android:layout_marginStart="8dp"
+                        android:paddingHorizontal="12dp" />
+
+                </LinearLayout>
+
+                <!-- Log divider -->
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="@color/log_divider" />
+
+                <!-- Standalone scrollable log — fills remaining card height.
+                     The card has weight=1 in the outer LinearLayout, so this
+                     ScrollView gets all remaining screen height after the
+                     settings NestedScrollView takes its share. -->
+                <ScrollView
+                    android:id="@+id/scrollViewLog"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:fillViewport="true"
+                    android:scrollbars="vertical"
+                    android:fadeScrollbars="true"
+                    android:scrollbarThumbVertical="@android:color/darker_gray"
+                    android:scrollbarSize="4dp">
+
+                    <TextView
+                        android:id="@+id/textViewLog"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:padding="12dp"
+                        android:textColor="@color/log_text"
+                        android:fontFamily="monospace"
+                        android:textSize="11sp"
+                        android:lineSpacingMultiplier="1.3"
+                        android:typeface="monospace"
+                        android:textIsSelectable="true" />
+
+                </ScrollView>
+
+            </LinearLayout>
+
+        </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
 
