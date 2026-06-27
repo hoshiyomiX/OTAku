@@ -63,12 +63,18 @@ class MainActivity : AppCompatActivity() {
 
     private var selectedCompression: String = "gzip"
     private var selectedCompressionLevel: Int = 0  // 0 = default (best)
-    private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
     private var isExecuting = false
     companion object {
         // Application-scoped coroutine scope for long-running build operations.
         // Survives Activity destruction when the user minimizes the app.
         private val buildScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+        // Partition image list — moved to companion so it survives Activity recreation
+        // (theme switch via AppCompatDelegate.setDefaultNightMode triggers recreation
+        // since configChanges doesn't include uiMode). Previously this was an instance
+        // member, so switching theme would clear the list and force the user to re-pick.
+        @Volatile
+        private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
 
         // Whether a build is currently running (survives Activity recreation)
         @Volatile var isBuilding = false
@@ -861,10 +867,32 @@ class MainActivity : AppCompatActivity() {
             var processedCount = 0
             if (totalToProcess > 0) {
                 showLog("Loading $totalToProcess partition image(s)…", LogLevel.INFO)
-                // Update partition list immediately so the user sees the
-                // picker registered their selection (even before any file
-                // has finished copying).
-                runOnUiThread { updateImageListUI() }
+
+                // Add IMMEDIATE placeholder rows for all .img files in the
+                // selection, BEFORE copying starts. This gives instant visual
+                // feedback — the user sees "Loading <name>…" rows in the
+                // partition list the moment they close the picker, rather
+                // than waiting for the first copy to complete.
+                //
+                // Each placeholder uses a sentinel path ("loading:<name>")
+                // that updateImageListUI() recognizes and renders with a
+                // "Loading…" label instead of the file size. Once the copy
+                // finishes, we replace the sentinel with the real path.
+                val placeholders = mutableListOf<Pair<String, String>>()
+                for (uri in uris) {
+                    val fileName = getFileName(uri) ?: continue
+                    if (!fileName.lowercase().endsWith(".img")) continue
+                    val partitionName = fileName.removeSuffix(".img").removeSuffix(".IMG")
+                    if (imageFiles.any { it.first == partitionName }) continue
+                    placeholders.add(partitionName to "loading:$partitionName")
+                }
+                if (placeholders.isNotEmpty()) {
+                    imageFiles.addAll(placeholders)
+                    runOnUiThread {
+                        updateImageListUI()
+                        updateOutputPreview()
+                    }
+                }
             }
 
             for (uri in uris) {
@@ -882,23 +910,19 @@ class MainActivity : AppCompatActivity() {
 
                 val destFile = File(inputDir, fileName)
 
-                // Skip if already added
-                if (imageFiles.any { it.first == partitionName }) {
+                // Skip if already added (real file, not placeholder)
+                if (imageFiles.any { it.first == partitionName && !it.second.startsWith("loading:") }) {
                     showLog("$partitionName already added, skipping.", LogLevel.WARN)
+                    // Remove placeholder if present
+                    imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
+                    runOnUiThread { updateImageListUI() }
                     continue
                 }
 
                 // Per-file loading log. The duration depends on partition
                 // size (large system.img / product.img take longer to copy
-                // from SAF to app-internal storage). Showing the partition
-                // name up-front lets the user know which file is being
-                // processed — and the trailing "Loaded" log confirms when
-                // it's done, so the perceived "freeze" becomes a visible
-                // per-file progress indicator.
+                // from SAF to app-internal storage).
                 showLog("Loading $partitionName …", LogLevel.INFO)
-
-                // Try to query file size for a more informative log.
-                // SAF may not always expose size; fall back to "size unknown".
 
                 val copyStartTime = System.currentTimeMillis()
                 copyUriToFile(uri, destFile)
@@ -911,7 +935,15 @@ class MainActivity : AppCompatActivity() {
                     String.format("%.1f MB/s", mbPerSec)
                 } else null
 
-                imageFiles.add(partitionName to destFile.absolutePath)
+                // Replace placeholder with real path
+                val placeholderIdx = imageFiles.indexOfFirst {
+                    it.first == partitionName && it.second.startsWith("loading:")
+                }
+                if (placeholderIdx >= 0) {
+                    imageFiles[placeholderIdx] = partitionName to destFile.absolutePath
+                } else {
+                    imageFiles.add(partitionName to destFile.absolutePath)
+                }
                 processedCount++
 
                 val loadedMsg = buildString {
@@ -922,9 +954,7 @@ class MainActivity : AppCompatActivity() {
                 showLog(loadedMsg, LogLevel.SUCCESS)
 
                 // Update the partition list after each file so the user
-                // sees progressive updates instead of a single batch update
-                // at the end. Critical for multi-partition selections where
-                // total copy time can exceed 30 seconds.
+                // sees progressive updates — placeholder → real entry.
                 runOnUiThread {
                     updateImageListUI()
                     updateOutputPreview()
@@ -1374,13 +1404,28 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val label = android.widget.TextView(this).apply {
-                    text = "  ${idx + 1}. $name  (${formatFileSize(file.length())})"
+                    // Check if this is a placeholder (path starts with "loading:")
+                    // — render "Loading…" instead of file size for instant feedback.
+                    val isLoading = path.startsWith("loading:")
+                    text = if (isLoading) {
+                        "  ${idx + 1}. $name  (Loading…)"
+                    } else {
+                        "  ${idx + 1}. $name  (${formatFileSize(file.length())})"
+                    }
                     textSize = 13f
                     setTextColor(android.util.TypedValue().let { tv ->
                         context.theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
                         tv.data
                     })
-                    typeface = android.graphics.Typeface.MONOSPACE
+                    // Italicize loading entries to visually distinguish them
+                    if (isLoading) {
+                        typeface = android.graphics.Typeface.create(
+                            android.graphics.Typeface.MONOSPACE,
+                            android.graphics.Typeface.ITALIC
+                        )
+                    } else {
+                        typeface = android.graphics.Typeface.MONOSPACE
+                    }
                     layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 }
 
@@ -1451,7 +1496,9 @@ class MainActivity : AppCompatActivity() {
         val btnExecute = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonExecute)
         val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
             ?.text?.toString()?.trim() ?: ""
-        val canBuild = imageFiles.isNotEmpty() && device.isNotEmpty() && !isBuilding
+        // Don't allow Build if any partition is still loading (placeholder)
+        val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
+        val canBuild = imageFiles.isNotEmpty() && !anyLoading && device.isNotEmpty() && !isBuilding
         btnExecute?.isEnabled = canBuild
     }
 
