@@ -6,16 +6,20 @@
     android:tint="?attr/colorOnSurface">
 
     <!--
-        Dark theme icon — Material Symbols Outlined: dark_mode (crescent moon).
+        dark_mode — official Material Icons Round from Google Fonts.
+        Source: https://fonts.gstatic.com/s/i/materialiconsround/dark_mode/v1/24px.svg
 
         Fill color uses ?attr/colorOnSurface (theme-aware):
-          - Light theme: resolves to near-black → visible on light bg
-          - Dark theme : resolves to near-white → visible on dark bg
-          - Suisei theme: resolves to suisei_light_onSurface / suisei_dark_onSurface
-          - Material You: resolves to system-derived onSurface color
+          - Light theme: near-black on light bg
+          - Dark theme : near-white on dark bg
+          - Suisei Blue + Material You: auto-adapts via onSurface attribute
+
+        Downloaded and converted verbatim from Google's official SVG —
+        no hand-editing of pathData. The path geometry is exactly what
+        Google publishes.
     -->
     <path
         android:fillColor="?attr/colorOnSurface"
-        android:pathData="M11.01,3.05C6.51,3.54 3,7.36 3,12c0,4.97 4.03,9 9,9 4.63,0 8.45,-3.5 8.95,-8 0.09,-0.79 -0.78,-1.42 -1.54,-0.95 -0.84,0.54 -1.84,0.85 -2.91,0.85 -2.98,0 -5.4,-2.42 -5.4,-5.4 0,-1.06 0.31,-2.06 0.84,-2.89 0.45,-0.67 -0.04,-1.63 -0.87,-1.56z" />
+        android:pathData="M11.01,3.05C6.51,3.54,3,7.36,3,12c0,4.97,4.03,9,9,9c4.63,0,8.45-3.5,8.95-8c0.09-0.79-0.78-1.42-1.54-0.95 c-0.84,0.54-1.84,0.85-2.91,0.85c-2.98,0-5.4-2.42-5.4-5.4c0-1.06,0.31-2.06,0.84-2.89C12.39,3.94,11.9,2.98,11.01,3.05z" />
 
 </vector>
