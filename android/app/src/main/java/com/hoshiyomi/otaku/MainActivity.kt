@@ -90,6 +90,11 @@ class MainActivity : AppCompatActivity() {
         @Volatile
         private var imageLoadingJob: kotlinx.coroutines.Job? = null
 
+        // Log panel expand/collapse state — survives Activity recreation
+        // (theme switch, configuration changes). Default: expanded.
+        @Volatile
+        var isLogExpanded: Boolean = true
+
         // Whether a build is currently running (survives Activity recreation)
         @Volatile var isBuilding = false
             private set
@@ -756,9 +761,32 @@ class MainActivity : AppCompatActivity() {
             savedLogText.setLength(0)
         }
 
+        // ── Log panel expand/collapse toggle ──
+        // Clicking the header bar or the toggle button collapses the log ScrollView,
+        // giving the settings NestedScrollView more space. Click again to expand.
+        // State is persisted in companion (survives Activity recreation).
+        val logHeader = findViewById<View>(R.id.logHeaderBar)
+        val toggleBtn = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonToggleLog)
+        val logDivider = findViewById<View>(R.id.logDivider)
+        val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
+
+        fun applyLogExpandedState(expanded: Boolean) {
+            logScrollView?.visibility = if (expanded) View.VISIBLE else View.GONE
+            logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
+            toggleBtn?.setIconResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
+        }
+        // Initialize from companion state (default: expanded)
+        applyLogExpandedState(isLogExpanded)
+
+        val toggleLog = {
+            isLogExpanded = !isLogExpanded
+            applyLogExpandedState(isLogExpanded)
+        }
+        logHeader?.setOnClickListener { toggleLog() }
+        toggleBtn?.setOnClickListener { toggleLog() }
+
         // Prevent parent NestedScrollView from stealing scroll events inside the log panel
-        val scrollViewLog = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
-        scrollViewLog?.setOnTouchListener { v, _ ->
+        logScrollView?.setOnTouchListener { v, _ ->
             v.parent?.requestDisallowInterceptTouchEvent(true)
             false
         }
@@ -1568,13 +1596,26 @@ class MainActivity : AppCompatActivity() {
                     text = if (isLoading) {
                         "  ${idx + 1}. $name  (Loading…)"
                     } else {
-                        "  ${idx + 1}. $name  (${formatFileSize(file.length())})"
+                        // For no-copy resolved paths, file.length() may return 0 if
+                        // the file is on a path that java.io.File can't stat (even
+                        // though Rust can read it via MANAGE_EXTERNAL_STORAGE).
+                        // In that case, show "—" instead of "0 B" to avoid confusion.
+                        val size = file.length()
+                        val sizeStr = if (size > 0) formatFileSize(size) else "—"
+                        "  ${idx + 1}. $name  ($sizeStr)"
                     }
                     textSize = 13f
-                    setTextColor(android.util.TypedValue().let { tv ->
-                        context.theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
-                        tv.data
-                    })
+                    // FIX: Use explicit color resource instead of runtime attribute resolution.
+                    // The previous code used context.theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
+                    // which could return 0 or an invalid color in some theme configurations, making
+                    // the text invisible. Using ContextCompat.getColor with an explicit color resource
+                    // guarantees the text is always visible.
+                    setTextColor(
+                        androidx.core.content.ContextCompat.getColor(
+                            this@MainActivity,
+                            if (isLoading) R.color.partition_text_loading else R.color.partition_text
+                        )
+                    )
                     // Italicize loading entries to visually distinguish them
                     if (isLoading) {
                         typeface = android.graphics.Typeface.create(
