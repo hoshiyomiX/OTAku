@@ -12,4 +12,7 @@
 
     <!-- Card borders -->
     <color name="card_border">#3F4944</color>
+
+    <!-- Partition list text dark override (near-white on dark surface) -->
+    <color name="partition_text">#E1E3E0</color>
 </resources>

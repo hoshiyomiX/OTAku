@@ -93,6 +93,15 @@
     <color name="log_background">#1E1E1E</color>
     <color name="log_text">#D4D4D4</color>
     <color name="log_divider">#333333</color>
+
+    <!-- Partition list text — theme-aware via values-night override.
+         Light: near-black (#191C1B) on light surface.
+         Dark: near-white (#E1E3E0) on dark surface.
+         Defined as explicit color resource (not ?attr) because the TextView
+         is created programmatically and ContextCompat.getColor needs a
+         concrete resource ID that Android can resolve per-configuration. -->
+    <color name="partition_text">#191C1B</color>
+    <color name="partition_text_loading">#80CBC4</color>
     <color name="log_error">#F44336</color>
     <color name="log_success">#4CAF50</color>
     <color name="log_warning">#FF9800</color>
