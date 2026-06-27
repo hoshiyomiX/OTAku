@@ -189,6 +189,75 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) { /* notification is non-critical */ }
             appContext = null
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  Build result tracking (survives Activity recreation)
+        // ═══════════════════════════════════════════════════════════════
+
+        /** Most recent build result — captured when build completes, displayed when Activity is alive. */
+        @Volatile private var lastBuildResult: OTAResult? = null
+
+        /** Whether lastBuildResult has been displayed to the user (via UI reset). */
+        @Volatile private var buildResultDisplayed: Boolean = true
+
+        /**
+         * Always-on build completion handler — runs regardless of Activity state.
+         *
+         * This fixes the "screen-off → 15 min later → UI stuck" bug where the
+         * build completes in background but handleBuildResult() was never called
+         * because activityRef was null.
+         *
+         * Always runs (companion-level, uses appContext):
+         *   - Sets isBuilding = false
+         *   - Fires completion notification (success or failure)
+         *   - Marks all partition progress bars as 100%
+         *   - Appends final log line to savedLogText
+         *   - Stops the foreground service
+         *
+         * Conditionally runs (if Activity is alive):
+         *   - setUIExecuting(false) — resets build button text + hides progress bars
+         *   - Sets buildResultDisplayed = true
+         *
+         * If Activity is dead/null (user backgrounded the app), the UI reset is
+         * deferred — onResume() checks lastBuildResult and displays it.
+         */
+        fun recordBuildResult(result: OTAResult) {
+            lastBuildResult = result
+            buildResultDisplayed = false
+            isBuilding = false
+
+            // Always show completion notification (uses appContext, works in background)
+            if (result.success) {
+                val duration = if (result.durationMs < 60000) "${result.durationMs / 1000}s"
+                    else "${result.durationMs / 60000}m ${result.durationMs % 60000 / 1000}s"
+                showProgressNotification("Build complete!", 100)
+                showCompletionNotification(true, "Finished in $duration")
+                savedLogText.append("\n═══ Build complete ═══\n")
+            } else {
+                showCompletionNotification(false, result.error ?: "Unknown error")
+                savedLogText.append("\n[ERROR] ${result.error ?: "Unknown error"}\n")
+            }
+
+            // Mark all partition progress as complete (companion state)
+            for (i in 0 until partitionCount) {
+                partitionProgress[i] = 100
+            }
+
+            // Stop foreground service (uses appContext, works in background)
+            try {
+                appContext?.let { OTAService.stop(it) }
+            } catch (_: Exception) {}
+
+            // Conditionally update UI if Activity is alive
+            val current = activityRef?.get()
+            if (current != null && !current.isFinishing && !current.isDestroyed) {
+                current.runOnUiThread {
+                    current.isExecuting = false
+                    current.setUIExecuting(false)
+                    buildResultDisplayed = true
+                }
+            }
+        }
     }
 
     // App-internal directories
@@ -1054,7 +1123,25 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
 
-                            // Update UI progress bars and log
+                            // Fix K3: ALWAYS persist per-partition progress log line (regardless of Activity state).
+                            // Previously this was inside the activityRef gate, so log lines were lost when
+                            // the app was backgrounded during compression.
+                            val percentChanged = progress.partitionPercent != lastProgressPercent
+                            val pendingLogLine: String? = if (percentChanged) {
+                                lastProgressPercent = progress.partitionPercent
+                                val logMsg = if (progress.partitionPercent in 1..99) {
+                                    "${progress.message} ${progress.partitionPercent}%"
+                                } else {
+                                    progress.message
+                                }
+                                val line = if (logMsg.endsWith("\n")) logMsg else "$logMsg\n"
+                                savedLogText.append(line)  // always persist
+                                line
+                            } else {
+                                null
+                            }
+
+                            // Update UI progress bars and log (only if Activity is alive)
                             val current = activityRef?.get()
                             if (current != null && !current.isFinishing && !current.isDestroyed) {
                                 current.runOnUiThread {
@@ -1071,54 +1158,49 @@ class MainActivity : AppCompatActivity() {
                                         }
                                     }
                                 }
-                                // Log per-partition progress when partitionPercent changes
-                                // Format: "Compressing product 4%" (single clean percentage)
-                                if (progress.partitionPercent != lastProgressPercent) {
-                                    lastProgressPercent = progress.partitionPercent
-                                    val logMsg = if (progress.partitionPercent in 1..99) {
-                                        "${progress.message} ${progress.partitionPercent}%"
-                                    } else {
-                                        progress.message
+                                // UI-only log append if percent changed (persist already done above)
+                                // Use ?.let to get non-null smart cast inside the lambda
+                                // (Kotlin doesn't smart-cast String? to String inside lambdas)
+                                pendingLogLine?.let { line ->
+                                    current.runOnUiThread {
+                                        current.appendLogLineUI(line, LogLevel.PLAIN)
                                     }
-                                    current.showLog(logMsg, LogLevel.INFO)
                                 }
                             }
                         },
                         onOutputLine = { line ->
-                            // Stream native backend output to log in real-time
+                            // Fix K1: ALWAYS persist to companion buffer (survives Activity recreation).
+                            // Previously this was inside the activityRef gate, so log lines were lost
+                            // when the app was backgrounded during the build.
+                            val logLine = if (line.endsWith("\n")) line else "$line\n"
+                            savedLogText.append(logLine)
+
+                            // UI update only if Activity is alive (bypass showLog to avoid double-persist)
                             val current = activityRef?.get()
                             if (current != null && !current.isFinishing && !current.isDestroyed) {
-                                current.showLog(line)
+                                current.runOnUiThread {
+                                    current.appendLogLineUI(logLine, LogLevel.PLAIN)
+                                }
                             }
                         }
                     )
 
                     heartbeatJob.cancel()
 
-                    // Handle result on current Activity instance
-                    val current = activityRef?.get()
-                    if (current != null && !current.isFinishing && !current.isDestroyed) {
-                        current.handleBuildResult(
-                            success = result.success,
-                            output = result.output,
-                            error = result.error,
-                            durationMs = result.durationMs
-                        )
-                    }
+                    // Fix K2: Record build result — always runs (companion-level), handles notification,
+                    // log persistence, partition progress 100%, and conditional UI reset.
+                    // Previously handleBuildResult() was gated by activityRef, so when the app was
+                    // backgrounded, no completion notification fired and UI stayed stuck.
+                    recordBuildResult(result)
                 } catch (e: Exception) {
                     heartbeatJob.cancel()
                     throw e
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
-                showCompletionNotification(false, "Build cancelled")
+                recordBuildResult(OTAResult.error("Build cancelled"))
                 throw e  // Don't swallow coroutine cancellation
             } catch (e: Exception) {
-                val current = activityRef?.get()
-                if (current != null && !current.isFinishing && !current.isDestroyed) {
-                    current.showLog("Build failed: ${e.message}", LogLevel.ERROR)
-                    current.showLog("Check logcat for details.", LogLevel.WARN)
-                }
-                showCompletionNotification(false, "${e.message}")
+                recordBuildResult(OTAResult.error("Build failed: ${e.message ?: "Unknown exception"}"))
             } finally {
                 // Release WakeLock
                 try { wakeLock?.release() } catch (_: Exception) {}
@@ -1382,8 +1464,46 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         } else {
-            // Build finished while app was in background — cancel notification
+            // Build finished while app was in background.
+            // Fix K4: previously only canceled the notification — didn't reset UI or display
+            // the missed completion event. Now we check lastBuildResult and display it.
             cancelBuildNotification()
+            isExecuting = false
+            setUIExecuting(false)
+
+            // If we missed the completion event (build finished while backgrounded),
+            // display it now: mark progress bars 100%, re-render, show completion notification.
+            if (lastBuildResult != null && !buildResultDisplayed) {
+                buildResultDisplayed = true
+                val result = lastBuildResult!!
+
+                // Mark all partition progress as complete
+                for (i in 0 until partitionCount) {
+                    partitionProgress[i] = 100
+                }
+
+                // Re-render progress bars at 100% if visible
+                val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                    ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
+                if (barRow != null && barRow.childCount == partitionCount) {
+                    for (i in 0 until partitionCount) {
+                        val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                        bar?.let {
+                            it.isIndeterminate = false
+                            it.progress = 100
+                        }
+                    }
+                }
+
+                // Re-show completion notification (uses appContext, safe to call here)
+                if (result.success) {
+                    val duration = if (result.durationMs < 60000) "${result.durationMs / 1000}s"
+                        else "${result.durationMs / 60000}m ${result.durationMs % 60000 / 1000}s"
+                    showCompletionNotification(true, "Finished in $duration")
+                } else {
+                    showCompletionNotification(false, result.error ?: "Unknown error")
+                }
+            }
         }
     }
 
@@ -1513,41 +1633,53 @@ class MainActivity : AppCompatActivity() {
         PLAIN("", 0),
     }
 
-    private fun showLog(text: String, level: LogLevel = LogLevel.INFO) {
-        // Add timestamp prefix [HH:mm:ss]
-        val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-        val timestamp = sdf.format(java.util.Date())
+    /**
+     * UI-only log append — does NOT persist to savedLogText.
+     * Caller must persist separately (via savedLogText.append or showLog).
+     * Must be called on the UI thread (wrap in runOnUiThread).
+     *
+     * Used by build callbacks (onOutputLine, onProgress) to decouple
+     * persistence (always runs) from UI update (only if Activity alive).
+     * Fix K1+K3: previously callbacks called showLog() which is gated by
+     * activityRef, losing both persist AND UI when app was backgrounded.
+     */
+    private fun appendLogLineUI(line: String, level: LogLevel = LogLevel.PLAIN) {
+        val textView = findViewById<android.widget.TextView>(R.id.textViewLog) ?: return
 
+        if (level == LogLevel.PLAIN) {
+            textView.append(line)
+        } else {
+            val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+            val timestamp = sdf.format(java.util.Date())
+            val prefix = "[$timestamp] [${level.tag}] "
+            val colored = SpannableString("$prefix$line")
+            try {
+                colored.setSpan(
+                    ForegroundColorSpan(ContextCompat.getColor(this, level.colorRes)),
+                    0, prefix.length, SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            } catch (_: Exception) { /* fallback to plain */ }
+            textView.append(colored)
+        }
+
+        // Scroll to bottom WITHOUT triggering parent NestedScrollView
+        val scrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
+        scrollView?.post {
+            val child = scrollView.getChildAt(0)
+            if (child != null) {
+                val target = child.bottom - scrollView.height
+                scrollView.smoothScrollTo(0, if (target > 0) target else 0)
+            }
+        }
+    }
+
+    private fun showLog(text: String, level: LogLevel = LogLevel.INFO) {
         val line = if (text.endsWith("\n")) text else "$text\n"
         // Persist to companion object (survives Activity recreation)
         savedLogText.append(line)
 
         runOnUiThread {
-            val textView = findViewById<android.widget.TextView>(R.id.textViewLog) ?: return@runOnUiThread
-
-            if (level == LogLevel.PLAIN) {
-                textView.append(line)
-            } else {
-                val prefix = "[$timestamp] [${level.tag}] "
-                val colored = SpannableString("$prefix$line")
-                try {
-                    colored.setSpan(
-                        ForegroundColorSpan(ContextCompat.getColor(this, level.colorRes)),
-                        0, prefix.length, SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
-                    )
-                } catch (_: Exception) { /* fallback to plain */ }
-                textView.append(colored)
-            }
-
-            // Scroll to bottom WITHOUT triggering parent NestedScrollView
-            val scrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
-            scrollView?.post {
-                val child = scrollView.getChildAt(0)
-                if (child != null) {
-                    val target = child.bottom - scrollView.height
-                    scrollView.smoothScrollTo(0, if (target > 0) target else 0)
-                }
-            }
+            appendLogLineUI(line, level)
         }
     }
 
