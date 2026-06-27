@@ -1,11 +1,10 @@
 fn main() {
-    // Rebuild when proto files change
-    println!("cargo:rerun-if-changed=proto/");
-
-    // Phase 2 will add actual protobuf compilation here.
-    // For now, we use hand-defined prost structs in src/proto.rs.
+    // Rebuild when proto files change.
     //
-    // When ready:
+    // The protobuf schema (proto/update_metadata.proto) is currently consumed
+    // by hand-written prost structs in src/proto.rs — no codegen step runs at
+    // build time. If/when proto codegen is enabled, replace this file with:
+    //
     //   prost_build::Config::new()
     //       .bytes(&[
     //           ".otaku.InstallOperation.data_sha256_hash",
@@ -17,4 +16,5 @@ fn main() {
     //           &["proto/"],
     //       )
     //       .unwrap();
+    println!("cargo:rerun-if-changed=proto/");
 }

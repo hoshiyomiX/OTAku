@@ -1,6 +1,6 @@
 // Top-level build file for OTAku
 // Configures plugins used across all subprojects
-// NOTE: Chaquopy removed — uses Rust + JNI native backend (libotaku_native.so)
+// Native backend: Rust cdylib (libotaku_native.so) built by cargo-ndk
 
 buildscript {
     repositories {

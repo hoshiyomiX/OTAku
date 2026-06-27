@@ -530,7 +530,12 @@ cleanup_abort() {{
     sync
     ui_print "! Cleanup complete."
 }}
-trap cleanup_abort EXIT
+# Trap on EXIT (normal exit + uncaught error) AND on common signals
+# (INT = Ctrl-C / Vol-, TERM = recovery abort, HUP = controlling terminal
+# hangup). Without signal traps, SIGTERM from recovery would skip cleanup.
+# The CLEANUP_DONE guard inside cleanup_abort prevents double-execution
+# when a signal handler returns and EXIT fires afterwards.
+trap cleanup_abort EXIT INT TERM HUP
 
 BUNDLE="/tmp/otaku.bin"
 {part_vars}NUM_PARTS={num_parts}
@@ -845,7 +850,12 @@ if [ "$HDR_MAGIC" != "44444255" ]; then
 fi
 
 HDR_VERSION=$(od -A n -t u2 -j 4 -N 2 "$BUNDLE" | tr -d ' ')
-HDR_COMPRESS=$(od -A n -t u1 -j 6 -N 1 "$BUNDLE" | tr -d ' ')
+# HDR_COMPRESS is u16 LE (2 bytes) — read with -t u2 -N 2 to match the
+# header writer (build_header() writes compress_id as u16 LE).
+# Previous code used -t u1 -N 1 which only read the low byte; this worked
+# by accident for compress_id 0-4 (high byte = 0) but would silently
+# truncate if compress_id ever exceeded 255.
+HDR_COMPRESS=$(od -A n -t u2 -j 6 -N 2 "$BUNDLE" | tr -d ' ')
 HDR_NUM_PARTS=$(od -A n -t u2 -j 8 -N 2 "$BUNDLE" | tr -d ' ')
 HDR_HDR_SIZE=$(od -A n -t u2 -j 10 -N 2 "$BUNDLE" | tr -d ' ')
 
@@ -864,16 +874,18 @@ if [ "$HDR_NUM_PARTS" -lt 1 ] || [ "$HDR_NUM_PARTS" -gt 20 ]; then
     exit 1
 fi
 
-if [ "$HDR_HDR_SIZE" -lt 64 ] || [ "$HDR_HDR_SIZE" -gt "$BUNDLE_SIZE" ]; then
-    ui_print "! ABORT: Invalid header size: $HDR_HDR_SIZE"
+# Header size is always exactly 4096 (HEADER_SIZE constant in build_header).
+# Previously accepted any value >= 64, which let malformed bundles pass.
+# Strict equality check rejects any drift from the constant.
+if [ "$HDR_HDR_SIZE" != "4096" ]; then
+    ui_print "! ABORT: Invalid header size: $HDR_HDR_SIZE (expected 4096)"
     exit 1
 fi
 
-DATA_OFFSET=$(( HDR_HDR_SIZE ))
-REMAINDER=$(( DATA_OFFSET % 4096 ))
-if [ "$REMAINDER" -ne 0 ]; then
-    DATA_OFFSET=$(( DATA_OFFSET + 4096 - REMAINDER ))
-fi
+# Header is always 4096-aligned by construction (HEADER_SIZE = 4096).
+# The previous REMAINDER-based alignment loop was dead code (REMAINDER is
+# always 0 when HDR_HDR_SIZE == 4096). Removed for clarity.
+DATA_OFFSET=$HDR_HDR_SIZE
 
 ui_print "  Version=$HDR_VERSION Compress=$HDR_COMPRESS Parts=$HDR_NUM_PARTS"
 ui_print "  Header=$HDR_HDR_SIZE DataOffset=$DATA_OFFSET"
@@ -1008,7 +1020,14 @@ validate_target() {{
     if [ -n "$MOUNT_POINT" ]; then
         ui_print "  Unmounting $name from $MOUNT_POINT..."
         umount "$MOUNT_POINT" 2>/dev/null
-        sleep 1
+        # Verify umount took effect; retry once with sleep if still mounted.
+        # Most umounts are instant — the previous unconditional `sleep 1`
+        # wasted 1s per partition (10 partitions × 1s = 10s of pure stall).
+        # dm-verity and dm-crypt mounts sometimes need a moment to release,
+        # so we keep a single retry as a safety net.
+        if mount 2>/dev/null | grep -q " $MOUNT_POINT "; then
+            sleep 1
+        fi
     fi
 
     PART_SIZE=0
@@ -2035,14 +2054,14 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abcdef1234567890".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
         assert!(script.starts_with("#!/sbin/sh"));
         assert!(script.contains("PART_0_NAME=\"boot\""));
-        assert!(script.contains("PART_0_HASH=\"abcdef1234567890\""));
+        assert!(script.contains("PART_0_HASH=\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\""));
         assert!(script.contains("check_decompressor \"gzip\""));
         assert!(script.contains("sha256sum"));
         assert!(script.contains("VERIFIED OK"));
@@ -2054,7 +2073,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "system".to_string(),
             unc_size: 1073741824,
-            hash_hex: "deadbeef".to_string(),
+            hash_hex: "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567".to_string(),
             comp_size: 536870912,
             data_offset: 0,
         }];
@@ -2069,7 +2088,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
@@ -2083,7 +2102,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abcdef1234567890".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
@@ -2092,7 +2111,7 @@ mod tests {
         assert!(info.contains("gzip (level 6)"));
         assert!(info.contains("crosshatch"));
         assert!(info.contains("[boot]"));
-        assert!(info.contains("abcdef1234567890"));
+        assert!(info.contains("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"));
         assert!(info.contains("enabled"));
     }
 
@@ -2133,7 +2152,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "system".to_string(),
             unc_size: 1073741824,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 536870912,
             data_offset: 0,
         }];
@@ -2167,7 +2186,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
@@ -2207,7 +2226,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "system".to_string(),
             unc_size: 1073741824,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 536870912,
             data_offset: 0,
         }];
@@ -2229,7 +2248,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "system".to_string(),
             unc_size: 1073741824,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 536870912,
             data_offset: 0,
         }];
@@ -2250,7 +2269,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
@@ -2285,7 +2304,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
@@ -2314,7 +2333,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
@@ -2358,7 +2377,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
         }];
@@ -2470,7 +2489,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
         }];
@@ -2505,7 +2524,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
         }];
@@ -2559,7 +2578,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
         }];
@@ -2573,7 +2592,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
         }];
@@ -2587,7 +2606,7 @@ mod tests {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
-            hash_hex: "abc".to_string(),
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
         }];
