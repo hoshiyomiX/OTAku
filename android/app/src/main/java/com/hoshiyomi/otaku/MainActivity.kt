@@ -1393,7 +1393,11 @@ class MainActivity : AppCompatActivity() {
                     icon = androidx.core.content.ContextCompat.getDrawable(
                         this@MainActivity, R.drawable.ic_close
                     )
-                    iconSize = dpToPx(18).toFloat()
+                    // MaterialButton.setIconSize() expects Int (pixels), not Float.
+                    // dpToPx() already returns Int — no .toFloat() needed.
+                    // (Previous .toFloat() caused CI build failure:
+                    // "Type mismatch: inferred type is Float but Int was expected")
+                    iconSize = dpToPx(18)
                     text = null  // icon-only button
                     insetTop = 0
                     insetBottom = 0
