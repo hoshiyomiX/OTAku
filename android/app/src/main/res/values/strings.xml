@@ -62,4 +62,10 @@
 
     <!-- Theme -->
     <string name="theme_label">Toggle theme</string>
+
+    <!-- Dynamic color (Material You / Suisei Blue fallback) -->
+    <string name="dynamic_color_label">Dynamic color</string>
+    <string name="dynamic_color_summary">Use system accent color on Android 12+. Falls back to Suisei Blue (#00B0F0) on older versions.</string>
+    <string name="color_source_material_you">Material You (system accent)</string>
+    <string name="color_source_suisei">Suisei Blue (default)</string>
 </resources>

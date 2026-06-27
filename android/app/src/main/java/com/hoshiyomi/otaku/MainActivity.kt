@@ -322,8 +322,14 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Apply theme BEFORE setContentView
+        // Apply theme BEFORE setContentView.
+        // applyDynamicTheme() decides between:
+        //   - Theme.OTAku (default teal, with Material You overrides on API 31+)
+        //   - Theme.OTAku.Suisei (Suisei Blue fallback on API 26-30 or user-disabled)
+        // applyTheme() (light/dark/system night mode) must run BEFORE setTheme()
+        // because AppCompatDelegate.setDefaultNightMode triggers Activity recreation.
         applyTheme()
+        applyDynamicTheme()
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
@@ -414,6 +420,44 @@ class MainActivity : AppCompatActivity() {
             "light" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
             "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
             else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
+        }
+    }
+
+    /**
+     * Apply dynamic color theme based on device capability and user preference.
+     *
+     * Decision tree:
+     *   - API 31+ (Android 12, Material You available) AND user hasn't disabled
+     *     dynamic color → use Theme.OTAku (default teal, which Material You
+     *     will override at runtime via DynamicColors.applyToActivityIfAvailable)
+     *   - API 26-30 (Material You unavailable) OR user disabled dynamic color
+     *     → use Theme.OTAku.Suisei (Suisei Blue fallback palette #00B0F0)
+     *
+     * Must be called BEFORE setContentView() so the theme attributes are
+     * resolved correctly during view inflation.
+     *
+     * Side effect: on API 31+, also calls DynamicColors.applyToActivityIfAvailable()
+     * to enable Material You wallpaper-derived colors for Material3 components.
+     * This is a no-op on older versions.
+     */
+    private fun applyDynamicTheme() {
+        val useDynamic = SuiseiColors.shouldUseDynamicTheme(prefs)
+        if (useDynamic) {
+            // Use default Theme.OTAku — Material You will override at runtime.
+            setTheme(R.style.Theme_OTAku)
+            // Apply Material You dynamic colors (API 31+ only; no-op below)
+            // DynamicColors is from com.google.android.material:material:1.11+.
+            // Safe to call on all API levels — it checks internally.
+            try {
+                com.google.android.material.color.DynamicColors
+                    .applyToActivityIfAvailable(this)
+            } catch (_: Throwable) {
+                // Defensive: if Material library is older than expected,
+                // fall through silently. Theme.OTAku still works.
+            }
+        } else {
+            // Use Suisei Blue fallback palette.
+            setTheme(R.style.Theme_OTAku_Suisei)
         }
     }
 
