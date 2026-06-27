@@ -65,6 +65,59 @@
     </style>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Suisei Blue fallback theme (light)                            -->
+    <!--                                                               -->
+    <!-- Used on Android 8.0-11 (API 26-30) when Material You is not    -->
+    <!-- available, or when the user has explicitly disabled dynamic    -->
+    <!-- color. Base color #00B0F0 (Hoshimachi Suisei signature blue).  -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <style name="Theme.OTAku.Suisei" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/suisei_light_primary</item>
+        <item name="colorOnPrimary">@color/suisei_light_onPrimary</item>
+        <item name="colorPrimaryContainer">@color/suisei_light_primaryContainer</item>
+        <item name="colorOnPrimaryContainer">@color/suisei_light_onPrimaryContainer</item>
+
+        <item name="colorSecondary">@color/suisei_light_secondary</item>
+        <item name="colorOnSecondary">@color/suisei_light_onSecondary</item>
+        <item name="colorSecondaryContainer">@color/suisei_light_secondaryContainer</item>
+        <item name="colorOnSecondaryContainer">@color/suisei_light_onSecondaryContainer</item>
+
+        <item name="colorTertiary">@color/suisei_light_tertiary</item>
+        <item name="colorOnTertiary">@color/suisei_light_onTertiary</item>
+        <item name="colorTertiaryContainer">@color/suisei_light_tertiaryContainer</item>
+        <item name="colorOnTertiaryContainer">@color/suisei_light_onTertiaryContainer</item>
+
+        <item name="colorError">@color/suisei_light_error</item>
+        <item name="colorOnError">@color/suisei_light_onError</item>
+        <item name="colorErrorContainer">@color/suisei_light_errorContainer</item>
+        <item name="colorOnErrorContainer">@color/suisei_light_onErrorContainer</item>
+
+        <item name="android:colorBackground">@color/suisei_light_background</item>
+        <item name="colorOnBackground">@color/suisei_light_onBackground</item>
+        <item name="colorSurface">@color/suisei_light_surface</item>
+        <item name="colorOnSurface">@color/suisei_light_onSurface</item>
+        <item name="colorSurfaceVariant">@color/suisei_light_surfaceVariant</item>
+        <item name="colorOnSurfaceVariant">@color/suisei_light_onSurfaceVariant</item>
+
+        <item name="colorOutline">@color/suisei_light_outline</item>
+        <item name="colorOutlineVariant">@color/suisei_light_outlineVariant</item>
+
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+
+        <item name="android:textColorPrimary">@color/suisei_light_onSurface</item>
+        <item name="android:textColorSecondary">@color/suisei_light_onSurfaceVariant</item>
+
+        <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
+        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
+        <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
+
+        <item name="colorControlNormal">@color/suisei_light_onSurface</item>
+    </style>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Dark theme override                                           -->
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <style name="Theme.OTAku.Dark" parent="Theme.Material3.Dark.NoActionBar">

@@ -60,4 +60,51 @@
         <!-- Toolbar icon tinting -->
         <item name="colorControlNormal">@color/md_theme_dark_onSurface</item>
     </style>
+
+    <!-- Suisei Blue dark theme override (Material You unavailable on API 26-30) -->
+    <style name="Theme.OTAku.Suisei" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/suisei_dark_primary</item>
+        <item name="colorOnPrimary">@color/suisei_dark_onPrimary</item>
+        <item name="colorPrimaryContainer">@color/suisei_dark_primaryContainer</item>
+        <item name="colorOnPrimaryContainer">@color/suisei_dark_onPrimaryContainer</item>
+
+        <item name="colorSecondary">@color/suisei_dark_secondary</item>
+        <item name="colorOnSecondary">@color/suisei_dark_onSecondary</item>
+        <item name="colorSecondaryContainer">@color/suisei_dark_secondaryContainer</item>
+        <item name="colorOnSecondaryContainer">@color/suisei_dark_onSecondaryContainer</item>
+
+        <item name="colorTertiary">@color/suisei_dark_tertiary</item>
+        <item name="colorOnTertiary">@color/suisei_dark_onTertiary</item>
+        <item name="colorTertiaryContainer">@color/suisei_dark_tertiaryContainer</item>
+        <item name="colorOnTertiaryContainer">@color/suisei_dark_onTertiaryContainer</item>
+
+        <item name="colorError">@color/suisei_dark_error</item>
+        <item name="colorOnError">@color/suisei_dark_onError</item>
+        <item name="colorErrorContainer">@color/suisei_dark_errorContainer</item>
+        <item name="colorOnErrorContainer">@color/suisei_dark_onErrorContainer</item>
+
+        <item name="android:colorBackground">@color/suisei_dark_background</item>
+        <item name="colorOnBackground">@color/suisei_dark_onBackground</item>
+        <item name="colorSurface">@color/suisei_dark_surface</item>
+        <item name="colorOnSurface">@color/suisei_dark_onSurface</item>
+        <item name="colorSurfaceVariant">@color/suisei_dark_surfaceVariant</item>
+        <item name="colorOnSurfaceVariant">@color/suisei_dark_onSurfaceVariant</item>
+
+        <item name="colorOutline">@color/suisei_dark_outline</item>
+        <item name="colorOutlineVariant">@color/suisei_dark_outlineVariant</item>
+
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+
+        <item name="android:textColorPrimary">@color/suisei_dark_onSurface</item>
+        <item name="android:textColorSecondary">@color/suisei_dark_onSurfaceVariant</item>
+
+        <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
+        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
+        <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
+
+        <item name="colorControlNormal">@color/suisei_dark_onSurface</item>
+    </style>
 </resources>

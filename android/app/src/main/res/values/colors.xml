@@ -109,4 +109,82 @@
 
     <!-- Launcher icon background -->
     <color name="ic_launcher_background">#006B5A</color>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Suisei Blue fallback palette                                  -->
+    <!--                                                               -->
+    <!-- Used when dynamic color (Material You) is unavailable          -->
+    <!-- (Android 8.0-11 / API 26-30) or disabled.                      -->
+    <!--                                                               -->
+    <!-- Hoshimachi Suisei's signature vivid cyan-blue (#00B0F0).       -->
+    <!-- Derived palette generated via Material Theme Builder tonal      -->
+    <!-- algorithm — primary, primaryContainer, onPrimary, etc.          -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+
+    <!-- Primary (Suisei blue) -->
+    <color name="suisei_light_primary">#0066A8</color>
+    <color name="suisei_light_onPrimary">#FFFFFF</color>
+    <color name="suisei_light_primaryContainer">#D1E4FF</color>
+    <color name="suisei_light_onPrimaryContainer">#001D36</color>
+
+    <!-- Secondary (cyan-tinted neutral) -->
+    <color name="suisei_light_secondary">#51606F</color>
+    <color name="suisei_light_onSecondary">#FFFFFF</color>
+    <color name="suisei_light_secondaryContainer">#D5E3F8</color>
+    <color name="suisei_light_onSecondaryContainer">#0D1C2B</color>
+
+    <!-- Tertiary (warm accent) -->
+    <color name="suisei_light_tertiary">#695779</color>
+    <color name="suisei_light_onTertiary">#FFFFFF</color>
+    <color name="suisei_light_tertiaryContainer">#F0DBFF</color>
+    <color name="suisei_light_onTertiaryContainer">#231533</color>
+
+    <!-- Error (kept consistent with existing palette) -->
+    <color name="suisei_light_error">#BA1A1A</color>
+    <color name="suisei_light_onError">#FFFFFF</color>
+    <color name="suisei_light_errorContainer">#FFDAD6</color>
+    <color name="suisei_light_onErrorContainer">#410002</color>
+
+    <!-- Background and surface (cool-neutral) -->
+    <color name="suisei_light_background">#FDFCFF</color>
+    <color name="suisei_light_onBackground">#1A1C1E</color>
+    <color name="suisei_light_surface">#FDFCFF</color>
+    <color name="suisei_light_onSurface">#1A1C1E</color>
+    <color name="suisei_light_surfaceVariant">#DFE2EB</color>
+    <color name="suisei_light_onSurfaceVariant">#43474E</color>
+
+    <!-- Outline -->
+    <color name="suisei_light_outline">#73777F</color>
+    <color name="suisei_light_outlineVariant">#C3C7CF</color>
+
+    <!-- Dark variants -->
+    <color name="suisei_dark_primary">#9ECAFF</color>
+    <color name="suisei_dark_onPrimary">#003259</color>
+    <color name="suisei_dark_primaryContainer">#004A78</color>
+    <color name="suisei_dark_onPrimaryContainer">#D1E4FF</color>
+
+    <color name="suisei_dark_secondary">#B9C9DC</color>
+    <color name="suisei_dark_onSecondary">#243240</color>
+    <color name="suisei_dark_secondaryContainer">#384857</color>
+    <color name="suisei_dark_onSecondaryContainer">#D5E3F8</color>
+
+    <color name="suisei_dark_tertiary">#D6BEE5</color>
+    <color name="suisei_dark_onTertiary">#382A49</color>
+    <color name="suisei_dark_tertiaryContainer">#4F4060</color>
+    <color name="suisei_dark_onTertiaryContainer">#F0DBFF</color>
+
+    <color name="suisei_dark_error">#FFB4AB</color>
+    <color name="suisei_dark_onError">#690005</color>
+    <color name="suisei_dark_errorContainer">#93000A</color>
+    <color name="suisei_dark_onErrorContainer">#FFDAD6</color>
+
+    <color name="suisei_dark_background">#1A1C1E</color>
+    <color name="suisei_dark_onBackground">#E2E2E5</color>
+    <color name="suisei_dark_surface">#1A1C1E</color>
+    <color name="suisei_dark_onSurface">#E2E2E5</color>
+    <color name="suisei_dark_surfaceVariant">#43474E</color>
+    <color name="suisei_dark_onSurfaceVariant">#C3C7CF</color>
+
+    <color name="suisei_dark_outline">#8D9199</color>
+    <color name="suisei_dark_outlineVariant">#43474E</color>
 </resources>
