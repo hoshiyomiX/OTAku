@@ -853,6 +853,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleImageFilesSelected(uris: List<Uri>) {
         lifecycleScope.launch {
+            // Show "loading" state immediately so the user knows the picker
+            // action was registered. Without this, the user sees no feedback
+            // until each partition finishes copying — for large partitions
+            // (e.g. 2GB system.img), this delay can be 5-15+ seconds.
+            val totalToProcess = uris.size
+            var processedCount = 0
+            if (totalToProcess > 0) {
+                showLog("Loading $totalToProcess partition image(s)…", LogLevel.INFO)
+                // Update partition list immediately so the user sees the
+                // picker registered their selection (even before any file
+                // has finished copying).
+                runOnUiThread { updateImageListUI() }
+            }
+
             for (uri in uris) {
                 val fileName = getFileName(uri) ?: continue
 
@@ -874,8 +888,47 @@ class MainActivity : AppCompatActivity() {
                     continue
                 }
 
+                // Per-file loading log. The duration depends on partition
+                // size (large system.img / product.img take longer to copy
+                // from SAF to app-internal storage). Showing the partition
+                // name up-front lets the user know which file is being
+                // processed — and the trailing "Loaded" log confirms when
+                // it's done, so the perceived "freeze" becomes a visible
+                // per-file progress indicator.
+                showLog("Loading $partitionName …", LogLevel.INFO)
+
+                // Try to query file size for a more informative log.
+                // SAF may not always expose size; fall back to "size unknown".
+
+                val copyStartTime = System.currentTimeMillis()
                 copyUriToFile(uri, destFile)
+                val copyDurationMs = System.currentTimeMillis() - copyStartTime
+
+                val sizeAfter = destFile.length()
+                val sizeStr = if (sizeAfter > 0) formatFileSize(sizeAfter) else "size unknown"
+                val speedStr = if (copyDurationMs > 0 && sizeAfter > 0) {
+                    val mbPerSec = (sizeAfter / 1024.0 / 1024.0) / (copyDurationMs / 1000.0)
+                    String.format("%.1f MB/s", mbPerSec)
+                } else null
+
                 imageFiles.add(partitionName to destFile.absolutePath)
+                processedCount++
+
+                val loadedMsg = buildString {
+                    append("Loaded $partitionName ($sizeStr)")
+                    if (speedStr != null) append(" — $speedStr")
+                    if (totalToProcess > 1) append("  [$processedCount/$totalToProcess]")
+                }
+                showLog(loadedMsg, LogLevel.SUCCESS)
+
+                // Update the partition list after each file so the user
+                // sees progressive updates instead of a single batch update
+                // at the end. Critical for multi-partition selections where
+                // total copy time can exceed 30 seconds.
+                runOnUiThread {
+                    updateImageListUI()
+                    updateOutputPreview()
+                }
             }
 
             runOnUiThread {
@@ -1332,19 +1385,30 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val removeBtn = com.google.android.material.button.MaterialButton(this).apply {
-                    text = "x"
-                    textSize = 14f
-                    setTextColor(android.util.TypedValue().let { tv ->
-                        context.theme.resolveAttribute(android.R.attr.colorError, tv, true)
-                        tv.data
-                    })
-                    iconPadding = 0
+                    // Use official Material Icons Round "close" (X) icon instead
+                    // of the previous text "x" which looked unprofessional.
+                    // Icon is self-theming via ?attr/colorOnSurface fillColor;
+                    // we override the tint to colorError so the delete action
+                    // is visually distinct from regular UI elements.
+                    icon = androidx.core.content.ContextCompat.getDrawable(
+                        this@MainActivity, R.drawable.ic_close
+                    )
+                    iconSize = dpToPx(18).toFloat()
+                    text = null  // icon-only button
                     insetTop = 0
                     insetBottom = 0
                     minimumWidth = 0
                     minWidth = 0
-                    setPadding(8, 0, 8, 0)
+                    setPadding(dpToPx(8), 0, dpToPx(8), 0)
                     background = null
+                    // Tint icon with colorError (red) so the delete action is
+                    // visually distinct. colorError resolves correctly across
+                    // all themes (default teal, Suisei Blue, Material You).
+                    iconTint = android.content.res.ColorStateList.valueOf(
+                        androidx.core.content.ContextCompat.getColor(
+                            this@MainActivity, R.color.status_error
+                        )
+                    )
                     layoutParams = android.widget.LinearLayout.LayoutParams(
                         android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                         android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
