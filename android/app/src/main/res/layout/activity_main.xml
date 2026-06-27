@@ -107,16 +107,6 @@
                                 android:text="@string/label_device"
                                 style="@style/TextAppearance.OTAku.SectionTitle" />
 
-                            <com.google.android.material.button.MaterialButton
-                                android:id="@+id/buttonAutoDetect"
-                                style="Widget.Material3.Button.TextButton"
-                                android:layout_width="wrap_content"
-                                android:layout_height="32dp"
-                                android:text="@string/button_auto_detect"
-                                android:textSize="11sp"
-                                android:minWidth="0dp"
-                                android:paddingHorizontal="12dp" />
-
                         </LinearLayout>
 
                         <TextView
@@ -127,29 +117,62 @@
                             android:textColor="?attr/colorOnSurfaceVariant"
                             android:layout_marginBottom="8dp" />
 
-                        <com.google.android.material.textfield.TextInputLayout
-                            android:id="@+id/layoutDevice"
+                        <!--
+                            Device codename input + Auto-Detect button (horizontal layout).
+                            The TextInputLayout takes all available width (weight=1),
+                            the Auto-Detect button sits to its right with a small start
+                            margin. This matches the user's request to move the button
+                            next to the input field (previously it was in the title row
+                            above the input, requiring the user to look up after
+                            focusing the field).
+                        -->
+                        <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:hint="@string/hint_device_codename"
-                            app:boxBackgroundColor="?attr/colorSurface"
-                            app:boxCornerRadiusTopStart="12dp"
-                            app:boxCornerRadiusTopEnd="12dp"
-                            app:boxCornerRadiusBottomStart="12dp"
-                            app:boxCornerRadiusBottomEnd="12dp"
-                            app:boxStrokeColor="?attr/colorOutline"
-                            app:helperText="@string/helper_device_codename"
-                            app:helperTextEnabled="true">
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:layout_marginBottom="2dp">
 
-                            <com.google.android.material.textfield.TextInputEditText
-                                android:id="@+id/editTextDevice"
-                                android:layout_width="match_parent"
+                            <com.google.android.material.textfield.TextInputLayout
+                                android:id="@+id/layoutDevice"
+                                android:layout_width="0dp"
                                 android:layout_height="wrap_content"
-                                android:inputType="text"
-                                android:maxLines="1"
-                                android:textSize="14sp" />
+                                android:layout_weight="1"
+                                android:hint="@string/hint_device_codename"
+                                app:boxBackgroundColor="?attr/colorSurface"
+                                app:boxCornerRadiusTopStart="12dp"
+                                app:boxCornerRadiusTopEnd="12dp"
+                                app:boxCornerRadiusBottomStart="12dp"
+                                app:boxCornerRadiusBottomEnd="12dp"
+                                app:boxStrokeColor="?attr/colorOutline"
+                                app:helperText="@string/helper_device_codename"
+                                app:helperTextEnabled="true">
 
-                        </com.google.android.material.textfield.TextInputLayout>
+                                <com.google.android.material.textfield.TextInputEditText
+                                    android:id="@+id/editTextDevice"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:inputType="text"
+                                    android:maxLines="1"
+                                    android:textSize="14sp" />
+
+                            </com.google.android.material.textfield.TextInputLayout>
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonAutoDetect"
+                                style="Widget.Material3.Button.TonalButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="48dp"
+                                android:layout_marginStart="8dp"
+                                android:text="@string/button_auto_detect"
+                                android:textSize="12sp"
+                                android:minWidth="0dp"
+                                android:paddingHorizontal="14dp"
+                                app:icon="@drawable/ic_auto_detect"
+                                app:iconSize="18dp"
+                                app:cornerRadius="12dp" />
+
+                        </LinearLayout>
 
                         <!-- Divider -->
                         <View
@@ -323,8 +346,10 @@
                             app:boxStrokeColor="?attr/colorOutline"
                             app:helperText="@string/helper_custom_filename"
                             app:helperTextEnabled="true"
+                            app:helperTextTextAppearance="@style/TextAppearance.OTAku.Caption"
                             app:counterEnabled="true"
-                            app:counterMaxLength="128">
+                            app:counterMaxLength="128"
+                            app:counterTextAppearance="@style/TextAppearance.OTAku.Caption">
 
                             <com.google.android.material.textfield.TextInputEditText
                                 android:id="@+id/editTextCustomFilename"
