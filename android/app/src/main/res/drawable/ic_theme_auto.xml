@@ -6,25 +6,20 @@
     android:tint="?attr/colorOnSurface">
 
     <!--
-        Auto/System theme icon — Material Symbols Outlined: brightness_auto.
-
-        Depicts a sun-gear shape with a capital "A" in the center — the
-        universal symbol for "automatic". Cleaner than the previous
-        half-filled circle (brightness_medium) and replaces the 2 composite
-        sun+badge / moon+badge variants that were visually busy at 24dp.
+        brightness_auto — official Material Icons Round from Google Fonts.
+        Source: https://fonts.gstatic.com/s/i/materialiconsround/brightness_auto/v1/24px.svg
 
         Fill color uses ?attr/colorOnSurface (theme-aware):
           - Light theme: near-black on light bg
           - Dark theme : near-white on dark bg
-          - Suisei theme + Material You: auto-adapts via onSurface attribute
+          - Suisei Blue + Material You: auto-adapts via onSurface attribute
+
+        Downloaded and converted verbatim from Google's official SVG —
+        no hand-editing of pathData. The path geometry is exactly what
+        Google publishes.
     -->
     <path
         android:fillColor="?attr/colorOnSurface"
-        android:pathData="M11,7l-3.5,9h1.7l0.7,-2h3.2l0.7,2h1.7L12,7h-1zM10.6,12.6l1.4,-3.9 1.4,3.9h-2.8zM21,12c0,-0.5 -0.04,-1 -0.11,-1.5l1.59,-1.24c0.62,-0.48 0.78,-1.37 0.37,-2.05l-1.13,-1.95c-0.41,-0.71 -1.3,-0.96 -2.03,-0.58l-1.77,0.85c-0.78,-0.59 -1.65,-1.05 -2.59,-1.36l-0.27,-1.94C14.94,1.5 14.27,1 13.5,1h-3c-0.77,0 -1.44,0.5 -1.56,1.23l-0.27,1.94c-0.94,0.31 -1.81,0.77 -2.59,1.36l-1.77,-0.85c-0.73,-0.38 -1.62,-0.13 -2.03,0.58L1.15,7.21c-0.41,0.71 -0.25,1.6 0.37,2.05L3.11,10.5c-0.07,0.5 -0.11,1 -0.11,1.5s0.04,1 0.11,1.5l-1.59,1.24c-0.62,0.48 -0.78,1.37 -0.37,2.05l1.13,1.95c0.41,0.71 1.3,0.96 2.03,0.58l1.77,-0.85c0.78,0.59 1.65,1.05 2.59,1.36l0.27,1.94C9.06,22.5 9.73,23 10.5,23h3c0.77,0 1.44,-0.5 1.56,-1.23l0.27,-1.94c0.94,-0.31 1.81,-0.77 2.59,-1.36l1.77,0.85c0.73,0.38 1.62,0.13 2.03,-0.58l1.13,-1.95c0.41,-0.71 0.25,-1.6 -0.37,-2.05L21.11,13.5c0.07,-0.5 0.11,-1 0.11,-1.5z" />
-
-    <!-- Inner "A" cutout — produces the brightness_auto look (sun-gear with A) -->
-    <path
-        android:fillColor="?attr/colorSurface"
-        android:pathData="M11,7l-3.5,9h1.7l0.7,-2h3.2l0.7,2h1.7L12,7h-1zM10.6,12.6l1.4,-3.9 1.4,3.9h-2.8z" />
+        android:pathData="M10.85 12.65h2.3L12 9l-1.15 3.65zM20 8.69V6c0-1.1-.9-2-2-2h-2.69l-1.9-1.9c-.78-.78-2.05-.78-2.83 0L8.69 4H6c-1.1 0-2 .9-2 2v2.69l-1.9 1.9c-.78.78-.78 2.05 0 2.83l1.9 1.9V18c0 1.1.9 2 2 2h2.69l1.9 1.9c.78.78 2.05.78 2.83 0l1.9-1.9H18c1.1 0 2-.9 2-2v-2.69l1.9-1.9c.78-.78.78-2.05 0-2.83L20 8.69zm-5.91 6.71L13.6 14h-3.2l-.49 1.4c-.13.36-.46.6-.84.6-.62 0-1.05-.61-.84-1.19l2.44-6.86c.2-.57.73-.95 1.33-.95.6 0 1.13.38 1.34.94l2.44 6.86c.21.58-.22 1.19-.84 1.19-.39.01-.72-.23-.85-.59z" />
 
 </vector>
