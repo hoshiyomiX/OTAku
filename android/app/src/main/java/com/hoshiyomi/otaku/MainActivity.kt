@@ -881,6 +881,66 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Resolve a SAF document URI (single file, not tree) to a real filesystem path.
+     *
+     * This is the key to avoiding the copy-to-inputDir step. When the user
+     * picks a .img file via SAF, the URI is typically:
+     *   content://com.android.externalstorage.documents/document/primary%3ADownload%2Fboot.img
+     *
+     * We can parse the document ID ("primary:Download/boot.img") to recover
+     * the real filesystem path ("/storage/emulated/0/Download/boot.img").
+     *
+     * If the file is on external SD card, the volume is the card's UUID
+     * (e.g. "1A2B-3C4D"), and the path is "/storage/1A2B-3C4D/...".
+     *
+     * Returns null if:
+     *   - The URI scheme is not "content" (e.g. already a file:// URI)
+     *   - The document ID can't be parsed (virtual document, cloud provider)
+     *   - The resolved path doesn't exist or isn't readable
+     *
+     * When null is returned, the caller should fall back to copying the file
+     * via ContentResolver.openInputStream() — this handles cloud providers
+     * (Google Drive, etc.) and other virtual documents that don't have a
+     * real filesystem path.
+     */
+    private fun resolveUriToFilePath(uri: Uri): String? {
+        // Only content:// URIs from the Documents provider can be resolved.
+        // file:// URIs already have the path.
+        if (uri.scheme == "file") {
+            val path = uri.path
+            return if (path != null && java.io.File(path).canRead()) path else null
+        }
+        if (uri.scheme != "content") return null
+
+        return try {
+            val docId = DocumentsContract.getDocumentId(uri)
+            val split = docId.split(":", limit = 2)
+            if (split.size != 2) return null
+
+            val volume = split[0]
+            val relativePath = split[1]
+
+            val storageRoot = when (volume) {
+                "primary" -> "/storage/emulated/0"
+                else -> "/storage/$volume"
+            }
+            val fullPath = "$storageRoot/$relativePath"
+
+            // Verify the file exists and is readable by our app.
+            // MANAGE_EXTERNAL_STORAGE grants broad access, but some paths
+            // (e.g. /data/data/other.app/) are still off-limits.
+            val file = java.io.File(fullPath)
+            if (file.exists() && file.canRead()) {
+                fullPath
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private var outputDirPath: String? = null
 
     private fun handleImageFilesSelected(uris: List<Uri>) {
@@ -932,8 +992,6 @@ class MainActivity : AppCompatActivity() {
 
             for (uri in uris) {
                 // Check for cancellation before processing each URI.
-                // If the user clicked "Remove All" or picked new files
-                // (which cancels this job), exit the loop immediately.
                 if (!isActive) {
                     showLog("Loading cancelled.", LogLevel.WARN)
                     return@launch
@@ -951,103 +1009,113 @@ class MainActivity : AppCompatActivity() {
                 val partitionName = fileName.removeSuffix(".img")
                     .removeSuffix(".IMG")
 
-                val destFile = File(inputDir, fileName)
-
                 // Skip if already added (real file, not placeholder).
-                // Also check that the placeholder is still in imageFiles —
-                // if the user clicked "Remove All" mid-loop, the placeholder
-                // is gone and we should skip this file entirely.
                 val placeholderStillPresent = imageFiles.any {
                     it.first == partitionName && it.second.startsWith("loading:")
                 }
                 if (imageFiles.any { it.first == partitionName && !it.second.startsWith("loading:") }) {
                     showLog("$partitionName already added, skipping.", LogLevel.WARN)
-                    // Remove placeholder if present
                     imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
                     runOnUiThread { updateImageListUI() }
                     continue
                 }
                 if (!placeholderStillPresent) {
-                    // Placeholder was removed (user clicked Remove All) — skip
-                    showLog("Skipped $partitionName — removed before copy completed.", LogLevel.WARN)
+                    showLog("Skipped $partitionName — removed before processing.", LogLevel.WARN)
                     continue
                 }
 
-                // Per-file loading log. The duration depends on partition
-                // size (large system.img / product.img take longer to copy
-                // from SAF to app-internal storage).
-                showLog("Loading $partitionName …", LogLevel.INFO)
+                // ── Try to resolve the SAF URI to a real file path (NO COPY) ──
+                // This is the fast path: if the file is on accessible storage
+                // (internal shared storage, external SD card), we can read it
+                // directly from its original location. No copy = no storage
+                // doubling, no loading delay.
+                //
+                // Falls back to copying via ContentResolver.openInputStream()
+                // only if the URI is a virtual document (cloud provider, etc.)
+                // that doesn't have a real filesystem path.
+                val resolvedPath = resolveUriToFilePath(uri)
 
-                // Write to a .part temp file first, then atomically rename.
-                // This prevents concurrent writes to the same destFile if
-                // a previous copy is still in progress (defensive — the
-                // imageLoadingJob cancellation above should prevent this,
-                // but the temp-file+rename pattern is a second safety net
-                // against file corruption).
-                val tempFile = File(inputDir, "$fileName.part")
-                tempFile.delete()  // Remove stale .part from previous interrupted copy
+                if (resolvedPath != null) {
+                    // ── Fast path: use the file in-place (NO COPY) ──
+                    val file = java.io.File(resolvedPath)
+                    val sizeStr = formatFileSize(file.length())
+                    showLog("Linked $partitionName ($sizeStr) — in-place, no copy", LogLevel.SUCCESS)
 
-                val copyStartTime = System.currentTimeMillis()
-                try {
-                    copyUriToFile(uri, tempFile)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    // Coroutine was cancelled — clean up temp file and exit
-                    tempFile.delete()
-                    showLog("Loading cancelled.", LogLevel.WARN)
-                    throw e  // Don't swallow cancellation
-                }
-                val copyDurationMs = System.currentTimeMillis() - copyStartTime
+                    // Replace placeholder with real path
+                    val placeholderIdx = imageFiles.indexOfFirst {
+                        it.first == partitionName && it.second.startsWith("loading:")
+                    }
+                    if (placeholderIdx >= 0) {
+                        imageFiles[placeholderIdx] = partitionName to resolvedPath
+                    } else {
+                        // Placeholder was removed during resolution — don't re-add
+                        showLog("$partitionName resolved but was removed — skipping.", LogLevel.WARN)
+                        continue
+                    }
+                    processedCount++
 
-                // Atomic rename: tempFile → destFile
-                destFile.delete()  // Remove any existing file first
-                val renamed = tempFile.renameTo(destFile)
-                if (!renamed) {
-                    showLog("Failed to finalize $partitionName (rename failed)", LogLevel.ERROR)
-                    tempFile.delete()
-                    // Remove placeholder
-                    imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
-                    runOnUiThread { updateImageListUI() }
-                    continue
-                }
-
-                val sizeAfter = destFile.length()
-                val sizeStr = if (sizeAfter > 0) formatFileSize(sizeAfter) else "size unknown"
-                val speedStr = if (copyDurationMs > 0 && sizeAfter > 0) {
-                    val mbPerSec = (sizeAfter / 1024.0 / 1024.0) / (copyDurationMs / 1000.0)
-                    String.format("%.1f MB/s", mbPerSec)
-                } else null
-
-                // Replace placeholder with real path.
-                // Re-check that the placeholder is still present — the user
-                // may have clicked "Remove All" during the copy. If so, skip
-                // the add (the file is on disk but not in the list, which
-                // is fine — copyPendingRemovals() will clean it up).
-                val placeholderIdx = imageFiles.indexOfFirst {
-                    it.first == partitionName && it.second.startsWith("loading:")
-                }
-                if (placeholderIdx >= 0) {
-                    imageFiles[placeholderIdx] = partitionName to destFile.absolutePath
+                    runOnUiThread {
+                        updateImageListUI()
+                        updateOutputPreview()
+                    }
                 } else {
-                    // Placeholder was removed during copy — don't re-add.
-                    // Clean up the file we just wrote (it's orphaned).
-                    showLog("$partitionName copy completed but was removed — cleaning up.", LogLevel.WARN)
+                    // ── Slow path: copy via ContentResolver (cloud/virtual docs) ──
+                    showLog("Loading $partitionName … (copying — source not directly accessible)", LogLevel.INFO)
+
+                    val destFile = File(inputDir, fileName)
+                    val tempFile = File(inputDir, "$fileName.part")
+                    tempFile.delete()
+
+                    val copyStartTime = System.currentTimeMillis()
+                    try {
+                        copyUriToFile(uri, tempFile)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        tempFile.delete()
+                        showLog("Loading cancelled.", LogLevel.WARN)
+                        throw e
+                    }
+                    val copyDurationMs = System.currentTimeMillis() - copyStartTime
+
                     destFile.delete()
-                    continue
-                }
-                processedCount++
+                    val renamed = tempFile.renameTo(destFile)
+                    if (!renamed) {
+                        showLog("Failed to finalize $partitionName (rename failed)", LogLevel.ERROR)
+                        tempFile.delete()
+                        imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
+                        runOnUiThread { updateImageListUI() }
+                        continue
+                    }
 
-                val loadedMsg = buildString {
-                    append("Loaded $partitionName ($sizeStr)")
-                    if (speedStr != null) append(" — $speedStr")
-                    if (totalToProcess > 1) append("  [$processedCount/$totalToProcess]")
-                }
-                showLog(loadedMsg, LogLevel.SUCCESS)
+                    val sizeAfter = destFile.length()
+                    val sizeStr = if (sizeAfter > 0) formatFileSize(sizeAfter) else "size unknown"
+                    val speedStr = if (copyDurationMs > 0 && sizeAfter > 0) {
+                        val mbPerSec = (sizeAfter / 1024.0 / 1024.0) / (copyDurationMs / 1000.0)
+                        String.format("%.1f MB/s", mbPerSec)
+                    } else null
 
-                // Update the partition list after each file so the user
-                // sees progressive updates — placeholder → real entry.
-                runOnUiThread {
-                    updateImageListUI()
-                    updateOutputPreview()
+                    val placeholderIdx = imageFiles.indexOfFirst {
+                        it.first == partitionName && it.second.startsWith("loading:")
+                    }
+                    if (placeholderIdx >= 0) {
+                        imageFiles[placeholderIdx] = partitionName to destFile.absolutePath
+                    } else {
+                        showLog("$partitionName copy completed but was removed — cleaning up.", LogLevel.WARN)
+                        destFile.delete()
+                        continue
+                    }
+                    processedCount++
+
+                    val loadedMsg = buildString {
+                        append("Loaded $partitionName ($sizeStr)")
+                        if (speedStr != null) append(" — $speedStr")
+                        if (totalToProcess > 1) append("  [$processedCount/$totalToProcess]")
+                    }
+                    showLog(loadedMsg, LogLevel.SUCCESS)
+
+                    runOnUiThread {
+                        updateImageListUI()
+                        updateOutputPreview()
+                    }
                 }
             }
 
@@ -1609,9 +1677,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun copyPendingRemovals() {
-        // Cleanup input dir for removed images.
-        // Also cleans up orphaned .part temp files from interrupted copies
-        // (e.g. user clicked Remove All mid-copy, or app was killed).
+        // Cleanup inputDir for copied images + orphaned .part temp files.
+        //
+        // IMPORTANT: Only delete files INSIDE inputDir. Never delete files
+        // outside inputDir — those are the user's original files at their
+        // original location (used in-place when resolveUriToFilePath succeeded).
+        // Previously this function would delete any .img file that wasn't in
+        // imageFiles, which would have deleted the user's originals if they
+        // had been resolved to a real path instead of copied.
+        val inputDirPath = inputDir.absolutePath
         inputDir.listFiles()?.forEach { file ->
             val isOrphanedImg = file.name.endsWith(".img") &&
                 !imageFiles.any { it.second == file.absolutePath }
