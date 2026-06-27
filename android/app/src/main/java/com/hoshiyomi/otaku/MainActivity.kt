@@ -495,24 +495,27 @@ class MainActivity : AppCompatActivity() {
         invalidateOptionsMenu()
     }
 
-    /** Update the theme toggle menu icon to reflect current mode.
-     *  Auto-detect shows a sun+sync or moon+sync badge depending on
-     *  whether the system currently resolves to light or dark mode. */
+    /**
+     * Update the theme toggle menu icon to reflect current mode.
+     *
+     * Three icon states (down from five — the previous sun+badge and
+     * moon+badge composites were visually busy at 24dp and the badge was
+     * barely visible; consolidated into a single brightness_auto icon):
+     *   - "light"  → sun (Material Symbols: light_mode)
+     *   - "dark"   → moon (Material Symbols: dark_mode)
+     *   - "system" → sun-gear with "A" (Material Symbols: brightness_auto)
+     *
+     * All three icons use ?attr/colorOnSurface as fillColor, so they
+     * automatically adapt to the current theme (light icon on dark bg,
+     * dark icon on light bg). No runtime tinting needed.
+     */
     private fun updateThemeIcon(menu: android.view.Menu?) {
         val item = menu?.findItem(R.id.action_toggle_theme) ?: return
         val mode = prefs.getString("pref_theme_mode", "system") ?: "system"
         item.setIcon(when (mode) {
             "light" -> R.drawable.ic_theme_light
             "dark" -> R.drawable.ic_theme_dark
-            else -> {
-                // Auto-detect: pick icon based on current system night mode
-                val nightMode = resources.configuration.uiMode and
-                    android.content.res.Configuration.UI_MODE_NIGHT_MASK
-                if (nightMode == android.content.res.Configuration.UI_MODE_NIGHT_YES)
-                    R.drawable.ic_theme_auto_dark
-                else
-                    R.drawable.ic_theme_auto_light
-            }
+            else -> R.drawable.ic_theme_auto
         })
     }
 
