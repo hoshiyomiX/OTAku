@@ -95,6 +95,12 @@ class MainActivity : AppCompatActivity() {
         @Volatile
         var isLogExpanded: Boolean = true
 
+        // Drag tracking for pull/push log toggle (not persisted — resets on recreation)
+        @Volatile
+        var lastLogDragStartX: Float = 0f
+        @Volatile
+        var lastLogDragStartY: Float = 0f
+
         // Whether a build is currently running (survives Activity recreation)
         @Volatile var isBuilding = false
             private set
@@ -805,43 +811,51 @@ class MainActivity : AppCompatActivity() {
         }
         toggleBtn?.setOnClickListener { toggleLog() }
 
-        // Swipe up/down + tap on the log header to toggle expand/collapse.
-        // GestureDetector handles both single tap (toggle) and vertical fling
-        // (swipe up = collapse, swipe down = expand).
-        // Threshold: 48px vertical movement, must be more vertical than horizontal.
-        val gestureDetector = android.view.GestureDetector(this,
-            object : android.view.GestureDetector.SimpleOnGestureListener() {
-                override fun onSingleTapUp(e: android.view.MotionEvent): Boolean {
-                    toggleLog()
-                    return true
+        // Pull (drag down) / Push (drag up) on the log header to toggle expand/collapse.
+        // Unlike the previous fling-based swipe, this tracks the finger drag in real-time:
+        //   - ACTION_DOWN: record start Y
+        //   - ACTION_MOVE: if drag exceeds threshold (32px), trigger toggle + reset
+        //   - ACTION_UP: if drag was small (< threshold), treat as tap → toggle
+        // This feels like "pull down to expand, push up to collapse" — more natural
+        // than a fast fling because the user controls the gesture speed.
+        logHeader?.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    // Record start position for drag detection
+                    lastLogDragStartX = event.rawX
+                    lastLogDragStartY = event.rawY
+                    true  // consume to receive MOVE + UP
                 }
-                override fun onFling(
-                    e1: android.view.MotionEvent?,
-                    e2: android.view.MotionEvent,
-                    velocityX: Float,
-                    velocityY: Float
-                ): Boolean {
-                    if (e1 == null) return false
-                    val dy = e2.rawY - e1.rawY
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dy = event.rawY - lastLogDragStartY
                     val absDy = Math.abs(dy)
-                    val absDx = Math.abs(e2.rawX - e1.rawX)
-                    // Only handle vertical swipes (not horizontal)
-                    if (absDy > absDx && absDy > 48f) {
+                    val absDx = Math.abs(event.rawX - lastLogDragStartX)
+                    // Only trigger on vertical drag past threshold
+                    if (absDy > absDx && absDy > 32f) {
                         if (dy < 0) {
-                            // Swipe up → collapse
+                            // Push up → collapse
                             if (isLogExpanded) toggleLog()
                         } else {
-                            // Swipe down → expand
+                            // Pull down → expand
                             if (!isLogExpanded) toggleLog()
                         }
-                        return true
+                        // Reset start position to avoid repeated triggers during one drag
+                        lastLogDragStartY = event.rawY
+                        lastLogDragStartX = event.rawX
                     }
-                    return false
+                    true
                 }
+                android.view.MotionEvent.ACTION_UP -> {
+                    // If finger didn't move much, treat as tap → toggle
+                    val dy = Math.abs(event.rawY - lastLogDragStartY)
+                    val dx = Math.abs(event.rawX - lastLogDragStartX)
+                    if (dy < 32f && dx < 32f) {
+                        toggleLog()
+                    }
+                    true
+                }
+                else -> false
             }
-        )
-        logHeader?.setOnTouchListener { _, event ->
-            gestureDetector.onTouchEvent(event)
         }
 
         // Prevent parent NestedScrollView from stealing scroll events inside the log panel
