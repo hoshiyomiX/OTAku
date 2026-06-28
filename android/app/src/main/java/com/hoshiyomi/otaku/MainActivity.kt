@@ -812,40 +812,46 @@ class MainActivity : AppCompatActivity() {
         toggleBtn?.setOnClickListener { toggleLog() }
 
         // Pull (drag down) / Push (drag up) on the log header to toggle expand/collapse.
-        // Unlike the previous fling-based swipe, this tracks the finger drag in real-time:
-        //   - ACTION_DOWN: record start Y
-        //   - ACTION_MOVE: if drag exceeds threshold (32px), trigger toggle + reset
-        //   - ACTION_UP: if drag was small (< threshold), treat as tap → toggle
-        // This feels like "pull down to expand, push up to collapse" — more natural
-        // than a fast fling because the user controls the gesture speed.
+        // During drag, the log card visually follows the finger (translationY animation)
+        // to give immediate tactile feedback. When the drag exceeds threshold (32px),
+        // the toggle fires and the card animates back to position.
+        // On ACTION_UP: if drag was small (< threshold), treat as tap → toggle.
         logHeader?.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
-                    // Record start position for drag detection
                     lastLogDragStartX = event.rawX
                     lastLogDragStartY = event.rawY
-                    true  // consume to receive MOVE + UP
+                    true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
                     val dy = event.rawY - lastLogDragStartY
                     val absDy = Math.abs(dy)
                     val absDx = Math.abs(event.rawX - lastLogDragStartX)
-                    // Only trigger on vertical drag past threshold
-                    if (absDy > absDx && absDy > 32f) {
-                        if (dy < 0) {
-                            // Push up → collapse
-                            if (isLogExpanded) toggleLog()
-                        } else {
-                            // Pull down → expand
-                            if (!isLogExpanded) toggleLog()
+                    // Only handle vertical drag
+                    if (absDy > absDx) {
+                        // Visual feedback: translate the log card with the finger.
+                        // Clamp to ±48px so the card doesn't jump too far.
+                        val clampedDy = dy.coerceIn(-48f, 48f)
+                        logCard?.animate()?.translationY(clampedDy)?.setDuration(0)?.start()
+
+                        if (absDy > 32f) {
+                            // Threshold exceeded — trigger toggle
+                            if (dy < 0) {
+                                if (isLogExpanded) toggleLog()
+                            } else {
+                                if (!isLogExpanded) toggleLog()
+                            }
+                            // Reset start position to avoid repeated triggers
+                            lastLogDragStartY = event.rawY
+                            lastLogDragStartX = event.rawX
                         }
-                        // Reset start position to avoid repeated triggers during one drag
-                        lastLogDragStartY = event.rawY
-                        lastLogDragStartX = event.rawX
                     }
                     true
                 }
                 android.view.MotionEvent.ACTION_UP -> {
+                    // Animate card back to resting position
+                    logCard?.animate()?.translationY(0f)?.setDuration(200)?.start()
+
                     // If finger didn't move much, treat as tap → toggle
                     val dy = Math.abs(event.rawY - lastLogDragStartY)
                     val dx = Math.abs(event.rawX - lastLogDragStartX)
