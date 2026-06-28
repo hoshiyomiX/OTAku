@@ -780,10 +780,20 @@ class MainActivity : AppCompatActivity() {
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
 
         fun applyLogExpandedState(expanded: Boolean) {
-            // Toggle content visibility
-            logScrollView?.visibility = if (expanded) View.VISIBLE else View.GONE
-            logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
-            // ImageView uses setImageResource (not setIconResource like MaterialButton)
+            // Smooth alpha fade on the ScrollView content for expand/collapse transition.
+            // The LayoutParams change is instant (height swap), but the alpha animation
+            // gives a smooth visual transition instead of an abrupt jump.
+            if (expanded) {
+                logScrollView?.visibility = View.VISIBLE
+                logScrollView?.alpha = 0f
+                logScrollView?.animate()?.alpha(1f)?.setDuration(250)?.start()
+                logDivider?.visibility = View.VISIBLE
+            } else {
+                logScrollView?.animate()?.alpha(0f)?.setDuration(150)?.withEndAction {
+                    logScrollView?.visibility = View.GONE
+                }?.start()
+                logDivider?.visibility = View.GONE
+            }
             toggleBtn?.setImageResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
 
             // Toggle the CARD's layout params — this is the key fix.
@@ -812,10 +822,11 @@ class MainActivity : AppCompatActivity() {
         toggleBtn?.setOnClickListener { toggleLog() }
 
         // Pull (drag down) / Push (drag up) on the log header to toggle expand/collapse.
-        // During drag, the log card visually follows the finger (translationY animation)
-        // to give immediate tactile feedback. When the drag exceeds threshold (32px),
-        // the toggle fires and the card animates back to position.
-        // On ACTION_UP: if drag was small (< threshold), treat as tap → toggle.
+        // Simplified: no translationY visual feedback (caused bouncing/stuck).
+        // Instead, the expand/collapse itself is animated via alpha fade on the ScrollView.
+        //   - ACTION_DOWN: record start
+        //   - ACTION_MOVE: if vertical drag > 32px, trigger toggle + reset start
+        //   - ACTION_UP: if small movement, treat as tap → toggle
         logHeader?.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
@@ -827,32 +838,18 @@ class MainActivity : AppCompatActivity() {
                     val dy = event.rawY - lastLogDragStartY
                     val absDy = Math.abs(dy)
                     val absDx = Math.abs(event.rawX - lastLogDragStartX)
-                    // Only handle vertical drag
-                    if (absDy > absDx) {
-                        // Visual feedback: translate the log card with the finger.
-                        // Clamp to ±48px so the card doesn't jump too far.
-                        val clampedDy = dy.coerceIn(-48f, 48f)
-                        logCard?.animate()?.translationY(clampedDy)?.setDuration(0)?.start()
-
-                        if (absDy > 32f) {
-                            // Threshold exceeded — trigger toggle
-                            if (dy < 0) {
-                                if (isLogExpanded) toggleLog()
-                            } else {
-                                if (!isLogExpanded) toggleLog()
-                            }
-                            // Reset start position to avoid repeated triggers
-                            lastLogDragStartY = event.rawY
-                            lastLogDragStartX = event.rawX
+                    if (absDy > absDx && absDy > 32f) {
+                        if (dy < 0) {
+                            if (isLogExpanded) toggleLog()
+                        } else {
+                            if (!isLogExpanded) toggleLog()
                         }
+                        lastLogDragStartY = event.rawY
+                        lastLogDragStartX = event.rawX
                     }
                     true
                 }
                 android.view.MotionEvent.ACTION_UP -> {
-                    // Animate card back to resting position
-                    logCard?.animate()?.translationY(0f)?.setDuration(200)?.start()
-
-                    // If finger didn't move much, treat as tap → toggle
                     val dy = Math.abs(event.rawY - lastLogDragStartY)
                     val dx = Math.abs(event.rawX - lastLogDragStartX)
                     if (dy < 32f && dx < 32f) {
