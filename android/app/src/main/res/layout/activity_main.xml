@@ -120,8 +120,9 @@
 
                         <!--
                             Device codename input + Auto-Detect button (horizontal layout).
-                            Input takes maximum width (weight=1), button is icon-only
-                            (no text label) to minimize its footprint.
+                            Input takes maximum width (weight=1), button has text + icon.
+                            Original sizing restored — the icon-only button was too small
+                            and hid the "Auto-Detect" label.
                         -->
                         <LinearLayout
                             android:layout_width="match_parent"
@@ -150,24 +151,23 @@
                                     android:inputType="text"
                                     android:maxLines="1"
                                     android:textSize="14sp"
-                                    android:paddingTop="10dp"
-                                    android:paddingBottom="10dp"
                                     android:gravity="center_vertical" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
                             <com.google.android.material.button.MaterialButton
                                 android:id="@+id/buttonAutoDetect"
-                                style="Widget.Material3.Button.IconButton.Filled"
-                                android:layout_width="40dp"
-                                android:layout_height="40dp"
-                                android:layout_marginStart="6dp"
-                                android:contentDescription="@string/button_auto_detect"
+                                style="Widget.Material3.Button.TonalButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:text="@string/button_auto_detect"
+                                android:textSize="12sp"
                                 android:minWidth="0dp"
-                                android:minHeight="0dp"
-                                android:padding="0dp"
+                                android:paddingHorizontal="12dp"
                                 app:icon="@drawable/ic_auto_detect"
-                                app:iconSize="18dp"
+                                app:iconSize="16dp"
+                                app:iconPadding="4dp"
                                 app:cornerRadius="12dp" />
 
                         </LinearLayout>
