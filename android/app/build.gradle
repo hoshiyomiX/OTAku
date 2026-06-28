@@ -13,8 +13,8 @@ android {
         applicationId 'com.hoshiyomi.otaku'
         minSdk 26
         targetSdk 34
-        versionCode 35
-        versionName '3.10.0'
+        versionCode 1
+        versionName '1.0.0'
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         ndk {

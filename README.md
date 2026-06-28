@@ -166,7 +166,7 @@ cd ../android
 
 The debug APK will be at:
 ```
-android/app/build/outputs/apk/arm8/debug/OTAku-3.10.0-arm8-debug.apk
+android/app/build/outputs/apk/arm8/debug/OTAku-1.0.0-arm8-debug.apk
 ```
 
 ### 4. Build a release APK (signed)

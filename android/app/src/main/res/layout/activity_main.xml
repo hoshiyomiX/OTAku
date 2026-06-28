@@ -159,7 +159,8 @@
                                 android:id="@+id/buttonAutoDetect"
                                 style="Widget.Material3.Button.TonalButton"
                                 android:layout_width="wrap_content"
-                                android:layout_height="56dp"
+                                android:layout_height="wrap_content"
+                                android:minHeight="56dp"
                                 android:layout_marginStart="8dp"
                                 android:text="@string/button_auto_detect"
                                 android:textSize="12sp"
@@ -506,7 +507,7 @@
                 android:layout_height="match_parent"
                 android:orientation="vertical">
 
-                <!-- Log header bar — clickable to toggle expand/collapse -->
+                <!-- Log header bar — clickable + swipeable to toggle expand/collapse -->
                 <LinearLayout
                     android:id="@+id/logHeaderBar"
                     android:layout_width="match_parent"
@@ -519,19 +520,8 @@
                     android:focusable="true"
                     android:background="?attr/selectableItemBackgroundBorderless">
 
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/label_output_log"
-                        android:textSize="12sp"
-                        android:textAllCaps="true"
-                        android:letterSpacing="0.08"
-                        android:textColor="@color/log_info" />
-
-                    <!-- Arrow-only toggle (no tile button background).
+                    <!-- Arrow toggle — LEFT of "Logs" text.
                          Plain ImageView with ?attr/colorPrimary tint for accent color.
-                         24dp icon, centered vertically in the header bar.
                          Click handled by parent logHeaderBar (full-width clickable). -->
                     <ImageView
                         android:id="@+id/buttonToggleLog"
@@ -543,7 +533,18 @@
                         android:focusable="true"
                         android:background="?attr/selectableItemBackgroundBorderless"
                         app:tint="?attr/colorPrimary"
-                        android:scaleType="centerInside" />
+                        android:scaleType="centerInside"
+                        android:layout_marginEnd="8dp" />
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/label_output_log"
+                        android:textSize="12sp"
+                        android:textAllCaps="true"
+                        android:letterSpacing="0.08"
+                        android:textColor="@color/log_info" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonCopyLog"
