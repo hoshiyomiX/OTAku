@@ -762,18 +762,38 @@ class MainActivity : AppCompatActivity() {
         }
 
         // ── Log panel expand/collapse toggle ──
-        // Clicking the header bar or the toggle button collapses the log ScrollView,
-        // giving the settings NestedScrollView more space. Click again to expand.
+        // Clicking the header bar or the toggle button collapses the ENTIRE
+        // log card (not just the ScrollView inside). When collapsed, the card
+        // shrinks to just the header bar (~44dp), and the settings
+        // NestedScrollView above gets all the freed space.
         // State is persisted in companion (survives Activity recreation).
+        val logCard = findViewById<com.google.android.material.card.MaterialCardView>(R.id.logCard)
         val logHeader = findViewById<View>(R.id.logHeaderBar)
         val toggleBtn = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonToggleLog)
         val logDivider = findViewById<View>(R.id.logDivider)
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
 
         fun applyLogExpandedState(expanded: Boolean) {
+            // Toggle content visibility
             logScrollView?.visibility = if (expanded) View.VISIBLE else View.GONE
             logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
             toggleBtn?.setIconResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
+
+            // Toggle the CARD's layout params — this is the key fix.
+            // When expanded: height=0dp + weight=1 → card takes its share of screen.
+            // When collapsed: height=wrap_content + weight=0 → card shrinks to just
+            // the header bar height, giving all freed space to the settings scroll.
+            logCard?.let { card ->
+                val params = card.layoutParams as android.widget.LinearLayout.LayoutParams
+                if (expanded) {
+                    params.height = 0
+                    params.weight = 1f
+                } else {
+                    params.height = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    params.weight = 0f
+                }
+                card.layoutParams = params
+            }
         }
         // Initialize from companion state (default: expanded)
         applyLogExpandedState(isLogExpanded)
