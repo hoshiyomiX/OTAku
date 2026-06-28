@@ -15,4 +15,9 @@
 
     <!-- Partition list text dark override (near-white on dark surface) -->
     <color name="partition_text">#E1E3E0</color>
+
+    <!-- Log output dark theme overrides — dark bg + light text -->
+    <color name="log_background">#1E1E1E</color>
+    <color name="log_text">#D4D4D4</color>
+    <color name="log_divider">#333333</color>
 </resources>

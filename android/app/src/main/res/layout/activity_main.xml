@@ -450,20 +450,8 @@
                 </com.google.android.material.card.MaterialCardView>
 
                 <!-- ═══════════════════════════════════════════════════ -->
-                <!-- Build Button + Progress Bar                           -->
+                <!-- Progress Bar (build button moved to FAB)               -->
                 <!-- ═══════════════════════════════════════════════════ -->
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/buttonExecute"
-                    android:layout_width="match_parent"
-                    android:layout_height="52dp"
-                    android:text="@string/button_repack"
-                    android:textSize="15sp"
-                    android:layout_marginTop="2dp"
-                    android:layout_marginBottom="8dp"
-                    app:cornerRadius="14dp"
-                    app:icon="@android:drawable/ic_media_play"
-                    app:iconGravity="textStart" />
 
                 <!-- Per-partition progress bars + labels (built programmatically) -->
                 <LinearLayout
@@ -544,7 +532,7 @@
                         android:textSize="12sp"
                         android:textAllCaps="true"
                         android:letterSpacing="0.08"
-                        android:textColor="@color/log_info" />
+                        android:textColor="?attr/colorPrimary" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonCopyLog"
@@ -595,7 +583,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:padding="12dp"
-                        android:textColor="@color/log_text"
+                        android:textColor="?attr/colorPrimary"
                         android:fontFamily="monospace"
                         android:textSize="11sp"
                         android:lineSpacingMultiplier="1.3"
@@ -609,5 +597,21 @@
         </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
+
+    <!-- ═══════════════════════════════════════════════════ -->
+    <!-- Floating Action Button — Build OTA Now                 -->
+    <!-- Appears at bottom-right, enabled only when all          -->
+    <!-- required fields are filled (partitions + codename).     -->
+    <!-- ═══════════════════════════════════════════════════ -->
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/buttonExecute"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:text="@string/button_repack"
+        android:contentDescription="@string/button_repack"
+        app:icon="@android:drawable/ic_media_play"
+        android:enabled="false" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
