@@ -108,6 +108,11 @@ fn decomp_cmd_for_id(compress_id: u16) -> &'static str {
 }
 
 /// Get the file extension for a compress ID.
+///
+/// Currently only used by tests — not referenced in the production build/flash
+/// pipeline. Gated with `#[cfg(test)]` to avoid dead-code warning in release
+/// builds while keeping the test functional.
+#[cfg(test)]
 fn decomp_ext_for_id(compress_id: u16) -> &'static str {
     match compress_id {
         0 => ".raw",
@@ -1483,7 +1488,7 @@ fn build_flash_info(
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
 
-    lines.push("Renuked v3 — dd-based partition flasher".to_string());
+    lines.push("OTAku v1.0 — dd-based partition flasher".to_string());
     lines.push(format!(
         "Generated: {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
@@ -2107,7 +2112,7 @@ mod tests {
             data_offset: 0,
         }];
         let info = build_flash_info("gzip", 16781312, 1, &meta, "crosshatch", 6, false);
-        assert!(info.contains("Renuked v3"));
+        assert!(info.contains("OTAku v1.0"));
         assert!(info.contains("gzip (level 6)"));
         assert!(info.contains("crosshatch"));
         assert!(info.contains("[boot]"));
