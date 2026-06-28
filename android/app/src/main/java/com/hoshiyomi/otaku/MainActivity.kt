@@ -769,7 +769,7 @@ class MainActivity : AppCompatActivity() {
         // State is persisted in companion (survives Activity recreation).
         val logCard = findViewById<com.google.android.material.card.MaterialCardView>(R.id.logCard)
         val logHeader = findViewById<View>(R.id.logHeaderBar)
-        val toggleBtn = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonToggleLog)
+        val toggleBtn = findViewById<android.widget.ImageView>(R.id.buttonToggleLog)
         val logDivider = findViewById<View>(R.id.logDivider)
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
 
@@ -777,7 +777,8 @@ class MainActivity : AppCompatActivity() {
             // Toggle content visibility
             logScrollView?.visibility = if (expanded) View.VISIBLE else View.GONE
             logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
-            toggleBtn?.setIconResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
+            // ImageView uses setImageResource (not setIconResource like MaterialButton)
+            toggleBtn?.setImageResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
 
             // Toggle the CARD's layout params — this is the key fix.
             // When expanded: height=0dp + weight=1 → card takes its share of screen.
