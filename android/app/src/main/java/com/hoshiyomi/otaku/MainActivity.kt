@@ -1771,7 +1771,7 @@ class MainActivity : AppCompatActivity() {
      * step in custom recovery (TWRP/OrangeFox).
      */
     private fun updateBuildButtonState() {
-        val btnExecute = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonExecute)
+        val btnExecute = findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.buttonExecute)
         val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
             ?.text?.toString()?.trim() ?: ""
         // Don't allow Build if any partition is still loading (placeholder)
@@ -2052,8 +2052,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun setUIExecuting(executing: Boolean) {
         runOnUiThread {
-            val btnExecute = findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonExecute)
+            val btnExecute = findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.buttonExecute)
             btnExecute?.text = if (executing) "BUILDING OTA..." else getString(R.string.button_repack)
+            btnExecute?.isEnabled = !executing
             updateBuildButtonState()
             val container = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
             if (executing) {

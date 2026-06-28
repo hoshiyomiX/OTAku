@@ -78,8 +78,8 @@
     <color name="md_theme_dark_onSurfaceVariant">#BFC9C3</color>
 
     <!-- Outline -->
-    <color name="md_theme_dark_outline">#89938E</color>
-    <color name="md_theme_dark_outlineVariant">#3F4944</color>
+    <color name="md_theme_dark_outline">#5CDBBF</color>
+    <color name="md_theme_dark_outlineVariant">#005145</color>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Utility colors                                                -->
@@ -89,10 +89,11 @@
     <color name="chip_selected_bg">#E0F2F1</color>
     <color name="chip_default_bg">#F5F5F5</color>
 
-    <!-- Log output background -->
-    <color name="log_background">#1E1E1E</color>
-    <color name="log_text">#D4D4D4</color>
-    <color name="log_divider">#333333</color>
+    <!-- Log output — light theme: light bg + dark text.
+         Dark theme overrides in values-night/colors.xml. -->
+    <color name="log_background">#F5F5F5</color>
+    <color name="log_text">#1E1E1E</color>
+    <color name="log_divider">#E0E0E0</color>
 
     <!-- Partition list text — theme-aware via values-night override.
          Light: near-black (#191C1B) on light surface.
@@ -102,6 +103,8 @@
          concrete resource ID that Android can resolve per-configuration. -->
     <color name="partition_text">#191C1B</color>
     <color name="partition_text_loading">#80CBC4</color>
+    <!-- Log level colors — same for both light/dark (terminal-style always-dark bg).
+         log_info is overridden to use ?attr/colorPrimary (accent) via code in showLog(). -->
     <color name="log_error">#F44336</color>
     <color name="log_success">#4CAF50</color>
     <color name="log_warning">#FF9800</color>
@@ -194,6 +197,6 @@
     <color name="suisei_dark_surfaceVariant">#43474E</color>
     <color name="suisei_dark_onSurfaceVariant">#C3C7CF</color>
 
-    <color name="suisei_dark_outline">#8D9199</color>
-    <color name="suisei_dark_outlineVariant">#43474E</color>
+    <color name="suisei_dark_outline">#9ECAFF</color>
+    <color name="suisei_dark_outlineVariant">#004A78</color>
 </resources>
