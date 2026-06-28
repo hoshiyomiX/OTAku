@@ -803,8 +803,46 @@ class MainActivity : AppCompatActivity() {
             isLogExpanded = !isLogExpanded
             applyLogExpandedState(isLogExpanded)
         }
-        logHeader?.setOnClickListener { toggleLog() }
         toggleBtn?.setOnClickListener { toggleLog() }
+
+        // Swipe up/down + tap on the log header to toggle expand/collapse.
+        // GestureDetector handles both single tap (toggle) and vertical fling
+        // (swipe up = collapse, swipe down = expand).
+        // Threshold: 48px vertical movement, must be more vertical than horizontal.
+        val gestureDetector = android.view.GestureDetector(this,
+            object : android.view.GestureDetector.SimpleOnGestureListener() {
+                override fun onSingleTapUp(e: android.view.MotionEvent): Boolean {
+                    toggleLog()
+                    return true
+                }
+                override fun onFling(
+                    e1: android.view.MotionEvent?,
+                    e2: android.view.MotionEvent,
+                    velocityX: Float,
+                    velocityY: Float
+                ): Boolean {
+                    if (e1 == null) return false
+                    val dy = e2.rawY - e1.rawY
+                    val absDy = Math.abs(dy)
+                    val absDx = Math.abs(e2.rawX - e1.rawX)
+                    // Only handle vertical swipes (not horizontal)
+                    if (absDy > absDx && absDy > 48f) {
+                        if (dy < 0) {
+                            // Swipe up → collapse
+                            if (isLogExpanded) toggleLog()
+                        } else {
+                            // Swipe down → expand
+                            if (!isLogExpanded) toggleLog()
+                        }
+                        return true
+                    }
+                    return false
+                }
+            }
+        )
+        logHeader?.setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+        }
 
         // Prevent parent NestedScrollView from stealing scroll events inside the log panel
         logScrollView?.setOnTouchListener { v, _ ->

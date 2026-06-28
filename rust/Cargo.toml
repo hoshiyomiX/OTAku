@@ -1,6 +1,6 @@
 [package]
 name = "otaku-native"
-version = "3.10.0"
+version = "1.0.0"
 edition = "2021"
 description = "OTAku native backend — Rust + JNI for Android"
 
