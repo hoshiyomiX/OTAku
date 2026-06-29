@@ -914,7 +914,7 @@ class MainActivity : AppCompatActivity() {
                 val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
                 animator.duration = durationFor(distance)
                 // Material standard easing for both directions
-                animator.interpolator = android.view.animation.FastOutSlowInInterpolator()
+                animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
                 animator.addUpdateListener { anim ->
                     val h = anim.animatedValue as Int
                     setCardHeight(h, 0f)
