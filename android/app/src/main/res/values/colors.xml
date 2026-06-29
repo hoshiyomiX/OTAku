@@ -78,8 +78,13 @@
     <color name="md_theme_dark_onSurfaceVariant">#BFC9C3</color>
 
     <!-- Outline -->
+    <!-- colorOutline: bright teal accent — used for boxStrokeColor on focused inputs.
+         Must be vivid so input borders glow with the accent color in dark mode. -->
     <color name="md_theme_dark_outline">#5CDBBF</color>
-    <color name="md_theme_dark_outlineVariant">#005145</color>
+    <!-- colorOutlineVariant: lighter teal for unfocused borders + card strokes.
+         Was #005145 (dark teal — looked black on dark surface).
+         Now #2A6B5C — dark enough to be subtle but visibly teal, not black. -->
+    <color name="md_theme_dark_outlineVariant">#2A6B5C</color>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Utility colors                                                -->
@@ -197,6 +202,10 @@
     <color name="suisei_dark_surfaceVariant">#43474E</color>
     <color name="suisei_dark_onSurfaceVariant">#C3C7CF</color>
 
+    <!-- Suisei dark outline: bright sky-blue accent — visible on dark surface -->
     <color name="suisei_dark_outline">#9ECAFF</color>
-    <color name="suisei_dark_outlineVariant">#004A78</color>
+    <!-- Lighter blue for unfocused borders + card strokes.
+         Was #004A78 (dark blue — looked black on dark surface).
+         Now #1F3A5C — dark enough to be subtle but visibly blue, not black. -->
+    <color name="suisei_dark_outlineVariant">#1F3A5C</color>
 </resources>
