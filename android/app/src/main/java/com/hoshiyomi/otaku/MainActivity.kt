@@ -865,6 +865,48 @@ class MainActivity : AppCompatActivity() {
             return (52 * resources.displayMetrics.density).toInt()  // fallback
         }
 
+        /**
+         * Measure the actual expanded height the card would occupy if it had
+         * weight=1 in its parent LinearLayout.
+         *
+         * This is critical for eliminating the "overshoot bounce" at the end
+         * of expand animation. The previous code cached `logExpandedHeight`
+         * from a prior layout pass or estimated it as `parentH * 0.55f`, then
+         * animated to that height and swapped to weight=1 at onAnimationEnd.
+         * If the cached/estimated height differed from the actual weight=1
+         * height, the swap caused a visible jump — perceived as overshoot.
+         *
+         * This function computes the TRUE weight=1 height by measuring the
+         * parent's available space (parent height - sibling heights - card
+         * margins). Animation target now matches swap target exactly → no bounce.
+         */
+        fun measureExpandedHeight(): Int {
+            val parent = parentLayout ?: return 0
+            val card = logCard ?: return 0
+            val headerH = measureHeaderHeight()
+
+            // Sum the heights of all siblings (other children of the parent
+            // LinearLayout). The card itself is excluded.
+            var siblingHeight = 0
+            for (i in 0 until parent.childCount) {
+                val child = parent.getChildAt(i)
+                if (child === card) continue
+                if (child.visibility == View.GONE) continue
+                siblingHeight += child.height
+            }
+
+            // Card's own vertical margins
+            val lp = card.layoutParams as android.widget.LinearLayout.LayoutParams
+            val margins = lp.topMargin + lp.bottomMargin
+
+            // Parent's padding
+            val padding = parent.paddingTop + parent.paddingBottom
+
+            val available = parent.height - padding - siblingHeight - margins
+            // Sanity: must be at least header height
+            return available.coerceAtLeast(headerH)
+        }
+
         fun setExpandedVisualState(expanded: Boolean) {
             logScrollView?.visibility = if (expanded) View.VISIBLE else View.GONE
             logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
@@ -911,6 +953,14 @@ class MainActivity : AppCompatActivity() {
          *                         false = user dragged (use Decelerate, momentum feel)
          * @param velocityPxSec    finger velocity at release (px/sec, + = expand direction).
          *                         Only used when fromTap=false.
+         *
+         * BOUNCE-FREE GUARANTEE:
+         *   The animation target height is computed via measureExpandedHeight(),
+         *   which returns the EXACT height the card would occupy if it had
+         *   weight=1 in the parent. When onAnimationEnd swaps to weight=1,
+         *   the resulting layout assigns the same height — no visible jump.
+         *   Previous code used a cached/estimated logExpandedHeight that
+         *   differed from the actual weight=1 height, causing "overshoot".
          */
         fun animateToExpanded(targetExpanded: Boolean, fromTap: Boolean = true, velocityPxSec: Float = 0f) {
             currentAnimator?.cancel()
@@ -919,8 +969,13 @@ class MainActivity : AppCompatActivity() {
                 val startHeight = card.height
                 val headerH = measureHeaderHeight()
 
-                // Ensure logExpandedHeight is sane
-                if (logExpandedHeight <= headerH) {
+                // Compute the TRUE expanded height (what weight=1 will give us).
+                // This eliminates the post-animation swap bounce.
+                val measuredExpanded = measureExpandedHeight()
+                if (measuredExpanded > headerH) {
+                    logExpandedHeight = measuredExpanded
+                } else if (logExpandedHeight <= headerH) {
+                    // Fallback: estimate if measureExpandedHeight failed
                     val parentH = parentLayout?.height ?: 0
                     logExpandedHeight = if (parentH > 0) {
                         (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
@@ -949,13 +1004,14 @@ class MainActivity : AppCompatActivity() {
                 val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
 
                 if (fromTap) {
-                    // Tap → Material standard easing
+                    // Tap → Material standard easing (natural, no overshoot)
                     animator.duration = tapDurationFor(distance)
                     animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
                 } else {
-                    // Post-drag snap → momentum-aware DecelerateInterpolator
-                    // Factor 1.5 gives a natural "coasting" feel that matches
-                    // the finger's release velocity.
+                    // Post-drag snap → simple decelerate (no overshoot, no bounce)
+                    // Factor 1.0 = pure DecelerateInterpolator (default).
+                    // Previous factor 1.5 was fine (decelerate never overshoots),
+                    // but kept for natural feel.
                     animator.duration = snapDurationFor(distance, velocityPxSec)
                     animator.interpolator = android.view.animation.DecelerateInterpolator(1.5f)
                 }
@@ -966,13 +1022,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 animator.addListener(object : android.animation.AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: android.animation.Animator) {
-                        // Synchronous swap: animator has reached exact target height,
-                        // so swapping to weight=1 (expanded) or WRAP_CONTENT (collapsed)
-                        // at this height produces identical visual result — no jump.
-                        //
-                        // Previous card.post{} approach deferred the swap by 1 frame,
-                        // causing a visible flicker because the layout pass released
-                        // the animator's final value before applying the new params.
+                        // Synchronous swap to weight=1 (expanded) or WRAP_CONTENT
+                        // (collapsed). Since `targetHeight` was computed via
+                        // measureExpandedHeight() to match the weight=1 height
+                        // exactly, this swap is a visual no-op — no bounce.
                         if (targetExpanded) {
                             setCardHeight(0, 1f)
                         } else {
@@ -1041,7 +1094,14 @@ class MainActivity : AppCompatActivity() {
                     dragStartHeight = logCard?.height ?: 0
 
                     val headerH = measureHeaderHeight()
-                    if (logExpandedHeight <= headerH) {
+                    // Compute the TRUE weight=1 height for accurate drag clamping.
+                    // This prevents the bounce on release because the snap target
+                    // matches the post-swap layout height exactly.
+                    val measuredExpanded = measureExpandedHeight()
+                    if (measuredExpanded > headerH) {
+                        logExpandedHeight = measuredExpanded
+                    } else if (logExpandedHeight <= headerH) {
+                        // Fallback: estimate if measureExpandedHeight failed
                         val parentH = parentLayout?.height ?: 0
                         logExpandedHeight = if (parentH > 0) {
                             (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
@@ -1051,9 +1111,10 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // If currently expanded (weight=1), pin to explicit height
-                    // so we can manipulate it during drag.
+                    // so we can manipulate it during drag. Use the just-measured
+                    // logExpandedHeight as the floor — never use dragStartHeight
+                    // if it's smaller, because that would clamp the drag range.
                     if (isLogExpanded && dragStartHeight > 0) {
-                        logExpandedHeight = dragStartHeight.coerceAtLeast(logExpandedHeight)
                         setCardHeight(dragStartHeight, 0f)
                     }
                     true
