@@ -141,8 +141,7 @@
                                 app:boxCornerRadiusTopStart="12dp"
                                 app:boxCornerRadiusTopEnd="12dp"
                                 app:boxCornerRadiusBottomStart="12dp"
-                                app:boxCornerRadiusBottomEnd="12dp"
-                                app:boxStrokeColor="?attr/colorOutline">
+                                app:boxCornerRadiusBottomEnd="12dp">
 
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextDevice"
@@ -351,7 +350,6 @@
                             app:boxCornerRadiusTopEnd="12dp"
                             app:boxCornerRadiusBottomStart="12dp"
                             app:boxCornerRadiusBottomEnd="12dp"
-                            app:boxStrokeColor="?attr/colorOutline"
                             app:helperText="@string/helper_custom_filename"
                             app:helperTextEnabled="true"
                             app:helperTextTextAppearance="@style/TextAppearance.OTAku.Micro"
@@ -418,8 +416,7 @@
                                 app:boxCornerRadiusTopStart="12dp"
                                 app:boxCornerRadiusTopEnd="12dp"
                                 app:boxCornerRadiusBottomStart="12dp"
-                                app:boxCornerRadiusBottomEnd="12dp"
-                                app:boxStrokeColor="?attr/colorOutline">
+                                app:boxCornerRadiusBottomEnd="12dp">
 
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextOutput"

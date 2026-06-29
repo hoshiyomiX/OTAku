@@ -81,10 +81,12 @@
     <!-- colorOutline: bright teal accent — used for boxStrokeColor on focused inputs.
          Must be vivid so input borders glow with the accent color in dark mode. -->
     <color name="md_theme_dark_outline">#5CDBBF</color>
-    <!-- colorOutlineVariant: lighter teal for unfocused borders + card strokes.
-         Was #005145 (dark teal — looked black on dark surface).
-         Now #2A6B5C — dark enough to be subtle but visibly teal, not black. -->
-    <color name="md_theme_dark_outlineVariant">#2A6B5C</color>
+    <!-- colorOutlineVariant: brighter teal for unfocused borders + card strokes.
+         History:
+           #005145  (original — too dark, looked black on #191C1B surface)
+           #2A6B5C  (first fix — still too dark, user reported it looked black)
+           #4DDBC4  (current — visibly teal-tinted, between outline and primaryContainer) -->
+    <color name="md_theme_dark_outlineVariant">#4DDBC4</color>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Utility colors                                                -->
@@ -205,7 +207,9 @@
     <!-- Suisei dark outline: bright sky-blue accent — visible on dark surface -->
     <color name="suisei_dark_outline">#9ECAFF</color>
     <!-- Lighter blue for unfocused borders + card strokes.
-         Was #004A78 (dark blue — looked black on dark surface).
-         Now #1F3A5C — dark enough to be subtle but visibly blue, not black. -->
-    <color name="suisei_dark_outlineVariant">#1F3A5C</color>
+         History:
+           #004A78  (original — too dark, looked black)
+           #1F3A5C  (first fix — still too dark, user reported it looked black)
+           #5C9CDB  (current — visibly blue-tinted, between outline and primaryContainer) -->
+    <color name="suisei_dark_outlineVariant">#5C9CDB</color>
 </resources>
