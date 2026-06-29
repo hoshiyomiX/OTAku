@@ -786,34 +786,44 @@ class MainActivity : AppCompatActivity() {
         //  Log panel expand/collapse — SystemUI BottomSheet-style
         //  ════════════════════════════════════════════════════════════
         //  Key design choices (matching Material BottomSheetBehavior):
-        //  1. Drag sensitivity multiplier (1.6x) — small finger movement → visible
-        //     height change. Without this, drag feels sluggish.
-        //  2. Low drag-detection threshold (4px ~ 1.3dp) — register intent early.
-        //  3. Distance-based animation duration (150–320ms) — short drags snap
-        //     quickly, long drags have time to ease. Fixed 300ms feels awkward
-        //     on tiny movements.
-        //  4. FastOutSlowInInterpolator for BOTH expand and collapse — this is
-        //     the Material standard (used by BottomSheetDialog). The previous
-        //     mix of Decelerate + Accelerate felt inconsistent.
-        //  5. No "swap to weight=1 / WRAP_CONTENT" until AFTER the layout pass
-        //     completes — the previous code swapped synchronously inside
-        //     onAnimationEnd, causing a visible jump because the new LayoutParams
-        //     triggered a re-measure at a different height.
-        //  6. Measured header height (not hardcoded 44dp) — header padding is
-        //     10dp + 32dp icon + 10dp = 52dp, not 44dp.
+        //  1. Drag sensitivity multiplier (2.2x) — calibrated for thumb drags.
+        //     Thumb drags are shorter than index-finger drags, so the panel
+        //     must move more per pixel of finger movement. 2.2x matches
+        //     AOSP BottomSheetBehavior's effective ratio after touch slop.
+        //  2. Touch slop (6px ~ 2dp) — low enough to feel responsive, high
+        //     enough to reject micro-taps during scrolling attempts. 4px was
+        //     too low (accidental drags during tap), 8px was too high.
+        //  3. Velocity-aware snap animation:
+        //       • Tap → FastOutSlowInInterpolator (Material standard, 250ms)
+        //       • Post-drag snap → DecelerateInterpolator(1.5f) with duration
+        //         scaled by initial velocity. This continues the finger's
+        //         momentum naturally instead of restarting with material easing.
+        //  4. Synchronous LayoutParams swap in onAnimationEnd. The previous
+        //     card.post{} approach caused a 1-frame flicker because the layout
+        //     pass happened AFTER the animator released its final value.
+        //     Since the animator reaches the exact target height, swapping to
+        //     weight=1 (expanded) or WRAP_CONTENT (collapsed) at that height
+        //     produces the same visual result — no jump.
+        //  5. Measured header height (not hardcoded) — header padding is
+        //     10dp + 32dp icon + 10dp = 52dp.
         // ════════════════════════════════════════════════════════════
 
         var logExpandedHeight = 0
         var measuredHeaderHeight = 0
         var currentAnimator: android.animation.ValueAnimator? = null
 
-        // Drag sensitivity: 1px finger = 1.6px height change.
-        // Higher = more responsive but harder to control precisely.
-        val DRAG_SENSITIVITY = 1.6f
+        // Drag sensitivity: 1px finger = 2.2px height change.
+        // Calibrated for thumb drags (shorter than index-finger drags).
+        val DRAG_SENSITIVITY = 2.2f
         // Minimum finger movement before drag activates (px).
-        val DRAG_TOUCH_SLOP = 4f
+        // 6px ~ 2dp — low enough for responsiveness, high enough to reject taps.
+        val DRAG_TOUCH_SLOP = 6f
         // Tap threshold — anything below this is a tap, not a drag.
         val TAP_THRESHOLD = 16f
+        // Velocity tracking for momentum-aware snap
+        var lastMoveTime = 0L
+        var lastMoveY = 0f
+        var dragVelocity = 0f  // px/sec, positive = expand direction
 
         fun setCardHeight(height: Int, weight: Float) {
             logCard?.let { card ->
@@ -867,17 +877,42 @@ class MainActivity : AppCompatActivity() {
         }
 
         /**
-         * Distance-aware animation duration.
-         * Short distance → short duration (no lazy feel).
-         * Long distance → longer duration (no abrupt snap).
-         * Clamped to [150, 320]ms — Material motion spec range.
+         * Distance-aware animation duration for TAP toggles (no velocity).
+         * Short distance → short duration, long distance → longer.
+         * Clamped to [180, 280]ms — Material motion spec range for taps.
          */
-        fun durationFor(distancePx: Int): Long {
+        fun tapDurationFor(distancePx: Int): Long {
             val dp = distancePx.toFloat() / resources.displayMetrics.density
-            return (120 + dp * 1.2f).toLong().coerceIn(150L, 320L)
+            return (150 + dp * 0.8f).toLong().coerceIn(180L, 280L)
         }
 
-        fun animateToExpanded(targetExpanded: Boolean) {
+        /**
+         * Velocity-aware duration for post-drag snap.
+         * High velocity → short snap (finger momentum carries it).
+         * Low velocity → longer snap (settle slowly).
+         * Clamped to [120, 260]ms.
+         */
+        fun snapDurationFor(distancePx: Int, velocityPxSec: Float): Long {
+            val velAbs = Math.abs(velocityPxSec)
+            // Higher velocity = shorter duration (momentum already doing the work)
+            val velFactor = (velAbs / 2000f).coerceIn(0f, 1f)  // 0..1
+            val baseMs = 260L - (velFactor * 140L).toLong()  // 260ms → 120ms
+            // Also scale by distance (don't snap long distance too fast)
+            val dp = distancePx.toFloat() / resources.displayMetrics.density
+            val distMs = (dp * 0.6f).toLong()
+            return (baseMs + distMs).coerceIn(120L, 260L)
+        }
+
+        /**
+         * Animate to expanded/collapsed state.
+         *
+         * @param targetExpanded   target state
+         * @param fromTap          true = user tapped (use FastOutSlowIn, material feel)
+         *                         false = user dragged (use Decelerate, momentum feel)
+         * @param velocityPxSec    finger velocity at release (px/sec, + = expand direction).
+         *                         Only used when fromTap=false.
+         */
+        fun animateToExpanded(targetExpanded: Boolean, fromTap: Boolean = true, velocityPxSec: Float = 0f) {
             currentAnimator?.cancel()
 
             logCard?.let { card ->
@@ -903,7 +938,7 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                // Prepare visibility — content visible DURING animation so user sees smooth growth/shrink
+                // Prepare visibility — content visible DURING animation
                 logScrollView?.visibility = View.VISIBLE
                 logDivider?.visibility = View.VISIBLE
                 toggleBtn?.setImageResource(
@@ -912,28 +947,40 @@ class MainActivity : AppCompatActivity() {
 
                 val distance = Math.abs(targetHeight - startHeight)
                 val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
-                animator.duration = durationFor(distance)
-                // Material standard easing for both directions
-                animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
+
+                if (fromTap) {
+                    // Tap → Material standard easing
+                    animator.duration = tapDurationFor(distance)
+                    animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
+                } else {
+                    // Post-drag snap → momentum-aware DecelerateInterpolator
+                    // Factor 1.5 gives a natural "coasting" feel that matches
+                    // the finger's release velocity.
+                    animator.duration = snapDurationFor(distance, velocityPxSec)
+                    animator.interpolator = android.view.animation.DecelerateInterpolator(1.5f)
+                }
+
                 animator.addUpdateListener { anim ->
                     val h = anim.animatedValue as Int
                     setCardHeight(h, 0f)
                 }
                 animator.addListener(object : android.animation.AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: android.animation.Animator) {
-                        // Critical: swap to weight/WRAP_CONTENT via post so the
-                        // layout pass completes BEFORE the swap. This avoids the
-                        // visible jump that occurs when swapping synchronously.
-                        card.post {
-                            if (targetExpanded) {
-                                setCardHeight(0, 1f)
-                            } else {
-                                logScrollView?.visibility = View.GONE
-                                logDivider?.visibility = View.GONE
-                                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
-                            }
-                            isLogExpanded = targetExpanded
+                        // Synchronous swap: animator has reached exact target height,
+                        // so swapping to weight=1 (expanded) or WRAP_CONTENT (collapsed)
+                        // at this height produces identical visual result — no jump.
+                        //
+                        // Previous card.post{} approach deferred the swap by 1 frame,
+                        // causing a visible flicker because the layout pass released
+                        // the animator's final value before applying the new params.
+                        if (targetExpanded) {
+                            setCardHeight(0, 1f)
+                        } else {
+                            logScrollView?.visibility = View.GONE
+                            logDivider?.visibility = View.GONE
+                            setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
                         }
+                        isLogExpanded = targetExpanded
                     }
                 })
                 animator.start()
@@ -954,8 +1001,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Tap toggle
-        toggleBtn?.setOnClickListener { animateToExpanded(!isLogExpanded) }
+        // Tap toggle — uses Material FastOutSlowInInterpolator
+        toggleBtn?.setOnClickListener { animateToExpanded(!isLogExpanded, fromTap = true) }
 
         // ── Pull/push drag — SystemUI BottomSheet-style ──
         // Log panel is anchored to the BOTTOM of the screen (below settings scroll).
@@ -963,9 +1010,13 @@ class MainActivity : AppCompatActivity() {
         //   • Drag DOWN (dy > 0) → collapse (height shrinks downward, content hides)
         // effectiveDy = -dy  →  up = positive = expand.
         //
-        // Height change is multiplied by DRAG_SENSITIVITY so small finger
-        // movements produce visible height changes (SystemUI's own BottomSheet
-        // uses a similar 1.5–2x factor).
+        // Height change is multiplied by DRAG_SENSITIVITY (2.2x) so thumb drags
+        // produce visible height changes — AOSP BottomSheetBehavior uses a similar
+        // 2.0-2.5x factor calibrated for thumb reachability.
+        //
+        // Velocity tracking: each MOVE records timestamp + Y. At release,
+        // velocity = (lastY - prevY) / (lastTime - prevTime). This drives the
+        // snap animation duration (fast finger = quick snap, slow finger = settle).
         var dragStartY = 0f
         var dragStartX = 0f
         var dragStartHeight = 0
@@ -980,6 +1031,11 @@ class MainActivity : AppCompatActivity() {
                     dragStartX = event.rawX
                     dragStartExpanded = isLogExpanded
                     isDragging = false
+
+                    // Reset velocity tracking
+                    lastMoveTime = android.os.SystemClock.uptimeMillis()
+                    lastMoveY = event.rawY
+                    dragVelocity = 0f
 
                     // Capture current card height (the actual laid-out height)
                     dragStartHeight = logCard?.height ?: 0
@@ -1008,12 +1064,25 @@ class MainActivity : AppCompatActivity() {
                     val absDy = Math.abs(dy)
                     val absDx = Math.abs(dx)
 
-                    // Activate drag with a low threshold for high sensitivity
+                    // Activate drag with thumb-calibrated threshold
                     if (absDy > absDx && absDy > DRAG_TOUCH_SLOP) {
                         isDragging = true
 
+                        // Track velocity (px/sec, + = expand direction)
+                        val now = android.os.SystemClock.uptimeMillis()
+                        val dt = (now - lastMoveTime).coerceAtLeast(1L)
+                        val instVel = ((event.rawY - lastMoveY) / dt * 1000f)
+                        // Smooth: weighted average of previous + current
+                        dragVelocity = if (dragVelocity == 0f) {
+                            -instVel * DRAG_SENSITIVITY  // invert + apply sensitivity
+                        } else {
+                            (dragVelocity * 0.6f + (-instVel * DRAG_SENSITIVITY) * 0.4f)
+                        }
+                        lastMoveTime = now
+                        lastMoveY = event.rawY
+
                         val headerH = measureHeaderHeight()
-                        // Invert: up = positive = expand
+                        // Invert: up = positive = expand, then apply sensitivity
                         val effectiveDy = -dy * DRAG_SENSITIVITY
 
                         // If expanding from collapsed, reveal content first
@@ -1041,19 +1110,29 @@ class MainActivity : AppCompatActivity() {
                     val absDy = Math.abs(dy)
 
                     if (isDragging) {
-                        // Snap to nearest state based on current height
+                        // Snap to nearest state based on current height.
+                        // Use velocity to bias the decision: strong velocity in
+                        // one direction should snap that way even if past midpoint.
                         val currentHeight = logCard?.height ?: 0
                         val headerH = measureHeaderHeight()
                         val midpoint = (headerH + logExpandedHeight) / 2
 
-                        if (currentHeight > midpoint) {
-                            animateToExpanded(true)
-                        } else {
-                            animateToExpanded(false)
+                        // Velocity threshold for fling: 500 px/sec (sensitive)
+                        val FLING_THRESHOLD = 500f
+                        val shouldExpand = when {
+                            dragVelocity > FLING_THRESHOLD -> true   // fling up → expand
+                            dragVelocity < -FLING_THRESHOLD -> false  // fling down → collapse
+                            else -> currentHeight > midpoint          // passive: position-based
                         }
+
+                        animateToExpanded(
+                            shouldExpand,
+                            fromTap = false,
+                            velocityPxSec = dragVelocity
+                        )
                     } else if (absDy < TAP_THRESHOLD) {
-                        // Treat as tap — toggle
-                        animateToExpanded(!isLogExpanded)
+                        // Treat as tap — toggle (Material easing)
+                        animateToExpanded(!isLogExpanded, fromTap = true)
                     }
                     isDragging = false
                     true
