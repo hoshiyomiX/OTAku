@@ -937,8 +937,16 @@ class MainActivity : AppCompatActivity() {
                     if (absDy > absDx && absDy > 8f) {
                         isDragging = true
 
+                        // Log panel is at the BOTTOM of the screen.
+                        // Drag UP (dy < 0) → expand (content grows upward)
+                        // Drag DOWN (dy > 0) → collapse (content shrinks downward)
+                        // So we negate dy for height calculation:
+                        //   expand: -dy > 0 → height increases
+                        //   collapse: -dy < 0 → height decreases
+                        val effectiveDy = -dy  // invert: up = positive = expand
+
                         // If expanding from collapsed, make content visible first
-                        if (!dragStartExpanded && dy > 0) {
+                        if (!dragStartExpanded && effectiveDy > 0) {
                             logScrollView?.visibility = View.VISIBLE
                             logDivider?.visibility = View.VISIBLE
                             toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
@@ -948,11 +956,11 @@ class MainActivity : AppCompatActivity() {
                         // Calculate new height based on drag direction
                         var newHeight: Int
                         if (dragStartExpanded) {
-                            // Was expanded — dragging up reduces height
-                            newHeight = (dragStartHeight + dy).toInt()
+                            // Was expanded — dragging down (effectiveDy < 0) reduces height
+                            newHeight = (dragStartHeight + effectiveDy).toInt()
                         } else {
-                            // Was collapsed — dragging down increases height
-                            newHeight = (headerOnlyHeight + dy).toInt()
+                            // Was collapsed — dragging up (effectiveDy > 0) increases height
+                            newHeight = (headerOnlyHeight + effectiveDy).toInt()
                         }
 
                         // Clamp to valid range
