@@ -895,6 +895,7 @@ class MainActivity : AppCompatActivity() {
         // During drag: card height follows finger 1:1.
         // On release: animate to nearest state (expanded or collapsed).
         var dragStartY = 0f
+        var dragStartX = 0f
         var dragStartHeight = 0
         var dragStartExpanded = false
         var isDragging = false
@@ -905,32 +906,35 @@ class MainActivity : AppCompatActivity() {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     currentAnimator?.cancel()
                     dragStartY = event.rawY
+                    dragStartX = event.rawX
                     dragStartExpanded = isLogExpanded
-                    // Capture current card height as drag start
+                    isDragging = false
+
+                    // Capture current card height
                     dragStartHeight = logCard?.height ?: 0
-                    if (dragStartHeight == 0 && isLogExpanded) {
-                        // Card uses weight — measure actual height
-                        dragStartHeight = logCard?.height ?: 0
+
+                    // Ensure logExpandedHeight is set
+                    if (logExpandedHeight == 0 || logExpandedHeight <= headerOnlyHeight) {
+                        // Estimate: half of parent layout height
+                        val parentH = parentLayout?.height ?: 800
+                        logExpandedHeight = (parentH / 2).coerceAtLeast(headerOnlyHeight + 100)
                     }
-                    // If expanded, switch from weight to explicit height for dragging
+
+                    // If expanded (weight=1), switch to explicit height for dragging
                     if (isLogExpanded) {
-                        logExpandedHeight = dragStartHeight
+                        logExpandedHeight = dragStartHeight.coerceAtLeast(logExpandedHeight)
                         setCardHeight(dragStartHeight, 0f)
                     }
-                    isDragging = false
                     true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
                     val dy = event.rawY - dragStartY
+                    val dx = event.rawX - dragStartX
                     val absDy = Math.abs(dy)
-                    val absDx = Math.abs(event.rawX - (dragStartY - event.rawY + event.rawX)) // simplified
+                    val absDx = Math.abs(dx)
 
-                    if (absDy > 8f && absDy > Math.abs(event.rawX - (event.rawX - dy))) {
-                        // Simplified: just check vertical movement
-                    }
-                    val rawDx = Math.abs(event.rawX - (event.rawX))  // always 0, not tracking X
-
-                    if (Math.abs(dy) > 8f) {
+                    // Only handle vertical drags
+                    if (absDy > absDx && absDy > 8f) {
                         isDragging = true
 
                         // If expanding from collapsed, make content visible first
@@ -938,27 +942,21 @@ class MainActivity : AppCompatActivity() {
                             logScrollView?.visibility = View.VISIBLE
                             logDivider?.visibility = View.VISIBLE
                             toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
-                            // Set to header-only height as starting point
                             dragStartHeight = headerOnlyHeight
-                            if (logExpandedHeight == 0) {
-                                logExpandedHeight = (parentLayout?.height ?: 800) / 2
-                            }
                         }
 
-                        // Calculate target height based on drag direction
+                        // Calculate new height based on drag direction
                         var newHeight: Int
                         if (dragStartExpanded) {
                             // Was expanded — dragging up reduces height
-                            newHeight = (logExpandedHeight + dy).toInt()
+                            newHeight = (dragStartHeight + dy).toInt()
                         } else {
                             // Was collapsed — dragging down increases height
                             newHeight = (headerOnlyHeight + dy).toInt()
                         }
 
-                        // Clamp: don't go below header-only, don't exceed expanded height
-                        val maxHeight = if (logExpandedHeight > 0) logExpandedHeight else (parentLayout?.height ?: 800) / 2
-                        newHeight = newHeight.coerceIn(headerOnlyHeight, maxHeight)
-
+                        // Clamp to valid range
+                        newHeight = newHeight.coerceIn(headerOnlyHeight, logExpandedHeight)
                         setCardHeight(newHeight, 0f)
                     }
                     true
@@ -968,16 +966,13 @@ class MainActivity : AppCompatActivity() {
                     val absDy = Math.abs(dy)
 
                     if (isDragging) {
-                        // Decide: expand or collapse based on current height vs midpoint
+                        // Decide based on current height vs midpoint
                         val currentHeight = logCard?.height ?: 0
-                        val maxHeight = if (logExpandedHeight > 0) logExpandedHeight else (parentLayout?.height ?: 800) / 2
-                        val midpoint = (headerOnlyHeight + maxHeight) / 2
+                        val midpoint = (headerOnlyHeight + logExpandedHeight) / 2
 
                         if (currentHeight > midpoint) {
-                            // Animate to expanded
                             animateToExpanded(true)
                         } else {
-                            // Animate to collapsed
                             animateToExpanded(false)
                         }
                     } else if (absDy < 16f) {
