@@ -782,9 +782,38 @@ class MainActivity : AppCompatActivity() {
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
         val parentLayout = logCard?.parent as? android.widget.LinearLayout
 
-        // Track the expanded height (measured once when card is expanded)
+        // ════════════════════════════════════════════════════════════
+        //  Log panel expand/collapse — SystemUI BottomSheet-style
+        //  ════════════════════════════════════════════════════════════
+        //  Key design choices (matching Material BottomSheetBehavior):
+        //  1. Drag sensitivity multiplier (1.6x) — small finger movement → visible
+        //     height change. Without this, drag feels sluggish.
+        //  2. Low drag-detection threshold (4px ~ 1.3dp) — register intent early.
+        //  3. Distance-based animation duration (150–320ms) — short drags snap
+        //     quickly, long drags have time to ease. Fixed 300ms feels awkward
+        //     on tiny movements.
+        //  4. FastOutSlowInInterpolator for BOTH expand and collapse — this is
+        //     the Material standard (used by BottomSheetDialog). The previous
+        //     mix of Decelerate + Accelerate felt inconsistent.
+        //  5. No "swap to weight=1 / WRAP_CONTENT" until AFTER the layout pass
+        //     completes — the previous code swapped synchronously inside
+        //     onAnimationEnd, causing a visible jump because the new LayoutParams
+        //     triggered a re-measure at a different height.
+        //  6. Measured header height (not hardcoded 44dp) — header padding is
+        //     10dp + 32dp icon + 10dp = 52dp, not 44dp.
+        // ════════════════════════════════════════════════════════════
+
         var logExpandedHeight = 0
+        var measuredHeaderHeight = 0
         var currentAnimator: android.animation.ValueAnimator? = null
+
+        // Drag sensitivity: 1px finger = 1.6px height change.
+        // Higher = more responsive but harder to control precisely.
+        val DRAG_SENSITIVITY = 1.6f
+        // Minimum finger movement before drag activates (px).
+        val DRAG_TOUCH_SLOP = 4f
+        // Tap threshold — anything below this is a tap, not a drag.
+        val TAP_THRESHOLD = 16f
 
         fun setCardHeight(height: Int, weight: Float) {
             logCard?.let { card ->
@@ -793,6 +822,37 @@ class MainActivity : AppCompatActivity() {
                 params.weight = weight
                 card.layoutParams = params
             }
+        }
+
+        /**
+         * Measure the header bar height by temporarily hiding the content
+         * and reading the card's measured height. Restores visibility after.
+         * Cached in `measuredHeaderHeight` for subsequent calls.
+         */
+        fun measureHeaderHeight(): Int {
+            if (measuredHeaderHeight > 0) return measuredHeaderHeight
+            logCard?.let { card ->
+                val sv = logScrollView
+                val dv = logDivider
+                val svWasVisible = sv?.visibility ?: View.VISIBLE
+                val dvWasVisible = dv?.visibility ?: View.VISIBLE
+                sv?.visibility = View.GONE
+                dv?.visibility = View.GONE
+                val prevHeight = (card.layoutParams as android.widget.LinearLayout.LayoutParams).height
+                val prevWeight = (card.layoutParams as android.widget.LinearLayout.LayoutParams).weight
+                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                card.measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(card.width, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+                )
+                val h = card.measuredHeight
+                setCardHeight(prevHeight, prevWeight)
+                sv?.visibility = svWasVisible
+                dv?.visibility = dvWasVisible
+                if (h > 0) measuredHeaderHeight = h
+                return h
+            }
+            return (52 * resources.displayMetrics.density).toInt()  // fallback
         }
 
         fun setExpandedVisualState(expanded: Boolean) {
@@ -806,76 +866,78 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        /**
+         * Distance-aware animation duration.
+         * Short distance → short duration (no lazy feel).
+         * Long distance → longer duration (no abrupt snap).
+         * Clamped to [150, 320]ms — Material motion spec range.
+         */
+        fun durationFor(distancePx: Int): Long {
+            val dp = distancePx.toFloat() / resources.displayMetrics.density
+            return (120 + dp * 1.2f).toLong().coerceIn(150L, 320L)
+        }
+
         fun animateToExpanded(targetExpanded: Boolean) {
             currentAnimator?.cancel()
 
-            // Measure current card height
             logCard?.let { card ->
                 val startHeight = card.height
+                val headerH = measureHeaderHeight()
 
-                if (targetExpanded) {
-                    // Expanding: need to know target height
-                    // Temporarily set to expanded to measure, then animate from startHeight
-                    if (logExpandedHeight == 0) {
-                        // First expansion — set expanded, measure, then animate
-                        setExpandedVisualState(true)
-                        card.post {
-                            logExpandedHeight = card.height
-                            // Now animate from startHeight to logExpandedHeight
-                            // But we're already expanded — just return
-                        }
-                        return
+                // Ensure logExpandedHeight is sane
+                if (logExpandedHeight <= headerH) {
+                    val parentH = parentLayout?.height ?: 0
+                    logExpandedHeight = if (parentH > 0) {
+                        (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
+                    } else {
+                        (headerH + 400 * resources.displayMetrics.density).toInt()
                     }
-                    // Animate height from startHeight → 0 (weight takes over at end)
-                    // Actually: animate from startHeight → logExpandedHeight, then swap to weight=1
-                    logScrollView?.visibility = View.VISIBLE
-                    logDivider?.visibility = View.VISIBLE
-                    toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
-
-                    val targetHeight = logExpandedHeight
-                    val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
-                    animator.duration = 300
-                    animator.interpolator = android.view.animation.DecelerateInterpolator()
-                    animator.addUpdateListener { anim ->
-                        val h = anim.animatedValue as Int
-                        setCardHeight(h, 0f)
-                    }
-                    animator.addListener(object : android.animation.AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: android.animation.Animator) {
-                            setCardHeight(0, 1f)  // swap to weight-based
-                            isLogExpanded = true
-                        }
-                    })
-                    animator.start()
-                    currentAnimator = animator
-                } else {
-                    // Collapsing: animate from current height → header-only height
-                    // Measure header height by temporarily collapsing
-                    logScrollView?.visibility = View.VISIBLE  // keep visible during animation
-                    logDivider?.visibility = View.VISIBLE
-                    toggleBtn?.setImageResource(R.drawable.ic_expand_log)
-
-                    // Target = header height (card with just header, no content)
-                    // Approximate: 44dp in px (header padding 10dp*2 + text ~24dp)
-                    val headerHeight = (44 * resources.displayMetrics.density).toInt()
-                    val animator = android.animation.ValueAnimator.ofInt(startHeight, headerHeight)
-                    animator.duration = 300
-                    animator.interpolator = android.view.animation.AccelerateInterpolator()
-                    animator.addUpdateListener { anim ->
-                        val h = anim.animatedValue as Int
-                        setCardHeight(h, 0f)
-                    }
-                    animator.addListener(object : android.animation.AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: android.animation.Animator) {
-                            logScrollView?.visibility = View.GONE
-                            logDivider?.visibility = View.GONE
-                            setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
-                            isLogExpanded = false
-                        }
-                    })
-                    animator.start()
-                    currentAnimator = animator
                 }
+
+                val targetHeight = if (targetExpanded) logExpandedHeight else headerH
+
+                // Skip animation if already at target
+                if (startHeight == targetHeight) {
+                    setExpandedVisualState(targetExpanded)
+                    isLogExpanded = targetExpanded
+                    return
+                }
+
+                // Prepare visibility — content visible DURING animation so user sees smooth growth/shrink
+                logScrollView?.visibility = View.VISIBLE
+                logDivider?.visibility = View.VISIBLE
+                toggleBtn?.setImageResource(
+                    if (targetExpanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log
+                )
+
+                val distance = Math.abs(targetHeight - startHeight)
+                val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
+                animator.duration = durationFor(distance)
+                // Material standard easing for both directions
+                animator.interpolator = android.view.animation.FastOutSlowInInterpolator()
+                animator.addUpdateListener { anim ->
+                    val h = anim.animatedValue as Int
+                    setCardHeight(h, 0f)
+                }
+                animator.addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        // Critical: swap to weight/WRAP_CONTENT via post so the
+                        // layout pass completes BEFORE the swap. This avoids the
+                        // visible jump that occurs when swapping synchronously.
+                        card.post {
+                            if (targetExpanded) {
+                                setCardHeight(0, 1f)
+                            } else {
+                                logScrollView?.visibility = View.GONE
+                                logDivider?.visibility = View.GONE
+                                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                            }
+                            isLogExpanded = targetExpanded
+                        }
+                    }
+                })
+                animator.start()
+                currentAnimator = animator
             }
         }
 
@@ -886,20 +948,29 @@ class MainActivity : AppCompatActivity() {
             if (isLogExpanded && logExpandedHeight == 0) {
                 logExpandedHeight = logCard?.height ?: 0
             }
+            // Pre-measure header so first drag/animation has accurate target
+            if (measuredHeaderHeight == 0) {
+                measureHeaderHeight()
+            }
         }
 
         // Tap toggle
         toggleBtn?.setOnClickListener { animateToExpanded(!isLogExpanded) }
 
-        // Pull/push drag — SystemUI style.
-        // During drag: card height follows finger 1:1.
-        // On release: animate to nearest state (expanded or collapsed).
+        // ── Pull/push drag — SystemUI BottomSheet-style ──
+        // Log panel is anchored to the BOTTOM of the screen (below settings scroll).
+        //   • Drag UP   (dy < 0) → expand   (height grows upward, content reveals)
+        //   • Drag DOWN (dy > 0) → collapse (height shrinks downward, content hides)
+        // effectiveDy = -dy  →  up = positive = expand.
+        //
+        // Height change is multiplied by DRAG_SENSITIVITY so small finger
+        // movements produce visible height changes (SystemUI's own BottomSheet
+        // uses a similar 1.5–2x factor).
         var dragStartY = 0f
         var dragStartX = 0f
         var dragStartHeight = 0
         var dragStartExpanded = false
         var isDragging = false
-        val headerOnlyHeight = (44 * resources.displayMetrics.density).toInt()
 
         logHeader?.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -910,18 +981,22 @@ class MainActivity : AppCompatActivity() {
                     dragStartExpanded = isLogExpanded
                     isDragging = false
 
-                    // Capture current card height
+                    // Capture current card height (the actual laid-out height)
                     dragStartHeight = logCard?.height ?: 0
 
-                    // Ensure logExpandedHeight is set
-                    if (logExpandedHeight == 0 || logExpandedHeight <= headerOnlyHeight) {
-                        // Estimate: half of parent layout height
-                        val parentH = parentLayout?.height ?: 800
-                        logExpandedHeight = (parentH / 2).coerceAtLeast(headerOnlyHeight + 100)
+                    val headerH = measureHeaderHeight()
+                    if (logExpandedHeight <= headerH) {
+                        val parentH = parentLayout?.height ?: 0
+                        logExpandedHeight = if (parentH > 0) {
+                            (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
+                        } else {
+                            (headerH + 400 * resources.displayMetrics.density).toInt()
+                        }
                     }
 
-                    // If expanded (weight=1), switch to explicit height for dragging
-                    if (isLogExpanded) {
+                    // If currently expanded (weight=1), pin to explicit height
+                    // so we can manipulate it during drag.
+                    if (isLogExpanded && dragStartHeight > 0) {
                         logExpandedHeight = dragStartHeight.coerceAtLeast(logExpandedHeight)
                         setCardHeight(dragStartHeight, 0f)
                     }
@@ -933,38 +1008,30 @@ class MainActivity : AppCompatActivity() {
                     val absDy = Math.abs(dy)
                     val absDx = Math.abs(dx)
 
-                    // Only handle vertical drags
-                    if (absDy > absDx && absDy > 8f) {
+                    // Activate drag with a low threshold for high sensitivity
+                    if (absDy > absDx && absDy > DRAG_TOUCH_SLOP) {
                         isDragging = true
 
-                        // Log panel is at the BOTTOM of the screen.
-                        // Drag UP (dy < 0) → expand (content grows upward)
-                        // Drag DOWN (dy > 0) → collapse (content shrinks downward)
-                        // So we negate dy for height calculation:
-                        //   expand: -dy > 0 → height increases
-                        //   collapse: -dy < 0 → height decreases
-                        val effectiveDy = -dy  // invert: up = positive = expand
+                        val headerH = measureHeaderHeight()
+                        // Invert: up = positive = expand
+                        val effectiveDy = -dy * DRAG_SENSITIVITY
 
-                        // If expanding from collapsed, make content visible first
+                        // If expanding from collapsed, reveal content first
                         if (!dragStartExpanded && effectiveDy > 0) {
                             logScrollView?.visibility = View.VISIBLE
                             logDivider?.visibility = View.VISIBLE
                             toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
-                            dragStartHeight = headerOnlyHeight
+                            dragStartHeight = headerH
                         }
 
-                        // Calculate new height based on drag direction
-                        var newHeight: Int
-                        if (dragStartExpanded) {
-                            // Was expanded — dragging down (effectiveDy < 0) reduces height
-                            newHeight = (dragStartHeight + effectiveDy).toInt()
-                        } else {
-                            // Was collapsed — dragging up (effectiveDy > 0) increases height
-                            newHeight = (headerOnlyHeight + effectiveDy).toInt()
-                        }
-
-                        // Clamp to valid range
-                        newHeight = newHeight.coerceIn(headerOnlyHeight, logExpandedHeight)
+                        // Calculate new height:
+                        //   • If started expanded: dragStartHeight + effectiveDy
+                        //     (dragging down → effectiveDy < 0 → height shrinks)
+                        //   • If started collapsed: headerH + effectiveDy
+                        //     (dragging up → effectiveDy > 0 → height grows)
+                        val baseHeight = if (dragStartExpanded) dragStartHeight else headerH
+                        val newHeight = (baseHeight + effectiveDy).toInt()
+                            .coerceIn(headerH, logExpandedHeight)
                         setCardHeight(newHeight, 0f)
                     }
                     true
@@ -974,17 +1041,18 @@ class MainActivity : AppCompatActivity() {
                     val absDy = Math.abs(dy)
 
                     if (isDragging) {
-                        // Decide based on current height vs midpoint
+                        // Snap to nearest state based on current height
                         val currentHeight = logCard?.height ?: 0
-                        val midpoint = (headerOnlyHeight + logExpandedHeight) / 2
+                        val headerH = measureHeaderHeight()
+                        val midpoint = (headerH + logExpandedHeight) / 2
 
                         if (currentHeight > midpoint) {
                             animateToExpanded(true)
                         } else {
                             animateToExpanded(false)
                         }
-                    } else if (absDy < 16f) {
-                        // Tap — toggle
+                    } else if (absDy < TAP_THRESHOLD) {
+                        // Treat as tap — toggle
                         animateToExpanded(!isLogExpanded)
                     }
                     isDragging = false
