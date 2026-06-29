@@ -780,23 +780,50 @@ class MainActivity : AppCompatActivity() {
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
 
         fun applyLogExpandedState(expanded: Boolean) {
-            // Smooth alpha fade on the ScrollView content for expand/collapse transition.
-            // The LayoutParams change is instant (height swap), but the alpha animation
-            // gives a smooth visual transition instead of an abrupt jump.
+            // Slide-in / slide-out animation on the ScrollView.
+            // Expand: ScrollView starts at translationY = -itsHeight (above header),
+            //   then slides down to 0 — looks like content dropping in from the header.
+            // Collapse: ScrollView slides up from 0 to -itsHeight — content slides
+            //   up into the header and disappears.
+            // The card LayoutParams change is instant (height swap), but the slide
+            // animation masks it — user sees smooth content sliding, not a snap.
             if (expanded) {
+                // Expand: make visible first, then slide down from top
                 logScrollView?.visibility = View.VISIBLE
-                logScrollView?.alpha = 0f
-                logScrollView?.animate()?.alpha(1f)?.setDuration(250)?.start()
                 logDivider?.visibility = View.VISIBLE
+                logScrollView?.let { sv ->
+                    sv.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+                    val slideDistance = sv.measuredHeight.toFloat().coerceAtLeast(200f)
+                    sv.translationY = -slideDistance
+                    sv.alpha = 0f
+                    sv.animate()
+                        ?.translationY(0f)
+                        ?.alpha(1f)
+                        ?.setDuration(300)
+                        ?.setInterpolator(android.view.animation.OvershootInterpolator(0.8f))
+                        ?.start()
+                }
             } else {
-                logScrollView?.animate()?.alpha(0f)?.setDuration(150)?.withEndAction {
-                    logScrollView?.visibility = View.GONE
-                }?.start()
+                // Collapse: slide up, then hide
+                logScrollView?.let { sv ->
+                    val slideDistance = sv.height.toFloat().coerceAtLeast(200f)
+                    sv.animate()
+                        ?.translationY(-slideDistance)
+                        ?.alpha(0f)
+                        ?.setDuration(250)
+                        ?.setInterpolator(android.view.animation.AccelerateInterpolator())
+                        ?.withEndAction {
+                            sv.visibility = View.GONE
+                            sv.translationY = 0f
+                            sv.alpha = 1f
+                        }
+                        ?.start()
+                }
                 logDivider?.visibility = View.GONE
             }
             toggleBtn?.setImageResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
 
-            // Toggle the CARD's layout params — this is the key fix.
+            // Toggle the CARD's layout params.
             // When expanded: height=0dp + weight=1 → card takes its share of screen.
             // When collapsed: height=wrap_content + weight=0 → card shrinks to just
             // the header bar height, giving all freed space to the settings scroll.
