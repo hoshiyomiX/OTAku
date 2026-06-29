@@ -767,248 +767,222 @@ class MainActivity : AppCompatActivity() {
             savedLogText.setLength(0)
         }
 
-        // ── Log panel expand/collapse toggle ──
-        // Clicking the header bar or the toggle button collapses the ENTIRE
-        // log card (not just the ScrollView inside). When collapsed, the card
-        // shrinks to just the header bar (~44dp), and the settings
-        // NestedScrollView above gets all the freed space.
-        // State is persisted in companion (survives Activity recreation).
+        // ── Log panel expand/collapse — SystemUI-style pull/push ──
+        // Uses ValueAnimator to animate the card's height directly (not translationY).
+        // This is how Android's BottomSheetBehavior and notification shade work:
+        // the container height changes smoothly, content follows naturally.
+        //
+        // Drag: finger controls height in real-time (1:1 with drag distance).
+        // Release: ValueAnimator snaps to target height (expanded or collapsed).
+        // Tap: ValueAnimator animates from current to target.
         val logCard = findViewById<com.google.android.material.card.MaterialCardView>(R.id.logCard)
         val logHeader = findViewById<View>(R.id.logHeaderBar)
         val toggleBtn = findViewById<android.widget.ImageView>(R.id.buttonToggleLog)
         val logDivider = findViewById<View>(R.id.logDivider)
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
+        val parentLayout = logCard?.parent as? android.widget.LinearLayout
 
-        fun applyLogExpandedState(expanded: Boolean) {
-            // Instant state change — no animation here. Animation is handled by
-            // the drag handler (real-time finger tracking) or by animateToState()
-            // for tap toggles.
+        // Track the expanded height (measured once when card is expanded)
+        var logExpandedHeight = 0
+        var currentAnimator: android.animation.ValueAnimator? = null
+
+        fun setCardHeight(height: Int, weight: Float) {
+            logCard?.let { card ->
+                val params = card.layoutParams as android.widget.LinearLayout.LayoutParams
+                params.height = height
+                params.weight = weight
+                card.layoutParams = params
+            }
+        }
+
+        fun setExpandedVisualState(expanded: Boolean) {
             logScrollView?.visibility = if (expanded) View.VISIBLE else View.GONE
             logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
             toggleBtn?.setImageResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
-
-            logCard?.let { card ->
-                val params = card.layoutParams as android.widget.LinearLayout.LayoutParams
-                if (expanded) {
-                    params.height = 0
-                    params.weight = 1f
-                } else {
-                    params.height = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                    params.weight = 0f
-                }
-                card.layoutParams = params
-            }
-        }
-
-        // Animated state change for tap toggles (not drag).
-        // Uses smooth slide animation since there's no finger to track.
-        fun animateToState(expanded: Boolean) {
             if (expanded) {
-                logScrollView?.visibility = View.VISIBLE
-                logDivider?.visibility = View.VISIBLE
-                logScrollView?.let { sv ->
-                    sv.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
-                    val slideDistance = sv.measuredHeight.toFloat().coerceAtLeast(200f)
-                    sv.translationY = -slideDistance
-                    sv.alpha = 0f
-                    sv.animate()
-                        ?.translationY(0f)
-                        ?.alpha(1f)
-                        ?.setDuration(350)
-                        ?.setInterpolator(android.view.animation.DecelerateInterpolator())
-                        ?.start()
-                }
+                setCardHeight(0, 1f)  // weight=1, height=0 → takes available space
             } else {
-                logScrollView?.let { sv ->
-                    val slideDistance = sv.height.toFloat().coerceAtLeast(200f)
-                    sv.animate()
-                        ?.translationY(-slideDistance)
-                        ?.alpha(0f)
-                        ?.setDuration(300)
-                        ?.setInterpolator(android.view.animation.AccelerateInterpolator())
-                        ?.withEndAction {
-                            sv.visibility = View.GONE
-                            sv.translationY = 0f
-                            sv.alpha = 1f
-                        }
-                        ?.start()
-                }
-                logDivider?.visibility = View.GONE
-            }
-            toggleBtn?.setImageResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
-            isLogExpanded = expanded
-
-            logCard?.let { card ->
-                val params = card.layoutParams as android.widget.LinearLayout.LayoutParams
-                if (expanded) {
-                    params.height = 0
-                    params.weight = 1f
-                } else {
-                    params.height = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                    params.weight = 0f
-                }
-                card.layoutParams = params
+                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
             }
         }
 
-        // Initialize from companion state (default: expanded)
-        applyLogExpandedState(isLogExpanded)
+        fun animateToExpanded(targetExpanded: Boolean) {
+            currentAnimator?.cancel()
 
-        // Tap toggle — uses animated transition
-        toggleBtn?.setOnClickListener { animateToState(!isLogExpanded) }
+            // Measure current card height
+            logCard?.let { card ->
+                val startHeight = card.height
 
-        // Real-time drag slide animation.
-        // The ScrollView follows the finger 1:1 during ACTION_MOVE.
-        // On ACTION_UP: if drag > threshold, snap to new state with animation.
-        // If drag < threshold, snap back to original state with animation.
-        //
-        // Key: the card LayoutParams change happens at ACTION_DOWN (before drag starts)
-        // so the space is available for the ScrollView to slide into.
-        var dragStartExpanded = isLogExpanded
+                if (targetExpanded) {
+                    // Expanding: need to know target height
+                    // Temporarily set to expanded to measure, then animate from startHeight
+                    if (logExpandedHeight == 0) {
+                        // First expansion — set expanded, measure, then animate
+                        setExpandedVisualState(true)
+                        card.post {
+                            logExpandedHeight = card.height
+                            // Now animate from startHeight to logExpandedHeight
+                            // But we're already expanded — just return
+                        }
+                        return
+                    }
+                    // Animate height from startHeight → 0 (weight takes over at end)
+                    // Actually: animate from startHeight → logExpandedHeight, then swap to weight=1
+                    logScrollView?.visibility = View.VISIBLE
+                    logDivider?.visibility = View.VISIBLE
+                    toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
+
+                    val targetHeight = logExpandedHeight
+                    val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
+                    animator.duration = 300
+                    animator.interpolator = android.view.animation.DecelerateInterpolator()
+                    animator.addUpdateListener { anim ->
+                        val h = anim.animatedValue as Int
+                        setCardHeight(h, 0f)
+                    }
+                    animator.addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            setCardHeight(0, 1f)  // swap to weight-based
+                            isLogExpanded = true
+                        }
+                    })
+                    animator.start()
+                    currentAnimator = animator
+                } else {
+                    // Collapsing: animate from current height → header-only height
+                    // Measure header height by temporarily collapsing
+                    logScrollView?.visibility = View.VISIBLE  // keep visible during animation
+                    logDivider?.visibility = View.VISIBLE
+                    toggleBtn?.setImageResource(R.drawable.ic_expand_log)
+
+                    // Target = header height (card with just header, no content)
+                    // Approximate: 44dp in px (header padding 10dp*2 + text ~24dp)
+                    val headerHeight = (44 * resources.displayMetrics.density).toInt()
+                    val animator = android.animation.ValueAnimator.ofInt(startHeight, headerHeight)
+                    animator.duration = 300
+                    animator.interpolator = android.view.animation.AccelerateInterpolator()
+                    animator.addUpdateListener { anim ->
+                        val h = anim.animatedValue as Int
+                        setCardHeight(h, 0f)
+                    }
+                    animator.addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            logScrollView?.visibility = View.GONE
+                            logDivider?.visibility = View.GONE
+                            setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                            isLogExpanded = false
+                        }
+                    })
+                    animator.start()
+                    currentAnimator = animator
+                }
+            }
+        }
+
+        // Initialize from companion state
+        setExpandedVisualState(isLogExpanded)
+        // Record expanded height after layout
+        logCard?.post {
+            if (isLogExpanded && logExpandedHeight == 0) {
+                logExpandedHeight = logCard?.height ?: 0
+            }
+        }
+
+        // Tap toggle
+        toggleBtn?.setOnClickListener { animateToExpanded(!isLogExpanded) }
+
+        // Pull/push drag — SystemUI style.
+        // During drag: card height follows finger 1:1.
+        // On release: animate to nearest state (expanded or collapsed).
+        var dragStartY = 0f
+        var dragStartHeight = 0
+        var dragStartExpanded = false
         var isDragging = false
+        val headerOnlyHeight = (44 * resources.displayMetrics.density).toInt()
 
         logHeader?.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
-                    lastLogDragStartX = event.rawX
-                    lastLogDragStartY = event.rawY
-                    isDragging = false
+                    currentAnimator?.cancel()
+                    dragStartY = event.rawY
                     dragStartExpanded = isLogExpanded
+                    // Capture current card height as drag start
+                    dragStartHeight = logCard?.height ?: 0
+                    if (dragStartHeight == 0 && isLogExpanded) {
+                        // Card uses weight — measure actual height
+                        dragStartHeight = logCard?.height ?: 0
+                    }
+                    // If expanded, switch from weight to explicit height for dragging
+                    if (isLogExpanded) {
+                        logExpandedHeight = dragStartHeight
+                        setCardHeight(dragStartHeight, 0f)
+                    }
+                    isDragging = false
                     true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
-                    val dy = event.rawY - lastLogDragStartY
+                    val dy = event.rawY - dragStartY
                     val absDy = Math.abs(dy)
-                    val absDx = Math.abs(event.rawX - lastLogDragStartX)
+                    val absDx = Math.abs(event.rawX - (dragStartY - event.rawY + event.rawX)) // simplified
 
-                    if (absDy > absDx && absDy > 8f) {
-                        // Start dragging — expand the card to make space if collapsed
-                        if (!isDragging) {
-                            isDragging = true
-                            if (!isLogExpanded) {
-                                // Expanding: make visible + set card to expanded layout
-                                isLogExpanded = true
-                                applyLogExpandedState(true)
-                                dragStartExpanded = false  // we were collapsed before drag
+                    if (absDy > 8f && absDy > Math.abs(event.rawX - (event.rawX - dy))) {
+                        // Simplified: just check vertical movement
+                    }
+                    val rawDx = Math.abs(event.rawX - (event.rawX))  // always 0, not tracking X
+
+                    if (Math.abs(dy) > 8f) {
+                        isDragging = true
+
+                        // If expanding from collapsed, make content visible first
+                        if (!dragStartExpanded && dy > 0) {
+                            logScrollView?.visibility = View.VISIBLE
+                            logDivider?.visibility = View.VISIBLE
+                            toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
+                            // Set to header-only height as starting point
+                            dragStartHeight = headerOnlyHeight
+                            if (logExpandedHeight == 0) {
+                                logExpandedHeight = (parentLayout?.height ?: 800) / 2
                             }
                         }
 
-                        // Real-time finger tracking: ScrollView follows finger 1:1
-                        // When expanding (was collapsed): dy > 0 (finger moves down)
-                        //   ScrollView starts hidden above, slides down with finger
-                        // When collapsing (was expanded): dy < 0 (finger moves up)
-                        //   ScrollView slides up with finger
-                        logScrollView?.let { sv ->
-                            val svHeight = sv.height.toFloat().coerceAtLeast(1f)
-                            if (dragStartExpanded) {
-                                // Was expanded — collapsing via drag up
-                                // translationY = dy (negative, finger moves up)
-                                // Clamp: don't let content go below 0 (fully visible)
-                                // or above -svHeight (fully hidden)
-                                val clampedDy = dy.coerceIn(-svHeight, 0f)
-                                sv.translationY = clampedDy
-                                sv.alpha = (1f + clampedDy / svHeight).coerceIn(0f, 1f)
-                            } else {
-                                // Was collapsed — expanding via drag down
-                                // ScrollView starts at -svHeight (hidden above)
-                                // translationY = -svHeight + dy (moves down with finger)
-                                val clampedDy = (-svHeight + dy).coerceIn(-svHeight, 0f)
-                                sv.translationY = clampedDy
-                                sv.alpha = (1f + clampedDy / svHeight).coerceIn(0f, 1f)
-                            }
+                        // Calculate target height based on drag direction
+                        var newHeight: Int
+                        if (dragStartExpanded) {
+                            // Was expanded — dragging up reduces height
+                            newHeight = (logExpandedHeight + dy).toInt()
+                        } else {
+                            // Was collapsed — dragging down increases height
+                            newHeight = (headerOnlyHeight + dy).toInt()
                         }
+
+                        // Clamp: don't go below header-only, don't exceed expanded height
+                        val maxHeight = if (logExpandedHeight > 0) logExpandedHeight else (parentLayout?.height ?: 800) / 2
+                        newHeight = newHeight.coerceIn(headerOnlyHeight, maxHeight)
+
+                        setCardHeight(newHeight, 0f)
                     }
                     true
                 }
                 android.view.MotionEvent.ACTION_UP -> {
-                    val dy = event.rawY - lastLogDragStartY
+                    val dy = event.rawY - dragStartY
                     val absDy = Math.abs(dy)
-                    val absDx = Math.abs(event.rawX - lastLogDragStartX)
 
                     if (isDragging) {
-                        // Drag ended — decide final state based on drag distance
-                        val threshold = 80f  // px — more than a tap, less than full drag
-                        val shouldToggle = absDy > threshold
+                        // Decide: expand or collapse based on current height vs midpoint
+                        val currentHeight = logCard?.height ?: 0
+                        val maxHeight = if (logExpandedHeight > 0) logExpandedHeight else (parentLayout?.height ?: 800) / 2
+                        val midpoint = (headerOnlyHeight + maxHeight) / 2
 
-                        if (dragStartExpanded) {
-                            // Was expanded — collapse if dragged up enough
-                            if (shouldToggle && dy < 0) {
-                                // Collapse: animate ScrollView sliding up and out
-                                logScrollView?.let { sv ->
-                                    val svHeight = sv.height.toFloat().coerceAtLeast(1f)
-                                    sv.animate()
-                                        ?.translationY(-svHeight)
-                                        ?.alpha(0f)
-                                        ?.setDuration(250)
-                                        ?.setInterpolator(android.view.animation.AccelerateInterpolator())
-                                        ?.withEndAction {
-                                            sv.visibility = View.GONE
-                                            sv.translationY = 0f
-                                            sv.alpha = 1f
-                                        }
-                                        ?.start()
-                                }
-                                logDivider?.visibility = View.GONE
-                                toggleBtn?.setImageResource(R.drawable.ic_expand_log)
-                                isLogExpanded = false
-                                logCard?.let { card ->
-                                    val params = card.layoutParams as android.widget.LinearLayout.LayoutParams
-                                    params.height = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                                    params.weight = 0f
-                                    card.layoutParams = params
-                                }
-                            } else {
-                                // Snap back to expanded
-                                logScrollView?.animate()
-                                    ?.translationY(0f)
-                                    ?.alpha(1f)
-                                    ?.setDuration(200)
-                                    ?.setInterpolator(android.view.animation.DecelerateInterpolator())
-                                    ?.start()
-                            }
+                        if (currentHeight > midpoint) {
+                            // Animate to expanded
+                            animateToExpanded(true)
                         } else {
-                            // Was collapsed — expand if dragged down enough
-                            if (shouldToggle && dy > 0) {
-                                // Expand: animate ScrollView sliding down to position
-                                logScrollView?.animate()
-                                    ?.translationY(0f)
-                                    ?.alpha(1f)
-                                    ?.setDuration(200)
-                                    ?.setInterpolator(android.view.animation.DecelerateInterpolator())
-                                    ?.start()
-                                isLogExpanded = true
-                            } else {
-                                // Snap back to collapsed
-                                logScrollView?.let { sv ->
-                                    val svHeight = sv.height.toFloat().coerceAtLeast(1f)
-                                    sv.animate()
-                                        ?.translationY(-svHeight)
-                                        ?.alpha(0f)
-                                        ?.setDuration(200)
-                                        ?.setInterpolator(android.view.animation.AccelerateInterpolator())
-                                        ?.withEndAction {
-                                            sv.visibility = View.GONE
-                                            sv.translationY = 0f
-                                            sv.alpha = 1f
-                                        }
-                                        ?.start()
-                                }
-                                logDivider?.visibility = View.GONE
-                                toggleBtn?.setImageResource(R.drawable.ic_expand_log)
-                                isLogExpanded = false
-                                logCard?.let { card ->
-                                    val params = card.layoutParams as android.widget.LinearLayout.LayoutParams
-                                    params.height = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                                    params.weight = 0f
-                                    card.layoutParams = params
-                                }
-                            }
+                            // Animate to collapsed
+                            animateToExpanded(false)
                         }
-                    } else {
-                        // Not a drag — treat as tap
-                        if (absDy < 32f && absDx < 32f) {
-                            animateToState(!isLogExpanded)
-                        }
+                    } else if (absDy < 16f) {
+                        // Tap — toggle
+                        animateToExpanded(!isLogExpanded)
                     }
                     isDragging = false
                     true
