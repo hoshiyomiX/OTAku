@@ -1201,6 +1201,21 @@ class MainActivity : AppCompatActivity() {
                     miniLastMoveTime = android.os.SystemClock.uptimeMillis()
                     miniLastMoveY = event.rawY
                     miniDragVelocity = 0f
+
+                    // Pre-compute headerH + logExpandedHeight for real-time
+                    // height tracking during drag (mirrors main logHeader handler).
+                    val headerH = measureHeaderHeight()
+                    val measuredExpanded = measureExpandedHeight()
+                    if (measuredExpanded > headerH) {
+                        logExpandedHeight = measuredExpanded
+                    } else if (logExpandedHeight <= headerH) {
+                        val parentH = parentLayout?.height ?: 0
+                        logExpandedHeight = if (parentH > 0) {
+                            (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
+                        } else {
+                            (headerH + 400 * resources.displayMetrics.density).toInt()
+                        }
+                    }
                     true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
@@ -1212,8 +1227,7 @@ class MainActivity : AppCompatActivity() {
                     if (absDy > absDx && absDy > MINI_DRAG_SLOP) {
                         miniIsDragging = true
 
-                        // Track velocity (px/sec) — NO sensitivity scaling,
-                        // matches finger 1:1 for accurate expand snap timing.
+                        // Track velocity (px/sec) — NO sensitivity scaling
                         val now = android.os.SystemClock.uptimeMillis()
                         val dt = (now - miniLastMoveTime).coerceAtLeast(1L)
                         val instVel = ((event.rawY - miniLastMoveY) / dt * 1000f)
@@ -1225,10 +1239,44 @@ class MainActivity : AppCompatActivity() {
                         miniLastMoveTime = now
                         miniLastMoveY = event.rawY
 
-                        // MINI HEADER STAYS LOCKED — do not translate or fade.
-                        // Only the finger movement is tracked; expand triggers on
-                        // release. This matches user expectation: the pill is a
-                        // handle, not a free-floating object.
+                        // ── Real-time expand: log panel follows finger 1:1 ──
+                        // Only expand (dy < 0 = drag up). Ignore drag-down on
+                        // mini (no collapse action needed — already collapsed).
+                        if (dy < 0) {
+                            val card = logCard
+                            if (card != null && card.visibility != View.VISIBLE) {
+                                // First move: show card at headerH, fade in
+                                card.visibility = View.VISIBLE
+                                card.alpha = 0f
+                                logScrollView?.visibility = View.VISIBLE
+                                logDivider?.visibility = View.VISIBLE
+                                toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
+                                setCardHeight(measuredHeaderHeight, 0f)
+                            }
+                            // Recompute logExpandedHeight every frame — sibling
+                            // heights may shift as card grows, and stale target
+                            // causes the 90-100% stutter.
+                            val headerH = measuredHeaderHeight
+                            val liveExpanded = measureExpandedHeight()
+                            if (liveExpanded > headerH) {
+                                logExpandedHeight = liveExpanded
+                            }
+
+                            // effectiveDy = -dy (up = positive = expand), 1:1
+                            val effectiveDy = -dy  // sensitivity 1.0
+                            val newHeight = (headerH + effectiveDy).toInt()
+                                .coerceIn(headerH, logExpandedHeight)
+                            setCardHeight(newHeight, 0f)
+
+                            // Fade card in over first 30% of drag range.
+                            // Mini header fades out over same range — gives
+                            // visual crossfade as panel grows.
+                            val expandRange = (logExpandedHeight - headerH).coerceAtLeast(1)
+                            val progress = (newHeight - headerH).toFloat() / expandRange
+                            val fadeProgress = (progress / 0.3f).coerceIn(0f, 1f)
+                            card.alpha = fadeProgress
+                            miniLogHeader?.alpha = 1f - fadeProgress
+                        }
                     }
                     true
                 }
@@ -1237,13 +1285,25 @@ class MainActivity : AppCompatActivity() {
                     val absDy = Math.abs(dy)
 
                     if (miniIsDragging) {
-                        // If user dragged up significantly OR flung up, expand.
-                        // Otherwise, do nothing (mini stays locked in place).
+                        // Decide: expand if dragged up enough OR flung up.
                         val FLING_THRESHOLD = 500f
                         val shouldExpand = dy < -MINI_TAP_THRESHOLD ||
                             miniDragVelocity > FLING_THRESHOLD
                         if (shouldExpand) {
+                            // animateToExpanded will handle the final snap +
+                            // mini header hide + card alpha reset.
                             animateToExpanded(true, fromTap = false, velocityPxSec = miniDragVelocity)
+                        } else {
+                            // Drag was too small — snap back to collapsed.
+                            // Hide card, restore mini header.
+                            logCard?.let { card ->
+                                logScrollView?.visibility = View.GONE
+                                logDivider?.visibility = View.GONE
+                                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                                card.visibility = View.GONE
+                                card.alpha = 1f
+                            }
+                            miniLogHeader?.alpha = 1f
                         }
                     } else if (absDy < MINI_TAP_THRESHOLD) {
                         // Treat as tap — toggle (Material easing)
@@ -1352,6 +1412,17 @@ class MainActivity : AppCompatActivity() {
                         // Use cached headerH (computed in ACTION_DOWN) — avoid
                         // calling measureHeaderHeight() every frame.
                         val headerH = measuredHeaderHeight
+
+                        // ── Recompute logExpandedHeight every frame ──
+                        // Sibling heights shift as card grows (NestedScrollView
+                        // with weight=1 shrinks). A stale logExpandedHeight
+                        // causes the 90-100% stutter: card hits stale ceiling
+                        // before reaching true available space, then snaps up
+                        // on release. Live recompute keeps target accurate.
+                        val liveExpanded = measureExpandedHeight()
+                        if (liveExpanded > headerH) {
+                            logExpandedHeight = liveExpanded
+                        }
 
                         // If expanding from collapsed, reveal content first
                         if (!dragStartExpanded && effectiveDy > 0) {
