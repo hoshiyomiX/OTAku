@@ -433,6 +433,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Build the 4-line initialization banner that appears when OTAku starts.
+     * Used by the Clear Log button to preserve these context lines instead
+     * of wiping the entire log. The banner is reconstructed from the live
+     * NativeBridge state so the version + compression list stays accurate
+     * even if the user clears logs after a native reload.
+     *
+     * Format:
+     *   Initializing OTAku...
+     *   Native backend: otaku-native 1.0.0 (rust)
+     *   Native compression: none, gzip, bzip2, xz, brotli
+     *   OTAku ready
+     *
+     * If native failed to load, the error variant is returned instead.
+     */
+    private fun buildInitBanner(): String {
+        val sb = StringBuilder()
+        sb.append("Initializing OTAku...\n")
+        if (NativeBridge.isLoaded) {
+            val nativeVersion = NativeBridge.getVersion()
+            sb.append("Native backend: $nativeVersion\n")
+            val depCheck = cachedDepCheck ?: NativeBridge.checkDeps()
+            val available = depCheck.available.joinToString(", ")
+            sb.append("Native compression: $available\n")
+            if (depCheck.allOk) {
+                sb.append("OTAku ready\n")
+            } else {
+                sb.append("Some compression algorithms unavailable\n")
+            }
+        } else {
+            sb.append("Native backend not loaded: ${NativeBridge.loadError}\n")
+            sb.append("Possible causes:\n")
+            sb.append("  - APK installed from an old build (before v3.0)\n")
+            sb.append("  - App installed but native libs extraction failed\n")
+            sb.append("  - Try: Uninstall > Re-download latest APK > Install\n")
+        }
+        return sb.toString()
+    }
+
     private fun setupToolbar() {
         val toolbar = findViewById<com.google.android.material.appbar.MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
@@ -763,8 +802,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<View>(R.id.buttonClearLog).setOnClickListener {
-            findViewById<android.widget.TextView>(R.id.textViewLog).text = ""
+            // Clear user-generated log content but PRESERVE the initialization
+            // banner (4 lines: Initializing, Native backend, Native compression,
+            // OTAku ready). The init banner identifies the app version + available
+            // compression algorithms — useful context the user shouldn't lose
+            // when clearing build logs.
+            //
+            // Strategy: rebuild savedLogText from the cached init messages,
+            // then refresh the TextView to match.
+            val initBanner = buildInitBanner()
             savedLogText.setLength(0)
+            savedLogText.append(initBanner)
+            findViewById<android.widget.TextView>(R.id.textViewLog).text = initBanner
         }
 
         // ── Log panel expand/collapse — SystemUI-style pull/push ──
@@ -1081,21 +1130,27 @@ class MainActivity : AppCompatActivity() {
                 animator.addListener(object : android.animation.AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: android.animation.Animator) {
                         if (targetExpanded) {
-                            // Expanded: swap to weight=1 (matches target height)
+                            // Expanded: swap to weight=1 (matches target height).
+                            // Card alpha is already 1 from animator — do NOT reset
+                            // alpha here (would cause 1-frame flash if visibility
+                            // toggle lags by a frame). Visibility GONE on mini
+                            // header is safe because its alpha is already 0.
                             setCardHeight(0, 1f)
                             miniLogHeader?.visibility = View.GONE
-                            miniLogHeader?.alpha = 1f
                             miniLogHeader?.translationY = 0f
-                            card.alpha = 1f
+                            // Note: card.alpha stays at 1 (animator's end value)
+                            // Note: miniLogHeader.alpha stays at 0 (animator's end value) — will be reset to 1 on next collapse entry
                         } else {
-                            // Collapsed: hide logCard, mini header already visible
+                            // Collapsed: hide logCard. Card alpha is already 0
+                            // from animator — visibility GONE is safe (no flash).
+                            // Mini header alpha is already 1 from animator.
                             logScrollView?.visibility = View.GONE
                             logDivider?.visibility = View.GONE
                             setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
                             card.visibility = View.GONE
-                            card.alpha = 1f
-                            miniLogHeader?.alpha = 1f
                             miniLogHeader?.translationY = 0f
+                            // Note: card.alpha stays at 0 (animator's end value) — will be reset to 1 on next expand entry
+                            // Note: miniLogHeader.alpha stays at 1 (animator's end value)
                         }
                         isLogExpanded = targetExpanded
                     }
