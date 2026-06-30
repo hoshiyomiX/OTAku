@@ -866,9 +866,10 @@ class MainActivity : AppCompatActivity() {
         var measuredHeaderHeight = 0
         var currentAnimator: android.animation.ValueAnimator? = null
 
-        // Drag sensitivity: 1px finger = 2.2px height change.
-        // Calibrated for thumb drags (shorter than index-finger drags).
-        val DRAG_SENSITIVITY = 2.2f
+        // Drag sensitivity: 1px finger = 1px height change.
+        // Previous 2.2x made the panel move faster than the finger — felt
+        // inaccurate. 1.0 = true 1:1 tracking, like dragging a window border.
+        val DRAG_SENSITIVITY = 1.0f
         // Minimum finger movement before drag activates (px).
         // 6px ~ 2dp — low enough for responsiveness, high enough to reject taps.
         val DRAG_TOUCH_SLOP = 6f
@@ -1211,7 +1212,8 @@ class MainActivity : AppCompatActivity() {
                     if (absDy > absDx && absDy > MINI_DRAG_SLOP) {
                         miniIsDragging = true
 
-                        // Track velocity (px/sec)
+                        // Track velocity (px/sec) — NO sensitivity scaling,
+                        // matches finger 1:1 for accurate expand snap timing.
                         val now = android.os.SystemClock.uptimeMillis()
                         val dt = (now - miniLastMoveTime).coerceAtLeast(1L)
                         val instVel = ((event.rawY - miniLastMoveY) / dt * 1000f)
@@ -1223,12 +1225,10 @@ class MainActivity : AppCompatActivity() {
                         miniLastMoveTime = now
                         miniLastMoveY = event.rawY
 
-                        // Provide live feedback: mini header follows finger
-                        // upward (clamped). This gives the user visual confirmation
-                        // that the drag is being recognized.
-                        val translation = (-dy).coerceIn(0f, 200f)
-                        miniLogHeader?.translationY = -translation
-                        miniLogHeader?.alpha = (1f - translation / 400f).coerceIn(0.3f, 1f)
+                        // MINI HEADER STAYS LOCKED — do not translate or fade.
+                        // Only the finger movement is tracked; expand triggers on
+                        // release. This matches user expectation: the pill is a
+                        // handle, not a free-floating object.
                     }
                     true
                 }
@@ -1237,13 +1237,8 @@ class MainActivity : AppCompatActivity() {
                     val absDy = Math.abs(dy)
 
                     if (miniIsDragging) {
-                        // Reset transform first — the expand animation will handle
-                        // the visual transition from mini position.
-                        miniLogHeader?.translationY = 0f
-                        miniLogHeader?.alpha = 1f
-
                         // If user dragged up significantly OR flung up, expand.
-                        // Otherwise, snap back (don't expand).
+                        // Otherwise, do nothing (mini stays locked in place).
                         val FLING_THRESHOLD = 500f
                         val shouldExpand = dy < -MINI_TAP_THRESHOLD ||
                             miniDragVelocity > FLING_THRESHOLD
@@ -1297,6 +1292,10 @@ class MainActivity : AppCompatActivity() {
                     // Capture current card height (the actual laid-out height)
                     dragStartHeight = logCard?.height ?: 0
 
+                    // Pre-compute headerH ONCE in ACTION_DOWN — avoids calling
+                    // measureHeaderHeight() every ACTION_MOVE frame (which
+                    // temporarily toggles view visibility to measure, causing
+                    // micro-stutters during drag).
                     val headerH = measureHeaderHeight()
                     // Compute the TRUE weight=1 height for accurate drag clamping.
                     // This prevents the bounce on release because the snap target
@@ -1315,9 +1314,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // If currently expanded (weight=1), pin to explicit height
-                    // so we can manipulate it during drag. Use the just-measured
-                    // logExpandedHeight as the floor — never use dragStartHeight
-                    // if it's smaller, because that would clamp the drag range.
+                    // so we can manipulate it during drag.
                     if (isLogExpanded && dragStartHeight > 0) {
                         setCardHeight(dragStartHeight, 0f)
                     }
@@ -1333,22 +1330,28 @@ class MainActivity : AppCompatActivity() {
                     if (absDy > absDx && absDy > DRAG_TOUCH_SLOP) {
                         isDragging = true
 
-                        // Track velocity (px/sec, + = expand direction)
+                        // Track velocity (px/sec, + = expand direction).
+                        // NO sensitivity scaling — velocity should match actual
+                        // finger speed for accurate snap duration calculation.
                         val now = android.os.SystemClock.uptimeMillis()
                         val dt = (now - lastMoveTime).coerceAtLeast(1L)
                         val instVel = ((event.rawY - lastMoveY) / dt * 1000f)
                         // Smooth: weighted average of previous + current
                         dragVelocity = if (dragVelocity == 0f) {
-                            -instVel * DRAG_SENSITIVITY  // invert + apply sensitivity
+                            -instVel
                         } else {
-                            (dragVelocity * 0.6f + (-instVel * DRAG_SENSITIVITY) * 0.4f)
+                            (dragVelocity * 0.6f + (-instVel) * 0.4f)
                         }
                         lastMoveTime = now
                         lastMoveY = event.rawY
 
-                        val headerH = measureHeaderHeight()
-                        // Invert: up = positive = expand, then apply sensitivity
+                        // Invert: up = positive = expand. Sensitivity 1.0 = 1:1
+                        // finger tracking (no multiplier).
                         val effectiveDy = -dy * DRAG_SENSITIVITY
+
+                        // Use cached headerH (computed in ACTION_DOWN) — avoid
+                        // calling measureHeaderHeight() every frame.
+                        val headerH = measuredHeaderHeight
 
                         // If expanding from collapsed, reveal content first
                         if (!dragStartExpanded && effectiveDy > 0) {
