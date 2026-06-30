@@ -982,12 +982,10 @@ class MainActivity : AppCompatActivity() {
                 val headerH = measureHeaderHeight()
 
                 // Compute the TRUE expanded height (what weight=1 will give us).
-                // This eliminates the post-animation swap bounce.
                 val measuredExpanded = measureExpandedHeight()
                 if (measuredExpanded > headerH) {
                     logExpandedHeight = measuredExpanded
                 } else if (logExpandedHeight <= headerH) {
-                    // Fallback: estimate if measureExpandedHeight failed
                     val parentH = parentLayout?.height ?: 0
                     logExpandedHeight = if (parentH > 0) {
                         (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
@@ -996,19 +994,31 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // ── Transition from mini header ──
-                // If currently collapsed (logCard GONE + miniLogHeader VISIBLE),
-                // expanding needs to:
-                //   1. Fade out mini header (100ms)
-                //   2. Show logCard at headerH (collapsed visual state)
-                //   3. Animate logCard from headerH → expandedHeight
+                // ── Big↔Small morph transition ──
+                // Expand: mini header (bottom-left) fades + slides up-right toward
+                // the logCard's top-left. logCard fades in simultaneously. This
+                // creates a visual "morph" from pill to card.
+                // Collapse: reverse — logCard fades + slides down-left, mini header
+                // fades in from the same direction.
                 if (targetExpanded && card.visibility != View.VISIBLE) {
-                    // Hide mini header with fade-out
-                    miniLogHeader?.animate()?.alpha(0f)?.setDuration(100)?.withEndAction {
-                        miniLogHeader?.visibility = View.GONE
-                    }?.start()
-                    // Show logCard at headerH as starting point for animation
+                    // Transition: mini → card
+                    // Position mini header at bottom-left; we want it to appear
+                    // to grow upward into the card position. Translate it upward
+                    // and fade out, while card fades in at headerH.
+                    miniLogHeader?.animate()
+                        ?.alpha(0f)
+                        ?.translationY(-headerH.toFloat() * 0.5f)
+                        ?.setDuration(120)
+                        ?.withEndAction {
+                            miniLogHeader?.visibility = View.GONE
+                            miniLogHeader?.translationY = 0f
+                        }
+                        ?.start()
+                    // Show card at headerH (collapsed visual state) as the
+                    // starting point for the expand animation.
                     card.visibility = View.VISIBLE
+                    card.alpha = 0f
+                    card.animate().alpha(1f).setDuration(120).start()
                     logScrollView?.visibility = View.VISIBLE
                     logDivider?.visibility = View.VISIBLE
                     toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
@@ -1036,11 +1046,9 @@ class MainActivity : AppCompatActivity() {
                 val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
 
                 if (fromTap) {
-                    // Tap → Material standard easing (natural, no overshoot)
                     animator.duration = tapDurationFor(distance)
                     animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
                 } else {
-                    // Post-drag snap → simple decelerate (no overshoot, no bounce)
                     animator.duration = snapDurationFor(distance, velocityPxSec)
                     animator.interpolator = android.view.animation.DecelerateInterpolator(1.5f)
                 }
@@ -1055,16 +1063,29 @@ class MainActivity : AppCompatActivity() {
                             // Expanded: swap to weight=1 (matches target height)
                             setCardHeight(0, 1f)
                             miniLogHeader?.visibility = View.GONE
+                            miniLogHeader?.alpha = 1f
+                            miniLogHeader?.translationY = 0f
+                            card.alpha = 1f
                         } else {
-                            // Collapsed: hide logCard entirely, show mini header
-                            // with fade-in for smooth appearance
+                            // Collapsed: hide logCard, show mini header.
+                            // Reverse morph: card fades + slides down-left,
+                            // mini header fades in from same direction.
                             logScrollView?.visibility = View.GONE
                             logDivider?.visibility = View.GONE
                             setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
-                            card.visibility = View.GONE
+                            // Position mini header at bottom-left; animate from
+                            // card's bottom-left position (translated up-right).
                             miniLogHeader?.alpha = 0f
+                            miniLogHeader?.translationY = -headerH.toFloat() * 0.5f
                             miniLogHeader?.visibility = View.VISIBLE
-                            miniLogHeader?.animate()?.alpha(1f)?.setDuration(100)?.start()
+                            miniLogHeader?.animate()
+                                ?.alpha(1f)
+                                ?.translationY(0f)
+                                ?.setDuration(120)
+                                ?.withEndAction {
+                                    card.visibility = View.GONE
+                                }
+                                ?.start()
                         }
                         isLogExpanded = targetExpanded
                     }
@@ -1092,6 +1113,88 @@ class MainActivity : AppCompatActivity() {
 
         // Mini floating header tap — expand the log panel back
         miniLogHeader?.setOnClickListener { animateToExpanded(true, fromTap = true) }
+
+        // Mini floating header drag — drag UP to expand (mirrors drag DOWN on
+        // the full log header bar to collapse). Uses the same velocity-aware
+        // snap animation as the main drag handler.
+        var miniDragStartY = 0f
+        var miniDragStartX = 0f
+        var miniIsDragging = false
+        var miniLastMoveTime = 0L
+        var miniLastMoveY = 0f
+        var miniDragVelocity = 0f
+        val MINI_DRAG_SLOP = 6f
+        val MINI_TAP_THRESHOLD = 16f
+
+        miniLogHeader?.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    miniDragStartY = event.rawY
+                    miniDragStartX = event.rawX
+                    miniIsDragging = false
+                    miniLastMoveTime = android.os.SystemClock.uptimeMillis()
+                    miniLastMoveY = event.rawY
+                    miniDragVelocity = 0f
+                    true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dy = event.rawY - miniDragStartY
+                    val dx = event.rawX - miniDragStartX
+                    val absDy = Math.abs(dy)
+                    val absDx = Math.abs(dx)
+
+                    if (absDy > absDx && absDy > MINI_DRAG_SLOP) {
+                        miniIsDragging = true
+
+                        // Track velocity (px/sec)
+                        val now = android.os.SystemClock.uptimeMillis()
+                        val dt = (now - miniLastMoveTime).coerceAtLeast(1L)
+                        val instVel = ((event.rawY - miniLastMoveY) / dt * 1000f)
+                        miniDragVelocity = if (miniDragVelocity == 0f) {
+                            -instVel
+                        } else {
+                            (miniDragVelocity * 0.6f + (-instVel) * 0.4f)
+                        }
+                        miniLastMoveTime = now
+                        miniLastMoveY = event.rawY
+
+                        // Provide live feedback: mini header follows finger
+                        // upward (clamped). This gives the user visual confirmation
+                        // that the drag is being recognized.
+                        val translation = (-dy).coerceIn(0f, 200f)
+                        miniLogHeader?.translationY = -translation
+                        miniLogHeader?.alpha = (1f - translation / 400f).coerceIn(0.3f, 1f)
+                    }
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val dy = event.rawY - miniDragStartY
+                    val absDy = Math.abs(dy)
+
+                    if (miniIsDragging) {
+                        // Reset transform first — the expand animation will handle
+                        // the visual transition from mini position.
+                        miniLogHeader?.translationY = 0f
+                        miniLogHeader?.alpha = 1f
+
+                        // If user dragged up significantly OR flung up, expand.
+                        // Otherwise, snap back (don't expand).
+                        val FLING_THRESHOLD = 500f
+                        val shouldExpand = dy < -MINI_TAP_THRESHOLD ||
+                            miniDragVelocity > FLING_THRESHOLD
+                        if (shouldExpand) {
+                            animateToExpanded(true, fromTap = false, velocityPxSec = miniDragVelocity)
+                        }
+                    } else if (absDy < MINI_TAP_THRESHOLD) {
+                        // Treat as tap — toggle (Material easing)
+                        animateToExpanded(true, fromTap = true)
+                    }
+                    miniIsDragging = false
+                    true
+                }
+                else -> false
+            }
+        }
 
         // ── Pull/push drag — SystemUI BottomSheet-style ──
         // Log panel is anchored to the BOTTOM of the screen (below settings scroll).
@@ -2151,7 +2254,15 @@ class MainActivity : AppCompatActivity() {
         // Don't allow Build if any partition is still loading (placeholder)
         val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
         val canBuild = imageFiles.isNotEmpty() && !anyLoading && device.isNotEmpty() && !isBuilding
-        btnExecute?.isEnabled = canBuild
+        // Hide the FAB entirely when requirements aren't met — disabled FAB
+        // takes up screen space and looks like dead UI. Use ExtendedFAB's
+        // built-in hide()/show() which animates and adjusts CoordinatorLayout
+        // anchor behavior.
+        if (canBuild) {
+            btnExecute?.show()
+        } else {
+            btnExecute?.hide()
+        }
     }
 
     private fun updateOutputPreview() {
