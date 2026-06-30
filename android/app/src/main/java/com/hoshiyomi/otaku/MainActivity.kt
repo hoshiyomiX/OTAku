@@ -994,52 +994,47 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // ── Big↔Small morph transition ──
-                // Expand: mini header (bottom-left) fades + slides up-right toward
-                // the logCard's top-left. logCard fades in simultaneously. This
-                // creates a visual "morph" from pill to card.
-                // Collapse: reverse — logCard fades + slides down-left, mini header
-                // fades in from the same direction.
-                if (targetExpanded && card.visibility != View.VISIBLE) {
-                    // Transition: mini → card
-                    // Position mini header at bottom-left; we want it to appear
-                    // to grow upward into the card position. Translate it upward
-                    // and fade out, while card fades in at headerH.
-                    miniLogHeader?.animate()
-                        ?.alpha(0f)
-                        ?.translationY(-headerH.toFloat() * 0.5f)
-                        ?.setDuration(120)
-                        ?.withEndAction {
-                            miniLogHeader?.visibility = View.GONE
-                            miniLogHeader?.translationY = 0f
-                        }
-                        ?.start()
-                    // Show card at headerH (collapsed visual state) as the
-                    // starting point for the expand animation.
+                // ── Single-animator morph ──
+                // All animated properties (card height, card alpha, mini alpha,
+                // mini translationY) are driven from ONE ValueAnimator's
+                // animatedFraction. This ensures every frame updates ALL
+                // properties in lockstep — no timing drift, no stiffness.
+                //
+                // Previous approach used 2 separate animators (ValueAnimator
+                // for height + ViewPropertyAnimator for alpha/translation)
+                // with different interpolators → frames drifted → felt "kaku".
+                val isExpandingFromMini = targetExpanded && card.visibility != View.VISIBLE
+                val isCollapsingToMini = !targetExpanded
+
+                // Starting visual state setup
+                if (isExpandingFromMini) {
+                    // Mini header is currently visible; will fade out + translate up.
+                    // Card is GONE; will become VISIBLE at headerH with alpha 0.
                     card.visibility = View.VISIBLE
                     card.alpha = 0f
-                    card.animate().alpha(1f).setDuration(120).start()
                     logScrollView?.visibility = View.VISIBLE
                     logDivider?.visibility = View.VISIBLE
                     toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
                     setCardHeight(headerH, 0f)
-                }
-
-                val startHeight = if (targetExpanded && card.height == 0) headerH else card.height
-                val targetHeight = if (targetExpanded) logExpandedHeight else headerH
-
-                // Skip animation if already at target
-                if (startHeight == targetHeight) {
-                    setExpandedVisualState(targetExpanded)
-                    isLogExpanded = targetExpanded
-                    return
-                }
-
-                // If collapsing: prepare visibility during animation
-                if (!targetExpanded) {
+                } else if (isCollapsingToMini) {
+                    // Card visible, will shrink to headerH then fade out.
+                    // Mini header hidden, will fade in + translate down from up.
                     logScrollView?.visibility = View.VISIBLE
                     logDivider?.visibility = View.VISIBLE
                     toggleBtn?.setImageResource(R.drawable.ic_expand_log)
+                    miniLogHeader?.visibility = View.VISIBLE
+                    miniLogHeader?.alpha = 0f
+                    miniLogHeader?.translationY = -headerH.toFloat() * 0.5f
+                }
+
+                val startHeight = if (isExpandingFromMini) headerH else card.height
+                val targetHeight = if (targetExpanded) logExpandedHeight else headerH
+
+                // Skip animation if already at target
+                if (startHeight == targetHeight && !isExpandingFromMini && !isCollapsingToMini) {
+                    setExpandedVisualState(targetExpanded)
+                    isLogExpanded = targetExpanded
+                    return
                 }
 
                 val distance = Math.abs(targetHeight - startHeight)
@@ -1053,9 +1048,35 @@ class MainActivity : AppCompatActivity() {
                     animator.interpolator = android.view.animation.DecelerateInterpolator(1.5f)
                 }
 
+                // Capture starting values for frame-by-frame interpolation
+                val cardAlphaStart = if (isExpandingFromMini) 0f else 1f
+                val cardAlphaEnd = if (isCollapsingToMini) 0f else 1f
+                val miniAlphaStart = if (isExpandingFromMini) 1f else 0f
+                val miniAlphaEnd = if (isExpandingFromMini) 0f else 1f
+                val miniTransStart = if (isExpandingFromMini) 0f else -headerH.toFloat() * 0.5f
+                val miniTransEnd = if (isExpandingFromMini) -headerH.toFloat() * 0.5f else 0f
+                val morphFraction = if (isExpandingFromMini || isCollapsingToMini) {
+                    // Morph (alpha/translation) happens during the FIRST 40% of
+                    // the height animation, so by the time the card is 40% grown,
+                    // the mini header is fully gone. Remaining 60% is pure height
+                    // growth — feels like the pill "became" the card.
+                    0.4f
+                } else 0f
+
                 animator.addUpdateListener { anim ->
                     val h = anim.animatedValue as Int
                     setCardHeight(h, 0f)
+
+                    // Compute morph progress: 0..1 over first morphFraction of animation
+                    val rawFraction = anim.animatedFraction
+                    val morphProgress = if (morphFraction > 0f) {
+                        (rawFraction / morphFraction).coerceIn(0f, 1f)
+                    } else 1f
+
+                    // Apply frame-synced alpha + translation
+                    card.alpha = cardAlphaStart + (cardAlphaEnd - cardAlphaStart) * morphProgress
+                    miniLogHeader?.alpha = miniAlphaStart + (miniAlphaEnd - miniAlphaStart) * morphProgress
+                    miniLogHeader?.translationY = miniTransStart + (miniTransEnd - miniTransStart) * morphProgress
                 }
                 animator.addListener(object : android.animation.AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: android.animation.Animator) {
@@ -1067,25 +1088,14 @@ class MainActivity : AppCompatActivity() {
                             miniLogHeader?.translationY = 0f
                             card.alpha = 1f
                         } else {
-                            // Collapsed: hide logCard, show mini header.
-                            // Reverse morph: card fades + slides down-left,
-                            // mini header fades in from same direction.
+                            // Collapsed: hide logCard, mini header already visible
                             logScrollView?.visibility = View.GONE
                             logDivider?.visibility = View.GONE
                             setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
-                            // Position mini header at bottom-left; animate from
-                            // card's bottom-left position (translated up-right).
-                            miniLogHeader?.alpha = 0f
-                            miniLogHeader?.translationY = -headerH.toFloat() * 0.5f
-                            miniLogHeader?.visibility = View.VISIBLE
-                            miniLogHeader?.animate()
-                                ?.alpha(1f)
-                                ?.translationY(0f)
-                                ?.setDuration(120)
-                                ?.withEndAction {
-                                    card.visibility = View.GONE
-                                }
-                                ?.start()
+                            card.visibility = View.GONE
+                            card.alpha = 1f
+                            miniLogHeader?.alpha = 1f
+                            miniLogHeader?.translationY = 0f
                         }
                         isLogExpanded = targetExpanded
                     }
