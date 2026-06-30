@@ -782,6 +782,11 @@ class MainActivity : AppCompatActivity() {
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
         val parentLayout = logCard?.parent as? android.widget.LinearLayout
 
+        // Mini floating logs header — shown ONLY when logCard is collapsed.
+        // Positioned at bottom|start to mirror the Build OTA FAB at bottom|end.
+        // Tap to expand the log panel back.
+        val miniLogHeader = findViewById<com.google.android.material.card.MaterialCardView>(R.id.miniLogHeader)
+
         // ════════════════════════════════════════════════════════════
         //  Log panel expand/collapse — SystemUI BottomSheet-style
         //  ════════════════════════════════════════════════════════════
@@ -912,8 +917,16 @@ class MainActivity : AppCompatActivity() {
             logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
             toggleBtn?.setImageResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
             if (expanded) {
+                // Expanded: logCard visible, mini header hidden
+                logCard?.visibility = View.VISIBLE
+                miniLogHeader?.visibility = View.GONE
                 setCardHeight(0, 1f)  // weight=1, height=0 → takes available space
             } else {
+                // Collapsed: logCard hidden entirely, mini floating header shown
+                // at bottom-left (mirrors FAB at bottom-right)
+                logCard?.visibility = View.GONE
+                miniLogHeader?.visibility = View.VISIBLE
+                miniLogHeader?.alpha = 1f
                 setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
             }
         }
@@ -966,7 +979,6 @@ class MainActivity : AppCompatActivity() {
             currentAnimator?.cancel()
 
             logCard?.let { card ->
-                val startHeight = card.height
                 val headerH = measureHeaderHeight()
 
                 // Compute the TRUE expanded height (what weight=1 will give us).
@@ -984,6 +996,26 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+                // ── Transition from mini header ──
+                // If currently collapsed (logCard GONE + miniLogHeader VISIBLE),
+                // expanding needs to:
+                //   1. Fade out mini header (100ms)
+                //   2. Show logCard at headerH (collapsed visual state)
+                //   3. Animate logCard from headerH → expandedHeight
+                if (targetExpanded && card.visibility != View.VISIBLE) {
+                    // Hide mini header with fade-out
+                    miniLogHeader?.animate()?.alpha(0f)?.setDuration(100)?.withEndAction {
+                        miniLogHeader?.visibility = View.GONE
+                    }?.start()
+                    // Show logCard at headerH as starting point for animation
+                    card.visibility = View.VISIBLE
+                    logScrollView?.visibility = View.VISIBLE
+                    logDivider?.visibility = View.VISIBLE
+                    toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
+                    setCardHeight(headerH, 0f)
+                }
+
+                val startHeight = if (targetExpanded && card.height == 0) headerH else card.height
                 val targetHeight = if (targetExpanded) logExpandedHeight else headerH
 
                 // Skip animation if already at target
@@ -993,12 +1025,12 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                // Prepare visibility — content visible DURING animation
-                logScrollView?.visibility = View.VISIBLE
-                logDivider?.visibility = View.VISIBLE
-                toggleBtn?.setImageResource(
-                    if (targetExpanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log
-                )
+                // If collapsing: prepare visibility during animation
+                if (!targetExpanded) {
+                    logScrollView?.visibility = View.VISIBLE
+                    logDivider?.visibility = View.VISIBLE
+                    toggleBtn?.setImageResource(R.drawable.ic_expand_log)
+                }
 
                 val distance = Math.abs(targetHeight - startHeight)
                 val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
@@ -1009,9 +1041,6 @@ class MainActivity : AppCompatActivity() {
                     animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
                 } else {
                     // Post-drag snap → simple decelerate (no overshoot, no bounce)
-                    // Factor 1.0 = pure DecelerateInterpolator (default).
-                    // Previous factor 1.5 was fine (decelerate never overshoots),
-                    // but kept for natural feel.
                     animator.duration = snapDurationFor(distance, velocityPxSec)
                     animator.interpolator = android.view.animation.DecelerateInterpolator(1.5f)
                 }
@@ -1022,16 +1051,20 @@ class MainActivity : AppCompatActivity() {
                 }
                 animator.addListener(object : android.animation.AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: android.animation.Animator) {
-                        // Synchronous swap to weight=1 (expanded) or WRAP_CONTENT
-                        // (collapsed). Since `targetHeight` was computed via
-                        // measureExpandedHeight() to match the weight=1 height
-                        // exactly, this swap is a visual no-op — no bounce.
                         if (targetExpanded) {
+                            // Expanded: swap to weight=1 (matches target height)
                             setCardHeight(0, 1f)
+                            miniLogHeader?.visibility = View.GONE
                         } else {
+                            // Collapsed: hide logCard entirely, show mini header
+                            // with fade-in for smooth appearance
                             logScrollView?.visibility = View.GONE
                             logDivider?.visibility = View.GONE
                             setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                            card.visibility = View.GONE
+                            miniLogHeader?.alpha = 0f
+                            miniLogHeader?.visibility = View.VISIBLE
+                            miniLogHeader?.animate()?.alpha(1f)?.setDuration(100)?.start()
                         }
                         isLogExpanded = targetExpanded
                     }
@@ -1056,6 +1089,9 @@ class MainActivity : AppCompatActivity() {
 
         // Tap toggle — uses Material FastOutSlowInInterpolator
         toggleBtn?.setOnClickListener { animateToExpanded(!isLogExpanded, fromTap = true) }
+
+        // Mini floating header tap — expand the log panel back
+        miniLogHeader?.setOnClickListener { animateToExpanded(true, fromTap = true) }
 
         // ── Pull/push drag — SystemUI BottomSheet-style ──
         // Log panel is anchored to the BOTTOM of the screen (below settings scroll).
