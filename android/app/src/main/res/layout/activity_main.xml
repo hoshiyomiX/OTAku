@@ -615,9 +615,8 @@
         android:foreground="?attr/selectableItemBackgroundBorderless"
         app:cardCornerRadius="20dp"
         app:cardElevation="2dp"
-        app:strokeWidth="1dp"
-        app:strokeColor="?attr/colorOutlineVariant"
-        app:cardBackgroundColor="?attr/colorSurface">
+        app:strokeWidth="0dp"
+        app:cardBackgroundColor="?attr/colorPrimary">
 
         <LinearLayout
             android:layout_width="wrap_content"
@@ -633,7 +632,7 @@
                 android:layout_height="20dp"
                 android:src="@drawable/ic_expand_log"
                 android:contentDescription="@string/label_output_log"
-                app:tint="?attr/colorPrimary"
+                app:tint="?attr/colorOnPrimary"
                 android:scaleType="centerInside"
                 android:layout_marginEnd="6dp" />
 
@@ -644,7 +643,7 @@
                 android:textSize="11sp"
                 android:textAllCaps="true"
                 android:letterSpacing="0.08"
-                android:textColor="?attr/colorPrimary" />
+                android:textColor="?attr/colorOnPrimary" />
 
         </LinearLayout>
 
