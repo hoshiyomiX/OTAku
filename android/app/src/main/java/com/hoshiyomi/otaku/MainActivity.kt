@@ -1075,12 +1075,28 @@ class MainActivity : AppCompatActivity() {
                 if (isExpandingFromMini) {
                     // Mini header is currently visible; will fade out + translate up.
                     // Card is GONE; will become VISIBLE at headerH with alpha 0.
+                    //
+                    // CRITICAL: Set mini INVISIBLE immediately at expand start.
+                    // Previous code kept mini VISIBLE during the entire expand
+                    // animation (only set INVISIBLE at onAnimationEnd). Even
+                    // though mini.alpha reached 0 at 40% progress, the mini's
+                    // elevation shadow (2dp) + card background could faintly
+                    // render at alpha=0 due to hardware layer compositing —
+                    // perceived as a blink at 90-100% when the card is near
+                    // full height and overlapping mini's position.
+                    //
+                    // Setting INVISIBLE at start ensures mini is fully hidden
+                    // (no draw, no shadow) for the entire expand animation.
+                    // The alpha crossfade still runs (mini.alpha 0.90→0) but
+                    // since mini is INVISIBLE, only the card's fade-in matters
+                    // visually — cleaner morph, no blink.
                     card.visibility = View.VISIBLE
                     card.alpha = 0f
                     logScrollView?.visibility = View.VISIBLE
                     logDivider?.visibility = View.VISIBLE
                     toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
                     setCardHeight(headerH, 0f)
+                    miniLogHeader?.visibility = View.INVISIBLE
                 } else if (isCollapsingToMini) {
                     // Card visible, will shrink to headerH then fade out.
                     // Mini header hidden, will fade in (pure alpha, no translation).
