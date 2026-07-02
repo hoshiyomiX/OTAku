@@ -1117,22 +1117,33 @@ class MainActivity : AppCompatActivity() {
                 val miniAlphaEnd = if (isExpandingFromMini) 0f else 1f
                 val miniTransStart = if (isExpandingFromMini) 0f else -headerH.toFloat() * 0.5f
                 val miniTransEnd = if (isExpandingFromMini) -headerH.toFloat() * 0.5f else 0f
-                val morphFraction = if (isExpandingFromMini || isCollapsingToMini) {
-                    // Morph (alpha/translation) happens during the FIRST 40% of
-                    // the height animation, so by the time the card is 40% grown,
-                    // the mini header is fully gone. Remaining 60% is pure height
-                    // growth — feels like the pill "became" the card.
-                    0.4f
-                } else 0f
+
+                // Morph timing: different for expand vs collapse.
+                //
+                // EXPAND (mini → card): morph in FIRST 40% of animation.
+                //   Card fades in quickly while mini fades out. By 40%, card
+                //   is fully visible and continues growing. User sees the pill
+                //   "become" the card early, then watches it grow.
+                //
+                // COLLAPSE (card → mini): morph in LAST 40% of animation.
+                //   Card stays fully visible while shrinking for first 60%.
+                //   Then fades out + mini fades in during last 40%. User sees
+                //   the card shrink naturally, then dissolve into the pill.
+                //   Previous code used first 40% for both — card disappeared
+                //   at 40% and the remaining 60% of shrink was invisible,
+                //   making the animation feel abrupt/stiff.
+                val morphStart = if (isExpandingFromMini) 0f else 0.6f  // 0% or 60%
+                val morphEnd = if (isExpandingFromMini) 0.4f else 1.0f   // 40% or 100%
 
                 animator.addUpdateListener { anim ->
                     val h = anim.animatedValue as Int
                     setCardHeight(h, 0f)
 
-                    // Compute morph progress: 0..1 over first morphFraction of animation
+                    // Compute morph progress: 0..1 over [morphStart, morphEnd]
                     val rawFraction = anim.animatedFraction
-                    val morphProgress = if (morphFraction > 0f) {
-                        (rawFraction / morphFraction).coerceIn(0f, 1f)
+                    val morphRange = morphEnd - morphStart
+                    val morphProgress = if (morphRange > 0f) {
+                        ((rawFraction - morphStart) / morphRange).coerceIn(0f, 1f)
                     } else 1f
 
                     // Apply frame-synced alpha + translation
