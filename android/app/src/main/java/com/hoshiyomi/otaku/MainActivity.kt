@@ -1114,11 +1114,15 @@ class MainActivity : AppCompatActivity() {
                 // felt inconsistent with tap easing.
                 animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
 
-                // Capture starting values for frame-by-frame interpolation
-                val cardAlphaStart = if (isExpandingFromMini) 0f else 1f
-                val cardAlphaEnd = if (isCollapsingToMini) 0f else 1f
-                val miniAlphaStart = if (isExpandingFromMini) 1f else 0f
-                val miniAlphaEnd = if (isExpandingFromMini) 0f else 1f
+                // Capture starting values for frame-by-frame interpolation.
+                // Max opacity lowered from 1.0 to 0.95 (card) / 0.9 (mini) for
+                // subtler morph — full 1.0 alpha crossfade felt harsh.
+                val CARD_MAX_ALPHA = 0.95f
+                val MINI_MAX_ALPHA = 0.90f
+                val cardAlphaStart = if (isExpandingFromMini) 0f else CARD_MAX_ALPHA
+                val cardAlphaEnd = if (isCollapsingToMini) 0f else CARD_MAX_ALPHA
+                val miniAlphaStart = if (isExpandingFromMini) MINI_MAX_ALPHA else 0f
+                val miniAlphaEnd = if (isExpandingFromMini) 0f else MINI_MAX_ALPHA
                 // Pure alpha crossfade — no translationY (removed for cleaner morph).
                 val miniTransStart = 0f
                 val miniTransEnd = 0f
@@ -1127,17 +1131,15 @@ class MainActivity : AppCompatActivity() {
                 //
                 // EXPAND (mini → card): morph in FIRST 40% of animation.
                 //   Card fades in quickly while mini fades out. By 40%, card
-                //   is fully visible and continues growing. User sees the pill
-                //   "become" the card early, then watches it grow.
+                //   is fully visible and continues growing.
                 //
-                // COLLAPSE (card → mini): morph in LAST 40% of animation.
-                //   Card stays fully visible while shrinking for first 60%.
-                //   Then fades out + mini fades in during last 40%. User sees
-                //   the card shrink naturally, then dissolve into the pill.
-                //   Previous code used first 40% for both — card disappeared
-                //   at 40% and the remaining 60% of shrink was invisible,
-                //   making the animation feel abrupt/stiff.
-                val morphStart = if (isExpandingFromMini) 0f else 0.6f  // 0% or 60%
+                // COLLAPSE (card → mini): morph in LAST 50% of animation.
+                //   Card stays fully visible while shrinking for first 50%.
+                //   Then fades out + mini fades in during last 50%.
+                //   Previous 40% [60-100%] felt abrupt — the sudden start of
+                //   fading at 60% was jarring. 50% [50-100%] gives more time
+                //   for the fade to ease in naturally.
+                val morphStart = if (isExpandingFromMini) 0f else 0.5f  // 0% or 50%
                 val morphEnd = if (isExpandingFromMini) 0.4f else 1.0f   // 40% or 100%
 
                 animator.addUpdateListener { anim ->
@@ -1147,9 +1149,17 @@ class MainActivity : AppCompatActivity() {
                     // Compute morph progress: 0..1 over [morphStart, morphEnd]
                     val rawFraction = anim.animatedFraction
                     val morphRange = morphEnd - morphStart
-                    val morphProgress = if (morphRange > 0f) {
+                    var morphProgress = if (morphRange > 0f) {
                         ((rawFraction - morphStart) / morphRange).coerceIn(0f, 1f)
                     } else 1f
+
+                    // For collapse, apply ease-in to the alpha fade so it
+                    // starts gradually instead of linearly. This eliminates
+                    // the "abrupt fade start" at 50%.
+                    // Ease-in: progress²  (quadratic — slow start, fast end)
+                    if (isCollapsingToMini) {
+                        morphProgress = morphProgress * morphProgress
+                    }
 
                     // Apply frame-synced alpha + translation
                     card.alpha = cardAlphaStart + (cardAlphaEnd - cardAlphaStart) * morphProgress
@@ -1160,26 +1170,28 @@ class MainActivity : AppCompatActivity() {
                     override fun onAnimationEnd(animation: android.animation.Animator) {
                         if (targetExpanded) {
                             // Expanded: swap to weight=1 (matches target height).
-                            // Card alpha is already 1 from animator — do NOT reset
-                            // alpha here (would cause 1-frame flash if visibility
-                            // toggle lags by a frame). Visibility GONE on mini
-                            // header is safe because its alpha is already 0.
+                            // Use INVISIBLE (not GONE) for mini header — GONE
+                            // triggers CoordinatorLayout re-measure which causes
+                            // a 1-frame blink of the FAB / mini position.
+                            // INVISIBLE preserves layout space, no re-measure.
                             setCardHeight(0, 1f)
-                            miniLogHeader?.visibility = View.GONE
+                            miniLogHeader?.visibility = View.INVISIBLE
+                            miniLogHeader?.alpha = 0f
                             miniLogHeader?.translationY = 0f
-                            // Note: card.alpha stays at 1 (animator's end value)
-                            // Note: miniLogHeader.alpha stays at 0 (animator's end value) — will be reset to 1 on next collapse entry
+                            // Restore card alpha to full 1.0 now that morph is done
+                            card.alpha = 1f
                         } else {
                             // Collapsed: hide logCard. Card alpha is already 0
                             // from animator — visibility GONE is safe (no flash).
-                            // Mini header alpha is already 1 from animator.
+                            // Mini header alpha is at MINI_MAX_ALPHA from animator,
+                            // restore to full 1.0 for normal display.
                             logScrollView?.visibility = View.GONE
                             logDivider?.visibility = View.GONE
                             setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
                             card.visibility = View.GONE
+                            miniLogHeader?.visibility = View.VISIBLE
+                            miniLogHeader?.alpha = 1f
                             miniLogHeader?.translationY = 0f
-                            // Note: card.alpha stays at 0 (animator's end value) — will be reset to 1 on next expand entry
-                            // Note: miniLogHeader.alpha stays at 1 (animator's end value)
                         }
                         isLogExpanded = targetExpanded
                     }
@@ -1300,13 +1312,14 @@ class MainActivity : AppCompatActivity() {
                             setCardHeight(newHeight, 0f)
 
                             // Fade card in over first 30% of drag range.
-                            // Mini header fades out over same range — gives
-                            // visual crossfade as panel grows.
+                            // Mini header fades out over same range.
+                            // Max opacity lowered: card 0.95, mini 0.85 (drag
+                            // path uses lower max than tap path for subtler feel).
                             val expandRange = (logExpandedHeight - headerH).coerceAtLeast(1)
                             val progress = (newHeight - headerH).toFloat() / expandRange
                             val fadeProgress = (progress / 0.3f).coerceIn(0f, 1f)
-                            card.alpha = fadeProgress
-                            miniLogHeader?.alpha = 1f - fadeProgress
+                            card.alpha = 0.95f * fadeProgress
+                            miniLogHeader?.alpha = 0.85f * (1f - fadeProgress)
                         } else {
                             // Drag DOWN → resistance feedback.
                             // Mini is already collapsed, so downward drag has
@@ -1331,6 +1344,9 @@ class MainActivity : AppCompatActivity() {
                             // animateToExpanded will handle the final snap +
                             // mini header hide + card alpha reset.
                             // Restore mini visibility first so morph logic works.
+                            // Use INVISIBLE (not GONE) to avoid CoordinatorLayout
+                            // re-measure blink — animateToExpanded will keep it
+                            // INVISIBLE at expand end.
                             miniLogHeader?.visibility = View.VISIBLE
                             animateToExpanded(true, fromTap = false, velocityPxSec = miniDragVelocity)
                         } else {
