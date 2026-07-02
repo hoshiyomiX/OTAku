@@ -921,45 +921,57 @@ class MainActivity : AppCompatActivity() {
         }
 
         /**
-         * Measure the actual expanded height the card would occupy if it had
-         * weight=1 in its parent LinearLayout.
+         * Compute the theoretical height the card WOULD occupy if it had
+         * weight=1 alongside its sibling NestedScrollView (also weight=1).
          *
-         * This is critical for eliminating the "overshoot bounce" at the end
-         * of expand animation. The previous code cached `logExpandedHeight`
-         * from a prior layout pass or estimated it as `parentH * 0.55f`, then
-         * animated to that height and swapped to weight=1 at onAnimationEnd.
-         * If the cached/estimated height differed from the actual weight=1
-         * height, the swap caused a visible jump — perceived as overshoot.
+         * CRITICAL: This must NOT read sibling.height (current laid-out
+         * height) — that creates a circular dependency:
+         *   • Card GONE → sibling takes all → available=0 → card stuck
+         *   • Card explicit height X → sibling = parent-X → available=X
+         *     → card can't grow past current
          *
-         * This function computes the TRUE weight=1 height by measuring the
-         * parent's available space (parent height - sibling heights - card
-         * margins). Animation target now matches swap target exactly → no bounce.
+         * Instead, compute the weight-based split directly:
+         *   remaining = parent.height - parent.padding - all child margins
+         *   cardShare = remaining * (card.weight / sum_of_weights)
+         *
+         * With both card + NestedScrollView at weight=1, sum=2, card gets
+         * remaining/2 (50/50 split). This is independent of current layout
+         * state — works during drag, when GONE, when explicit height, etc.
+         *
+         * Sibling margins are queried from their LayoutParams (not laid-out
+         * height), so the calculation is stable across layout passes.
          */
         fun measureExpandedHeight(): Int {
             val parent = parentLayout ?: return 0
             val card = logCard ?: return 0
             val headerH = measureHeaderHeight()
 
-            // Sum the heights of all siblings (other children of the parent
-            // LinearLayout). The card itself is excluded.
-            var siblingHeight = 0
+            // Parent's available space (excluding padding)
+            val parentH = parent.height
+            if (parentH <= 0) return 0
+            val padding = parent.paddingTop + parent.paddingBottom
+            val available = parentH - padding
+
+            // Sum of weights across all VISIBLE children (skip GONE).
+            // Card's weight=1, NestedScrollView's weight=1 → sum=2.
+            var weightSum = 0f
+            var allMargins = 0
+            var cardWeight = 0f
             for (i in 0 until parent.childCount) {
                 val child = parent.getChildAt(i)
-                if (child === card) continue
                 if (child.visibility == View.GONE) continue
-                siblingHeight += child.height
+                val lp = child.layoutParams as android.widget.LinearLayout.LayoutParams
+                weightSum += lp.weight
+                allMargins += lp.topMargin + lp.bottomMargin
+                if (child === card) cardWeight = lp.weight
             }
+            if (weightSum <= 0f) return headerH
 
-            // Card's own vertical margins
-            val lp = card.layoutParams as android.widget.LinearLayout.LayoutParams
-            val margins = lp.topMargin + lp.bottomMargin
-
-            // Parent's padding
-            val padding = parent.paddingTop + parent.paddingBottom
-
-            val available = parent.height - padding - siblingHeight - margins
-            // Sanity: must be at least header height
-            return available.coerceAtLeast(headerH)
+            // Remaining space after all child margins
+            val remaining = (available - allMargins).coerceAtLeast(0)
+            // Card's share = remaining * (cardWeight / weightSum)
+            val cardShare = (remaining * (cardWeight / weightSum)).toInt()
+            return cardShare.coerceAtLeast(headerH)
         }
 
         fun setExpandedVisualState(expanded: Boolean) {
