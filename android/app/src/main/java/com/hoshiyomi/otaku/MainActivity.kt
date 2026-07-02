@@ -840,18 +840,18 @@ class MainActivity : AppCompatActivity() {
         //  Log panel expand/collapse — SystemUI BottomSheet-style
         //  ════════════════════════════════════════════════════════════
         //  Key design choices (matching Material BottomSheetBehavior):
-        //  1. Drag sensitivity multiplier (2.2x) — calibrated for thumb drags.
-        //     Thumb drags are shorter than index-finger drags, so the panel
-        //     must move more per pixel of finger movement. 2.2x matches
-        //     AOSP BottomSheetBehavior's effective ratio after touch slop.
+        //  1. Drag sensitivity = 1.0 (true 1:1 finger tracking).
+        //     Previous 2.2x made panel move faster than finger — felt
+        //     inaccurate. 1.0 = panel tracks finger exactly, like dragging
+        //     a window border.
         //  2. Touch slop (6px ~ 2dp) — low enough to feel responsive, high
         //     enough to reject micro-taps during scrolling attempts. 4px was
         //     too low (accidental drags during tap), 8px was too high.
-        //  3. Velocity-aware snap animation:
-        //       • Tap → FastOutSlowInInterpolator (Material standard, 250ms)
-        //       • Post-drag snap → DecelerateInterpolator(1.5f) with duration
-        //         scaled by initial velocity. This continues the finger's
-        //         momentum naturally instead of restarting with material easing.
+        //  3. Unified interpolator: FastOutSlowInInterpolator for BOTH tap
+        //     and post-drag snap (Material standard). Duration is velocity-
+        //     aware: high velocity → short snap, low velocity → longer settle.
+        //     Previous code used DecelerateInterpolator for snaps — felt
+        //     inconsistent with tap easing.
         //  4. Synchronous LayoutParams swap in onAnimationEnd. The previous
         //     card.post{} approach caused a 1-frame flicker because the layout
         //     pass happened AFTER the animator released its final value.
@@ -860,6 +860,9 @@ class MainActivity : AppCompatActivity() {
         //     produces the same visual result — no jump.
         //  5. Measured header height (not hardcoded) — header padding is
         //     10dp + 32dp icon + 10dp = 52dp.
+        //  6. Pure alpha crossfade morph (no translationY) — mini header
+        //     fades out while card fades in. Previous translationY slide
+        //     felt disconnected from the card's growth direction.
         // ════════════════════════════════════════════════════════════
 
         var logExpandedHeight = 0
@@ -1080,13 +1083,12 @@ class MainActivity : AppCompatActivity() {
                     setCardHeight(headerH, 0f)
                 } else if (isCollapsingToMini) {
                     // Card visible, will shrink to headerH then fade out.
-                    // Mini header hidden, will fade in + translate down from up.
+                    // Mini header hidden, will fade in (pure alpha, no translation).
                     logScrollView?.visibility = View.VISIBLE
                     logDivider?.visibility = View.VISIBLE
                     toggleBtn?.setImageResource(R.drawable.ic_expand_log)
                     miniLogHeader?.visibility = View.VISIBLE
                     miniLogHeader?.alpha = 0f
-                    miniLogHeader?.translationY = -headerH.toFloat() * 0.5f
                 }
 
                 val startHeight = if (isExpandingFromMini) headerH else card.height
@@ -1104,19 +1106,22 @@ class MainActivity : AppCompatActivity() {
 
                 if (fromTap) {
                     animator.duration = tapDurationFor(distance)
-                    animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
                 } else {
                     animator.duration = snapDurationFor(distance, velocityPxSec)
-                    animator.interpolator = android.view.animation.DecelerateInterpolator(1.5f)
                 }
+                // Unified interpolator for both tap and snap — Material standard.
+                // Previous code used DecelerateInterpolator(1.5f) for snaps which
+                // felt inconsistent with tap easing.
+                animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
 
                 // Capture starting values for frame-by-frame interpolation
                 val cardAlphaStart = if (isExpandingFromMini) 0f else 1f
                 val cardAlphaEnd = if (isCollapsingToMini) 0f else 1f
                 val miniAlphaStart = if (isExpandingFromMini) 1f else 0f
                 val miniAlphaEnd = if (isExpandingFromMini) 0f else 1f
-                val miniTransStart = if (isExpandingFromMini) 0f else -headerH.toFloat() * 0.5f
-                val miniTransEnd = if (isExpandingFromMini) -headerH.toFloat() * 0.5f else 0f
+                // Pure alpha crossfade — no translationY (removed for cleaner morph).
+                val miniTransStart = 0f
+                val miniTransEnd = 0f
 
                 // Morph timing: different for expand vs collapse.
                 //
@@ -1263,18 +1268,21 @@ class MainActivity : AppCompatActivity() {
                         miniLastMoveY = event.rawY
 
                         // ── Real-time expand: log panel follows finger 1:1 ──
-                        // Only expand (dy < 0 = drag up). Ignore drag-down on
-                        // mini (no collapse action needed — already collapsed).
                         if (dy < 0) {
+                            // Drag UP → expand
                             val card = logCard
                             if (card != null && card.visibility != View.VISIBLE) {
-                                // First move: show card at headerH, fade in
+                                // First move: show card at headerH, fade in.
+                                // Set mini INVISIBLE — card covers its position
+                                // and INVISIBLE prevents touch interception
+                                // while mini is at alpha=0.
                                 card.visibility = View.VISIBLE
                                 card.alpha = 0f
                                 logScrollView?.visibility = View.VISIBLE
                                 logDivider?.visibility = View.VISIBLE
                                 toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
                                 setCardHeight(measuredHeaderHeight, 0f)
+                                miniLogHeader?.visibility = View.INVISIBLE
                             }
                             // Recompute logExpandedHeight every frame — sibling
                             // heights may shift as card grows, and stale target
@@ -1299,6 +1307,13 @@ class MainActivity : AppCompatActivity() {
                             val fadeProgress = (progress / 0.3f).coerceIn(0f, 1f)
                             card.alpha = fadeProgress
                             miniLogHeader?.alpha = 1f - fadeProgress
+                        } else {
+                            // Drag DOWN → resistance feedback.
+                            // Mini is already collapsed, so downward drag has
+                            // no action. Add slight translation (20% of dy,
+                            // max 24px) as visual resistance — snaps back on
+                            // release.
+                            miniLogHeader?.translationY = (dy * 0.15f).coerceIn(0f, 24f)
                         }
                     }
                     true
@@ -1315,18 +1330,52 @@ class MainActivity : AppCompatActivity() {
                         if (shouldExpand) {
                             // animateToExpanded will handle the final snap +
                             // mini header hide + card alpha reset.
+                            // Restore mini visibility first so morph logic works.
+                            miniLogHeader?.visibility = View.VISIBLE
                             animateToExpanded(true, fromTap = false, velocityPxSec = miniDragVelocity)
                         } else {
-                            // Drag was too small — snap back to collapsed.
-                            // Hide card, restore mini header.
-                            logCard?.let { card ->
-                                logScrollView?.visibility = View.GONE
-                                logDivider?.visibility = View.GONE
-                                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
-                                card.visibility = View.GONE
-                                card.alpha = 1f
+                            // Drag was too small — animate snap back to collapsed.
+                            // Previous code did this instantly (visibility GONE +
+                            // alpha=1) which caused a jarring pop. Now animate
+                            // card height → headerH, card alpha → 0, mini alpha → 1
+                            // over 150ms, then hide card.
+                            val card = logCard
+                            if (card != null && card.visibility == View.VISIBLE) {
+                                val startHeight = card.height
+                                val targetHeight = measuredHeaderHeight
+                                val startCardAlpha = card.alpha
+                                val startMiniAlpha = miniLogHeader?.alpha ?: 0f
+                                miniLogHeader?.visibility = View.VISIBLE
+                                val snapBack = android.animation.ValueAnimator.ofFloat(0f, 1f)
+                                snapBack.duration = 150
+                                snapBack.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
+                                snapBack.addUpdateListener { anim ->
+                                    val f = anim.animatedValue as Float
+                                    val h = (startHeight + (targetHeight - startHeight) * f).toInt()
+                                    setCardHeight(h, 0f)
+                                    card.alpha = startCardAlpha + (0f - startCardAlpha) * f
+                                    miniLogHeader?.alpha = startMiniAlpha + (1f - startMiniAlpha) * f
+                                }
+                                snapBack.addListener(object : android.animation.AnimatorListenerAdapter() {
+                                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                                        logScrollView?.visibility = View.GONE
+                                        logDivider?.visibility = View.GONE
+                                        setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                                        card.visibility = View.GONE
+                                        card.alpha = 1f
+                                        miniLogHeader?.alpha = 1f
+                                        miniLogHeader?.translationY = 0f
+                                    }
+                                })
+                                snapBack.start()
+                                currentAnimator = snapBack
+                            } else {
+                                // Card wasn't visible (drag was purely downward
+                                // resistance). Just reset mini transforms.
+                                miniLogHeader?.alpha = 1f
+                                miniLogHeader?.translationY = 0f
+                                miniLogHeader?.visibility = View.VISIBLE
                             }
-                            miniLogHeader?.alpha = 1f
                         }
                     } else if (absDy < MINI_TAP_THRESHOLD) {
                         // Treat as tap — toggle (Material easing)
@@ -1345,9 +1394,9 @@ class MainActivity : AppCompatActivity() {
         //   • Drag DOWN (dy > 0) → collapse (height shrinks downward, content hides)
         // effectiveDy = -dy  →  up = positive = expand.
         //
-        // Height change is multiplied by DRAG_SENSITIVITY (2.2x) so thumb drags
-        // produce visible height changes — AOSP BottomSheetBehavior uses a similar
-        // 2.0-2.5x factor calibrated for thumb reachability.
+        // DRAG_SENSITIVITY = 1.0 (true 1:1 finger tracking). Previous 2.2x made
+        // the panel move faster than the finger — felt inaccurate. 1.0 = panel
+        // tracks finger exactly, like dragging a window border.
         //
         // Velocity tracking: each MOVE records timestamp + Y. At release,
         // velocity = (lastY - prevY) / (lastTime - prevTime). This drives the
