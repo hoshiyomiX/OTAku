@@ -129,15 +129,15 @@
                             android:layout_height="wrap_content"
                             android:orientation="horizontal"
                             android:gravity="center_vertical"
-                            android:layout_marginBottom="2dp"
-                            android:minHeight="56dp">
+                            android:layout_marginBottom="2dp">
 
                             <com.google.android.material.textfield.TextInputLayout
                                 android:id="@+id/layoutDevice"
                                 android:layout_width="0dp"
-                                android:layout_height="match_parent"
+                                android:layout_height="wrap_content"
                                 android:layout_weight="1"
                                 android:hint="@string/hint_device_codename"
+                                android:layout_gravity="center_vertical"
                                 app:boxBackgroundColor="?attr/colorSurface"
                                 app:boxCornerRadiusTopStart="12dp"
                                 app:boxCornerRadiusTopEnd="12dp"
@@ -148,11 +148,13 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextDevice"
                                     android:layout_width="match_parent"
-                                    android:layout_height="match_parent"
+                                    android:layout_height="wrap_content"
                                     android:inputType="text"
                                     android:maxLines="1"
                                     android:textSize="14sp"
-                                    android:gravity="center_vertical" />
+                                    android:gravity="center_vertical"
+                                    android:paddingTop="10dp"
+                                    android:paddingBottom="10dp" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -160,12 +162,16 @@
                                 android:id="@+id/buttonAutoDetect"
                                 style="Widget.Material3.Button.TonalButton"
                                 android:layout_width="wrap_content"
-                                android:layout_height="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="center_vertical"
                                 android:layout_marginStart="8dp"
                                 android:text="@string/button_auto_detect"
                                 android:textSize="12sp"
                                 android:minWidth="0dp"
+                                android:minHeight="0dp"
                                 android:paddingHorizontal="12dp"
+                                android:paddingTop="14dp"
+                                android:paddingBottom="14dp"
                                 app:icon="@drawable/ic_auto_detect"
                                 app:iconSize="16dp"
                                 app:iconPadding="4dp"
