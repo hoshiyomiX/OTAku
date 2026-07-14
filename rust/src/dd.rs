@@ -527,9 +527,12 @@ cleanup_abort() {{
     fi
     # Re-map all dynamic partitions that may have been unmapped during resize.
     # lptools is the ONLY supported tool for dynamic partition management.
+    # IMPORTANT: Must targeted-unmount + unmap before map, otherwise lptools map
+    # fails with EEXIST if the dm-linear device is still active (e.g. due to a
+    # prior EBUSY during unmap). Same bug as the resize step's initial unmap.
     if [ "$HAS_LPTOOLS" = "1" ]; then
         for pname in $DYNAMIC_PART_NAMES; do
-            lptools map "$pname" >/dev/null 2>&1
+            unmap_and_remap_partition "$pname"
         done
     fi
     sync
@@ -993,6 +996,87 @@ is_dynamic_partition() {{
     esac
 }}
 
+# Helper: targeted unmount + lptools unmap for a single dynamic partition.
+# Args: $1 = partition name
+# Returns: 0 on success (partition unmapped or was never mapped/physical),
+#          1 if lptools unmap failed (genuine EBUSY or non-dynamic).
+# Idempotent: safe to call on already-unmapped or non-existent partitions.
+#
+# Why this exists (NOT `umount -a`):
+#   Previously the resize step called `lptools unmap "$pname" >/dev/null 2>&1`
+#   for every dynamic partition. The `2>&1` silently swallowed EBUSY errors
+#   when partitions outside the bundle (e.g. system_ext, odm auto-mounted by
+#   recovery) were still mounted. That left stale dm-linear devices in the
+#   kernel, causing `lptools map` to fail later with EEXIST.
+#
+#   `umount -a` "works" as a workaround because it releases ALL mounts, but
+#   it is far too broad — it can unmount /proc, /sys, /tmp, /data, /cache and
+#   break the recovery environment itself.
+#
+#   This helper mirrors AOSP's per-partition `unmap_partition(name)` edify
+#   function (source.android.com/docs/core/ota/dynamic_partitions/nonab):
+#   targeted unmount of mount points referencing this partition's block
+#   device, THEN lptools unmap. lptools itself calls
+#   android::fs_mgr::DestroyLogicalPartition which issues DM_DEV_REMOVE —
+#   that fails EBUSY if the device is still mounted, so the unmount above is
+#   mandatory.
+unmount_and_unmap_partition() {{
+    local pname="$1"
+    local ptarget dev_name mount_points mp
+
+    ptarget=$(resolve_target "$pname" 2>/dev/null)
+    [ -z "$ptarget" ] && return 0
+    [ ! -e "$ptarget" ] && return 0
+
+    dev_name=$(basename "$ptarget" 2>/dev/null)
+    # Find mount points referencing either the full block device path or its
+    # basename (some recoveries report /dev/block/dm-0 rather than the by-name
+    # symlink; basename match catches both).
+    mount_points=$(mount 2>/dev/null | grep -E "($ptarget|$dev_name)" | awk '{{print $3}}')
+    for mp in $mount_points; do
+        ui_print "    unmount $pname from $mp"
+        umount "$mp" 2>/dev/null
+        # dm-verity / dm-crypt mounts sometimes need a moment to release;
+        # retry once with lazy unmount as a safety net. Lazy unmount detaches
+        # the mount immediately even if a process still has open fds — safe
+        # here because we are about to destroy the underlying dm device.
+        if mount 2>/dev/null | grep -q " $mp "; then
+            sleep 1
+            umount -l "$mp" 2>/dev/null
+        fi
+    done
+
+    # lptools unmap is idempotent: returns 0 if already unmapped (state != ACTIVE).
+    # If it still fails after targeted unmount, the partition is either genuinely
+    # busy (some process holds an open fd) or not a dynamic partition.
+    if ! lptools unmap "$pname" >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}}
+
+# Helper: targeted unmount + lptools unmap + lptools map for a single dynamic
+# partition. Use this when you need a fresh dm-linear device with current
+# metadata (e.g. after resize).
+# Args: $1 = partition name
+# Returns: 0 on success, 1 if final map failed.
+# Prints ui_print warnings on intermediate failures so the user can debug.
+unmap_and_remap_partition() {{
+    local pname="$1"
+    local map_rc
+
+    if ! unmount_and_unmap_partition "$pname"; then
+        ui_print "    warning: unmap failed for $pname (continuing to map anyway)"
+    fi
+    lptools map "$pname" >/dev/null 2>&1
+    map_rc=$?
+    if [ $map_rc -ne 0 ]; then
+        ui_print "    error: lptools map failed for $pname (rc=$map_rc)"
+        return 1
+    fi
+    return 0
+}}
+
 # List of partitions that need resizing (filled during validation)
 RESIZE_NEEDED=""
 RESIZE_TOTAL=0
@@ -1155,11 +1239,30 @@ else
     # Clear COW partitions if this is a Virtual A/B device
     lptools clear-cow >/dev/null 2>&1
 
-    # Unmap all dynamic partitions before resize
-    ui_print "  Unmapping dynamic partitions..."
+    # Targeted unmount + unmap for ALL dynamic partitions on the device.
+    # Previous approach (`lptools unmap "$pname" >/dev/null 2>&1`) silently
+    # swallowed EBUSY when partitions outside the bundle (e.g. system_ext, odm
+    # auto-mounted by recovery) were still mounted. That left stale dm-linear
+    # devices, causing `lptools map` to fail later with EEXIST.
+    #
+    # AOSP defines op `resize` as "unmap, then resize" — unmap is mandatory
+    # before resize. We use targeted unmount (NOT `umount -a`) so we don't
+    # accidentally unmount /proc, /sys, /tmp, /data, /cache and break recovery.
+    # See unmount_and_unmap_partition() docstring for full rationale.
+    ui_print "  Unmounting & unmapping dynamic partitions..."
+    UNMAP_FAILED=""
     for pname in $DYNAMIC_PART_NAMES; do
-        lptools unmap "$pname" >/dev/null 2>&1
+        if ! unmount_and_unmap_partition "$pname"; then
+            UNMAP_FAILED="$UNMAP_FAILED $pname"
+        fi
     done
+    if [ -n "$UNMAP_FAILED" ]; then
+        ui_print "! WARNING: lptools unmap failed for:$UNMAP_FAILED"
+        ui_print "  These may be physical partitions (OK — lptools only handles"
+        ui_print "  dynamic partitions in super) or genuinely busy (NOT OK —"
+        ui_print "  a process holds an open fd on the dm device)."
+        ui_print "  Resize/map may fail for genuinely busy partitions."
+    fi
 
     # Resize each partition that needs it
     ui_print "  Using lptools to resize dynamic partitions..."
@@ -1239,13 +1342,11 @@ else
         else
             ui_print "  $pname resized to $(( NEW_SIZE_BYTES / 1048576 )) MB"
             # After successful resize, re-map the partition (resize doesn't auto-map
-            # in the original phhusson version).
-            # Idempotent: only unmap if currently mapped (avoid error noise on
-            # lptools variants that auto-unmap during resize).
-            if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
-                lptools unmap "$pname" >/dev/null 2>&1
-            fi
-            lptools map "$pname" >/dev/null 2>&1
+            # in the original phhusson version — lptools resize only updates
+            # metadata, does NOT create a new dm-linear device).
+            # Use the targeted unmount+unmap+map helper so we don't trip over a
+            # stale dm-linear device left from the resize step.
+            unmap_and_remap_partition "$pname"
         fi
     done
 
@@ -1257,19 +1358,15 @@ else
 
     # Remap dynamic partitions that were NOT already mapped by lptools create.
     # lptools create auto-maps the partition, so we must skip those to avoid double-mapping.
-    # Idempotent: only unmap if currently mapped (skip if already unmapped by resize).
+    # Uses unmap_and_remap_partition helper: targeted unmount + unmap + map, with
+    # exit-code capture so silent EEXIST/EINVAL failures are surfaced to the user.
     ui_print "  Remapping dynamic partitions..."
     REMAP_FAILED=""
     for pname in $DYNAMIC_PART_NAMES; do
         case "$CREATED_PARTS" in
             *" $pname "*) continue ;;  # already mapped by lptools create
         esac
-        if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
-            lptools unmap "$pname" >/dev/null 2>&1
-        fi
-        lptools map "$pname" >/dev/null 2>&1
-        MAP_RC=$?
-        if [ $MAP_RC -ne 0 ]; then
+        if ! unmap_and_remap_partition "$pname"; then
             REMAP_FAILED="$REMAP_FAILED $pname"
         fi
     done
