@@ -525,14 +525,29 @@ cleanup_abort() {{
             fi
         done
     fi
-    # Re-map all dynamic partitions that may have been unmapped during resize.
+    # Re-map dynamic partitions that may have been unmapped during resize.
     # lptools is the ONLY supported tool for dynamic partition management.
-    # IMPORTANT: Must targeted-unmount + unmap before map, otherwise lptools map
-    # fails with EEXIST if the dm-linear device is still active (e.g. due to a
-    # prior EBUSY during unmap). Same bug as the resize step's initial unmap.
+    #
+    # Targeted (NOT all DYNAMIC_PART_NAMES): only touch partitions that are
+    # currently NOT mapped. Already-mapped partitions are skipped — blindly
+    # calling unmap+remap on them would (a) do unnecessary work, and (b) risk
+    # EBUSY/EEXIST on partitions that recovery is actively using (e.g. /tmp
+    # overlaid on /data, /system_ext auto-mounted).
+    #
+    # This mirrors the AOSP non-A/B OTA flow: update_dynamic_partitions only
+    # touches partitions in its op_list (the ones being resized/added/removed),
+    # never all dynamic partitions on the device.
+    # Source: source.android.com/docs/core/ota/dynamic_partitions/nonab
     if [ "$HAS_LPTOOLS" = "1" ]; then
         for pname in $DYNAMIC_PART_NAMES; do
-            unmap_and_remap_partition "$pname"
+            # Skip if already mapped — no need to touch it.
+            if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
+                continue
+            fi
+            # Not mapped — try to map. unmount_and_unmap_partition is idempotent
+            # (returns 0 if not present/mapped), so safe to call as a prep step.
+            unmount_and_unmap_partition "$pname" >/dev/null 2>&1
+            lptools map "$pname" >/dev/null 2>&1
         done
     fi
     sync
@@ -1239,29 +1254,45 @@ else
     # Clear COW partitions if this is a Virtual A/B device
     lptools clear-cow >/dev/null 2>&1
 
-    # Targeted unmount + unmap for ALL dynamic partitions on the device.
-    # Previous approach (`lptools unmap "$pname" >/dev/null 2>&1`) silently
-    # swallowed EBUSY when partitions outside the bundle (e.g. system_ext, odm
-    # auto-mounted by recovery) were still mounted. That left stale dm-linear
-    # devices, causing `lptools map` to fail later with EEXIST.
+    # Targeted unmount + unmap — ONLY for partitions that will be resized.
     #
-    # AOSP defines op `resize` as "unmap, then resize" — unmap is mandatory
-    # before resize. We use targeted unmount (NOT `umount -a`) so we don't
-    # accidentally unmount /proc, /sys, /tmp, /data, /cache and break recovery.
+    # Rationale (aligned with AOSP non-A/B OTA flow):
+    #   AOSP's update_dynamic_partitions op_list only contains partitions that
+    #   are being resized/added/removed. It does NOT unmap all dynamic
+    #   partitions on the device. Each op `resize` is defined as
+    #   "unmap, then resize" — only the partition being resized needs unmap.
+    #   Source: source.android.com/docs/core/ota/dynamic_partitions/nonab
+    #
+    #   lptools resize only updates metadata in the super partition; it does
+    #   NOT touch other partitions' dm-linear devices. So unmapping partitions
+    #   that won't be resized is unnecessary work AND risks EBUSY on
+    #   recovery-mounted partitions (system_ext, odm, etc.), which was the
+    #   original root cause of the "lptools map fails" bug.
+    #
+    #   Previous approach iterated ALL $DYNAMIC_PART_NAMES (19 names) — too
+    #   broad. Now we only iterate $RESIZE_NEEDED (partitions the bundle needs
+    #   to grow).
+    #
+    # We still use targeted unmount (NOT `umount -a`) per partition via the
+    # helper, so /proc /sys /tmp /data /cache are never touched.
     # See unmount_and_unmap_partition() docstring for full rationale.
-    ui_print "  Unmounting & unmapping dynamic partitions..."
-    UNMAP_FAILED=""
-    for pname in $DYNAMIC_PART_NAMES; do
-        if ! unmount_and_unmap_partition "$pname"; then
-            UNMAP_FAILED="$UNMAP_FAILED $pname"
+    if [ -n "$RESIZE_NEEDED" ]; then
+        ui_print "  Unmounting & unmapping partitions that need resize:$RESIZE_NEEDED"
+        UNMAP_FAILED=""
+        for pname in $RESIZE_NEEDED; do
+            pname=$(echo "$pname" | tr -d ' ')
+            [ -z "$pname" ] && continue
+            if ! unmount_and_unmap_partition "$pname"; then
+                UNMAP_FAILED="$UNMAP_FAILED $pname"
+            fi
+        done
+        if [ -n "$UNMAP_FAILED" ]; then
+            ui_print "! WARNING: lptools unmap failed for:$UNMAP_FAILED"
+            ui_print "  These partitions are genuinely busy (a process holds an"
+            ui_print "  open fd on the dm device). Resize will likely fail for them."
         fi
-    done
-    if [ -n "$UNMAP_FAILED" ]; then
-        ui_print "! WARNING: lptools unmap failed for:$UNMAP_FAILED"
-        ui_print "  These may be physical partitions (OK — lptools only handles"
-        ui_print "  dynamic partitions in super) or genuinely busy (NOT OK —"
-        ui_print "  a process holds an open fd on the dm device)."
-        ui_print "  Resize/map may fail for genuinely busy partitions."
+    else
+        ui_print "  No partitions need resize — skipping unmap step."
     fi
 
     # Resize each partition that needs it
@@ -1356,16 +1387,35 @@ else
         exit 1
     fi
 
-    # Remap dynamic partitions that were NOT already mapped by lptools create.
-    # lptools create auto-maps the partition, so we must skip those to avoid double-mapping.
-    # Uses unmap_and_remap_partition helper: targeted unmount + unmap + map, with
-    # exit-code capture so silent EEXIST/EINVAL failures are surfaced to the user.
-    ui_print "  Remapping dynamic partitions..."
+    # Verify resized partitions are mapped (safety net for post-resize remap).
+    #
+    # The post-resize remap inside the resize loop (line ~1349) already calls
+    # unmap_and_remap_partition for each successfully resized partition, and
+    # lptools create auto-maps partitions that went through the remove+create
+    # fallback. So at this point, every partition in $RESIZE_NEEDED should
+    # already be mapped — UNLESS the post-resize remap failed.
+    #
+    # Targeted: only iterate $RESIZE_NEEDED (the partitions we touched). Skip
+    # $CREATED_PARTS (already mapped by lptools create). Skip partitions that
+    # are already mapped (post-resize remap succeeded). Only attempt remap for
+    # partitions that are NOT mapped — i.e. post-resize remap failures.
+    #
+    # This replaces the previous broad iteration over ALL $DYNAMIC_PART_NAMES,
+    # which would unnecessarily unmap+remap partitions that were never touched
+    # (e.g. system_ext, odm auto-mounted by recovery) and risk EBUSY/EEXIST.
+    ui_print "  Verifying resized partitions are mapped..."
     REMAP_FAILED=""
-    for pname in $DYNAMIC_PART_NAMES; do
+    for pname in $RESIZE_NEEDED; do
+        pname=$(echo "$pname" | tr -d ' ')
+        [ -z "$pname" ] && continue
         case "$CREATED_PARTS" in
             *" $pname "*) continue ;;  # already mapped by lptools create
         esac
+        # Skip if already mapped (post-resize remap succeeded).
+        if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
+            continue
+        fi
+        # Not mapped — post-resize remap failed or didn't run. Retry.
         if ! unmap_and_remap_partition "$pname"; then
             REMAP_FAILED="$REMAP_FAILED $pname"
         fi
