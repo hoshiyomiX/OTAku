@@ -2394,7 +2394,16 @@ mod tests {
     /// Regression: Bug #4 (P2) — explicit $? capture.
     /// The old code used `if [ $? -ne 0 ]` directly after a command,
     /// which is fragile (any command between can reset $?). The fix
-    /// captures to RC variables: RESIZE_RC, CREATE_RC, MAP_RC.
+    /// captures to RC variables: RESIZE_RC, CREATE_RC, MAP_RC (or map_rc
+    /// when capture is inside the unmap_and_remap_partition helper).
+    ///
+    /// Note: After refactor (commit bf24206 — targeted unmap/remap), the
+    /// `lptools map` exit code capture moved from inline `MAP_RC=$?` in
+    /// the resize-step remap loop into the `unmap_and_remap_partition()`
+    /// helper function as `map_rc=$?` (lowercase, local var). Both patterns
+    /// satisfy Bug #4's intent — the regression is about NOT using
+    /// `if [ $? -ne 0 ]` directly after `lptools map`, regardless of where
+    /// the capture lives.
     #[test]
     fn test_regression_explicit_rc_capture() {
         let meta = vec![PartitionMeta {
@@ -2407,9 +2416,17 @@ mod tests {
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
         // Assert: explicit RC capture variables are present.
+        // RESIZE_RC and CREATE_RC are inline in the resize loop.
         assert!(script.contains("RESIZE_RC=$?"), "REGRESSION: RESIZE_RC capture missing (Bug #4)");
         assert!(script.contains("CREATE_RC=$?"), "REGRESSION: CREATE_RC capture missing (Bug #4)");
-        assert!(script.contains("MAP_RC=$?"), "REGRESSION: MAP_RC capture missing (Bug #4)");
+        // MAP_RC may be inline (uppercase, pre-refactor) or inside the
+        // unmap_and_remap_partition helper (lowercase `map_rc`, post-refactor).
+        // Both patterns satisfy Bug #4's intent: capture $? immediately after
+        // `lptools map`, do NOT use bare `if [ $? -ne 0 ]`.
+        assert!(
+            script.contains("MAP_RC=$?") || script.contains("map_rc=$?"),
+            "REGRESSION: MAP_RC/map_rc capture missing (Bug #4) — neither inline MAP_RC=$? nor helper map_rc=$? found"
+        );
     }
 
     /// Regression: Bug #8 (P2) — `choose` binary fallback chain.
