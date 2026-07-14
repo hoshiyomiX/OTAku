@@ -617,14 +617,35 @@ class MainActivity : AppCompatActivity() {
         // Restore persisted value (or keep empty for default)
         editDevice?.setText(prefs.getString("device", ""))
 
-        // Auto-detect button: fill device field with Build.PRODUCT
+        // Auto-detect button: detect device codename from vendor partition props
+        // (spoof-resistant — uses ro.product.vendor.device + ro.product.board
+        // from getprop and /vendor/build.prop, NOT Build.PRODUCT which is
+        // easily overridden by Magisk/GSI/LineageOS).
+        // If vendor.device and board differ, both are filled comma-separated —
+        // matches the flasher script's comma-separated TARGET_DEVICE format.
         findViewById<View>(R.id.buttonAutoDetect)?.setOnClickListener {
-            val deviceName = android.os.Build.PRODUCT
-            editDevice?.setText(deviceName)
-            prefs.edit { putString("device", deviceName) }
-            updateOutputPreview()
-            updateBuildButtonState()
-            showLog("Auto-detected device: $deviceName")
+            showLog("Detecting device codename (vendor partition props)...")
+            lifecycleScope.launch(Dispatchers.IO) {
+                val result = NativeBridge.detectDeviceCodename()
+                withContext(Dispatchers.Main) {
+                    if (result.success && result.codename.isNotEmpty()) {
+                        editDevice?.setText(result.codename)
+                        prefs.edit { putString("device", result.codename) }
+                        updateOutputPreview()
+                        updateBuildButtonState()
+                        showLog("Auto-detected device: ${result.codename}")
+                        if (result.vendorDevice.isNotEmpty() && result.board.isNotEmpty()
+                            && result.vendorDevice != result.board) {
+                            showLog("  vendor.device='${result.vendorDevice}', board='${result.board}' — using both (comma-separated)", LogLevel.INFO)
+                        }
+                    } else {
+                        val errMsg = result.error ?: "all vendor sources returned empty"
+                        showLog("Auto-detect failed: $errMsg", LogLevel.ERROR)
+                        showLog("This can happen if /vendor is not mounted or the device uses non-standard props.", LogLevel.WARN)
+                        showLog("Enter your device codename manually.", LogLevel.WARN)
+                    }
+                }
+            }
         }
 
         // Listen for changes in device codename — update Build button state

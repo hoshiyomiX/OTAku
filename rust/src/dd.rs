@@ -260,40 +260,71 @@ fn build_update_script(
             r#"
 # ── Step {device_check_step}: Device compatibility ──────────────────
 TARGET_DEVICE="{device}"
+VENDOR_DEVICE=""
+BOARD_DEVICE=""
 CURRENT_DEVICE=""
 
-# Try multiple sources for the device codename — getprop can return empty
-# in recoveries that don't mount /vendor or that boot from fastboot boot
-# (no full system initialization). Fall back to build.prop files which
-# are static and always available if the partition is mounted.
-CURRENT_DEVICE=$(getprop ro.product.device 2>/dev/null)
-if [ -z "$CURRENT_DEVICE" ]; then
-    CURRENT_DEVICE=$(getprop ro.build.product 2>/dev/null)
+# ── Spoof-resistant device codename detection ──
+# Reads 4 sources from VENDOR partition (rarely modified by Magisk/GSI/LineageOS,
+# which typically only touch /system). This matches the app-side auto-detect
+# logic in NativeBridge.detectDeviceCodename() — both use the SAME 4 sources
+# in the SAME priority, so they produce the same codename(s).
+#
+# Sources:
+#   1. getprop ro.product.vendor.device  (vendor partition, hard to spoof)
+#   2. getprop ro.product.board          (vendor partition, hard to spoof)
+#   3. /vendor/build.prop ro.product.vendor.device  (fallback if getprop empty)
+#   4. /vendor/build.prop ro.product.board          (fallback if getprop empty)
+#
+# If VENDOR_DEVICE and BOARD_DEVICE differ, CURRENT_DEVICE is set to BOTH
+# as comma-separated: "vendor_device,board". The TARGET_DEVICE comparison
+# loop below already supports comma-separated lists, so this works naturally.
+#
+# Why NOT Build.PRODUCT (ro.product.name):
+#   - Easily overridden by Magisk resetprop, GSI, or LineageOS
+#   - Often ROM-prefixed (e.g. "lineage_alioth" instead of "alioth")
+#   - App and validator would read different values → mismatch
+VENDOR_DEVICE=$(getprop ro.product.vendor.device 2>/dev/null)
+BOARD_DEVICE=$(getprop ro.product.board 2>/dev/null)
+# Fallback 1: /vendor/build.prop ro.product.vendor.device
+if [ -z "$VENDOR_DEVICE" ] && [ -f /vendor/build.prop ]; then
+    VENDOR_DEVICE=$(grep -E '^ro\.product\.vendor\.device=' /vendor/build.prop 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' \r')
 fi
-# Fallback 1: parse /system/build.prop (mounted /system)
-if [ -z "$CURRENT_DEVICE" ] && [ -f /system/build.prop ]; then
-    CURRENT_DEVICE=$(grep -E '^ro\.product\.device=' /system/build.prop 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' \r')
-fi
-# Fallback 2: parse /vendor/build.prop (mounted /vendor)
-if [ -z "$CURRENT_DEVICE" ] && [ -f /vendor/build.prop ]; then
-    CURRENT_DEVICE=$(grep -E '^ro\.product\.device=' /vendor/build.prop 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' \r')
-fi
-# Fallback 3: /proc/cmdline androidboot.hardware (last resort — not exact device,
-# but at least identifies the SoC family)
-if [ -z "$CURRENT_DEVICE" ]; then
-    CURRENT_DEVICE=$(cat /proc/cmdline 2>/dev/null | tr ' ' '\n' | grep -o 'androidboot\.hardware=[^ ]*' | cut -d= -f2)
+# Fallback 2: /vendor/build.prop ro.product.board
+if [ -z "$BOARD_DEVICE" ] && [ -f /vendor/build.prop ]; then
+    BOARD_DEVICE=$(grep -E '^ro\.product\.board=' /vendor/build.prop 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' \r')
 fi
 
-# Support comma-separated device list
+# Build CURRENT_DEVICE: comma-separated if VENDOR_DEVICE != BOARD_DEVICE
+if [ -n "$VENDOR_DEVICE" ] && [ -n "$BOARD_DEVICE" ]; then
+    if [ "$VENDOR_DEVICE" = "$BOARD_DEVICE" ]; then
+        CURRENT_DEVICE="$VENDOR_DEVICE"
+    else
+        CURRENT_DEVICE="$VENDOR_DEVICE,$BOARD_DEVICE"
+    fi
+elif [ -n "$VENDOR_DEVICE" ]; then
+    CURRENT_DEVICE="$VENDOR_DEVICE"
+elif [ -n "$BOARD_DEVICE" ]; then
+    CURRENT_DEVICE="$BOARD_DEVICE"
+fi
+
+# Support comma-separated device list in both TARGET_DEVICE and CURRENT_DEVICE.
+# Match if ANY value in TARGET_DEVICE matches ANY value in CURRENT_DEVICE.
+# E.g. TARGET="alioth,sm8350" matches CURRENT="alioth" or CURRENT="sm8350"
+# or CURRENT="alioth,sm8350".
 DEVICE_MATCH=0
 OLD_IFS="$IFS"
 IFS=','
-for _dev in $TARGET_DEVICE; do
-    _clean=$(echo "$_dev" | tr -d '[:space:]')
-    if [ "$CURRENT_DEVICE" = "$_clean" ]; then
-        DEVICE_MATCH=1
-        break
-    fi
+for _target in $TARGET_DEVICE; do
+    _tclean=$(echo "$_target" | tr -d '[:space:]')
+    [ -z "$_tclean" ] && continue
+    for _current in $CURRENT_DEVICE; do
+        _cclean=$(echo "$_current" | tr -d '[:space:]')
+        if [ "$_cclean" = "$_tclean" ]; then
+            DEVICE_MATCH=1
+            break 2
+        fi
+    done
 done
 IFS="$OLD_IFS"
 
@@ -2463,11 +2494,13 @@ mod tests {
         );
     }
 
-    /// Regression: edge case B — getprop kosong fallback chain.
-    /// The old code used `getprop ro.product.device || getprop ro.build.product`.
-    /// If both returned empty (recovery without /vendor mounted), device
-    /// check would silently mismatch. The fix adds /system/build.prop,
-    /// /vendor/build.prop, and /proc/cmdline fallbacks.
+    /// Regression: edge case B — vendor partition codename fallback chain.
+    /// The old code used `getprop ro.product.device || getprop ro.build.product`
+    /// which was spoofable by Magisk/GSI/LineageOS (they override /system props).
+    /// The fix uses VENDOR partition props (ro.product.vendor.device +
+    /// ro.product.board) which are harder to spoof, with /vendor/build.prop
+    /// as fallback when getprop returns empty (recovery without /vendor mounted
+    /// via init, but /vendor/build.prop still readable if partition is mounted).
     #[test]
     fn test_regression_getprop_fallback_chain() {
         let meta = vec![PartitionMeta {
@@ -2479,20 +2512,27 @@ mod tests {
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "alioth", false);
 
-        // Assert: build.prop fallback paths present.
+        // Assert: vendor partition props are the primary source.
         assert!(
-            script.contains("/system/build.prop"),
-            "REGRESSION: /system/build.prop fallback missing (edge case B)"
+            script.contains("ro.product.vendor.device"),
+            "REGRESSION: ro.product.vendor.device source missing (edge case B — spoof-resistant codename)"
         );
+        assert!(
+            script.contains("ro.product.board"),
+            "REGRESSION: ro.product.board source missing (edge case B — spoof-resistant codename)"
+        );
+
+        // Assert: /vendor/build.prop fallback present (for both props).
         assert!(
             script.contains("/vendor/build.prop"),
             "REGRESSION: /vendor/build.prop fallback missing (edge case B)"
         );
 
-        // Assert: /proc/cmdline androidboot.hardware fallback present.
+        // Assert: comma-separated dual-codename logic present
+        // (when vendor.device != board, both are used comma-separated).
         assert!(
-            script.contains("androidboot.hardware"),
-            "REGRESSION: /proc/cmdline hardware fallback missing (edge case B)"
+            script.contains("VENDOR_DEVICE,$BOARD_DEVICE"),
+            "REGRESSION: comma-separated dual-codename logic missing (edge case B)"
         );
     }
 

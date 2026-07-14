@@ -380,6 +380,146 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
 }
 
 // ---------------------------------------------------------------------------
+//  JNI: nativeDetectDeviceCodename
+// ---------------------------------------------------------------------------
+
+/// Detect device codename from vendor partition properties (spoof-resistant).
+///
+/// Kotlin: `external fun nativeDetectDeviceCodename(): String`
+///
+/// Reads 4 sources in priority order:
+///   1. `getprop ro.product.vendor.device` (vendor partition, hard to spoof)
+///   2. `getprop ro.product.board`        (vendor partition, hard to spoof)
+///   3. `/vendor/build.prop ro.product.vendor.device` (fallback if getprop empty)
+///   4. `/vendor/build.prop ro.product.board`         (fallback if getprop empty)
+///
+/// If `ro.product.vendor.device` and `ro.product.board` differ, returns BOTH
+/// as a comma-separated string: `"vendor_device,board"`. This matches the
+/// flasher script's comma-separated TARGET_DEVICE format.
+///
+/// Returns JSON:
+///   { "success": true, "codename": "alioth" | "alioth,sm8350" | ...,
+///     "vendor_device": "alioth", "board": "sm8350",
+///     "sources_tried": ["getprop ro.product.vendor.device", ...] }
+/// Or on error:
+///   { "success": false, "codename": "", "error": "all 4 sources empty" }
+///
+/// Why these 4 sources (and not Build.PRODUCT):
+///   - `Build.PRODUCT` reads `ro.product.name` which is set by init from
+///     `/system/build.prop` — easily overridden by Magisk resetprop or GSI.
+///   - `ro.product.vendor.*` is set from `/vendor/build.prop` — vendor
+///     partition is rarely modified by Magisk/GSI, so it survives spoofing.
+///   - `ro.product.board` identifies the SoC/board — useful for devices
+///     where vendor.device uses OEM-specific naming (e.g. `alioth` vs `sm8350`).
+///
+/// App and flasher validator use the SAME 4 sources in the SAME priority,
+/// so they produce the same codename(s).
+#[no_mangle]
+pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeDetectDeviceCodename(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let result = detect_device_codename();
+    match env.new_string(result) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Read device codename from 4 vendor-partition sources.
+/// Returns JSON string for JNI bridge.
+fn detect_device_codename() -> String {
+    let mut sources_tried: Vec<&'static str> = Vec::new();
+    let mut vendor_device = String::new();
+    let mut board = String::new();
+
+    // Helper: run getprop and trim output
+    let getprop = |prop: &str| -> String {
+        std::process::Command::new("getprop")
+            .arg(prop)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+
+    // Helper: parse /vendor/build.prop for a property key
+    let parse_vendor_prop = |key: &str| -> String {
+        std::fs::read_to_string("/vendor/build.prop")
+            .ok()
+            .and_then(|content| {
+                content
+                    .lines()
+                    .find_map(|line| {
+                        let prefix = format!("{}=", key);
+                        line.strip_prefix(&prefix).map(|v| {
+                            v.trim().trim_matches('\r').to_string()
+                        })
+                    })
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or_default()
+    };
+
+    // Source 1: getprop ro.product.vendor.device
+    sources_tried.push("getprop ro.product.vendor.device");
+    vendor_device = getprop("ro.product.vendor.device");
+
+    // Source 2: getprop ro.product.board
+    sources_tried.push("getprop ro.product.board");
+    board = getprop("ro.product.board");
+
+    // Source 3: /vendor/build.prop ro.product.vendor.device (fallback)
+    if vendor_device.is_empty() {
+        sources_tried.push("/vendor/build.prop ro.product.vendor.device");
+        vendor_device = parse_vendor_prop("ro.product.vendor.device");
+    }
+
+    // Source 4: /vendor/build.prop ro.product.board (fallback)
+    if board.is_empty() {
+        sources_tried.push("/vendor/build.prop ro.product.board");
+        board = parse_vendor_prop("ro.product.board");
+    }
+
+    // Build codename: if both present and differ → comma-separated
+    // If both present and same → single value
+    // If only one present → that one
+    // If neither present → empty (error)
+    let codename = if !vendor_device.is_empty() && !board.is_empty() {
+        if vendor_device == board {
+            vendor_device.clone()
+        } else {
+            format!("{},{}", vendor_device, board)
+        }
+    } else if !vendor_device.is_empty() {
+        vendor_device.clone()
+    } else if !board.is_empty() {
+        board.clone()
+    } else {
+        String::new()
+    };
+
+    let success = !codename.is_empty();
+    let error_val: serde_json::Value = if success {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!("all 4 sources returned empty")
+    };
+
+    serde_json::json!({
+        "success": success,
+        "codename": codename,
+        "vendor_device": vendor_device,
+        "board": board,
+        "sources_tried": sources_tried,
+        "native_version": env!("CARGO_PKG_VERSION"),
+        "error": error_val
+    }).to_string()
+}
+
+// ---------------------------------------------------------------------------
 //  JNI: nativeVerifyPayload
 // ---------------------------------------------------------------------------
 

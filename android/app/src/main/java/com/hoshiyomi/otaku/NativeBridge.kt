@@ -315,6 +315,49 @@ object NativeBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  Device codename detection (spoof-resistant)
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Detect device codename from vendor partition properties.
+     *
+     * Reads 4 sources (getprop + /vendor/build.prop for both
+     * ro.product.vendor.device and ro.product.board). If the two values
+     * differ, returns BOTH as comma-separated string — matches the
+     * flasher script's comma-separated TARGET_DEVICE format.
+     *
+     * Spoof-resistant because vendor partition is rarely modified by
+     * Magisk/GSI/LineageOS (which typically only touch /system).
+     *
+     * @return DeviceCodenameResult with codename (or empty + error if all sources empty)
+     */
+    fun detectDeviceCodename(): DeviceCodenameResult {
+        if (!isLoaded) {
+            return DeviceCodenameResult.error("Native library not loaded: $loadError")
+        }
+        return try {
+            val resultJson = nativeDetectDeviceCodename()
+            parseDeviceCodenameResult(resultJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "detectDeviceCodename() failed: ${e.message}")
+            DeviceCodenameResult.error("Native detect failed: ${e.message}")
+        }
+    }
+
+    data class DeviceCodenameResult(
+        val success: Boolean,
+        val codename: String = "",
+        val vendorDevice: String = "",
+        val board: String = "",
+        val sourcesTried: List<String> = emptyList(),
+        val error: String? = null
+    ) {
+        companion object {
+            fun error(msg: String) = DeviceCodenameResult(success = false, error = msg)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  Result data classes
     // ═══════════════════════════════════════════════════════════════
 
@@ -621,6 +664,25 @@ object NativeBridge {
         }
     }
 
+    private fun parseDeviceCodenameResult(jsonStr: String): DeviceCodenameResult {
+        val json = JSONObject(jsonStr)
+        val sourcesArray = json.optJSONArray("sources_tried")
+        val sources = mutableListOf<String>()
+        if (sourcesArray != null) {
+            for (i in 0 until sourcesArray.length()) {
+                sources.add(sourcesArray.optString(i, ""))
+            }
+        }
+        return DeviceCodenameResult(
+            success = json.optBoolean("success", false),
+            codename = json.optString("codename", ""),
+            vendorDevice = json.optString("vendor_device", ""),
+            board = json.optString("board", ""),
+            sourcesTried = sources,
+            error = if (json.has("error") && !json.isNull("error")) json.optString("error") else null
+        )
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  JNI external declarations
     // ═══════════════════════════════════════════════════════════════
@@ -670,4 +732,8 @@ object NativeBridge {
         device: String,
         skipVerify: Boolean
     ): String
+
+    // Device codename detection (spoof-resistant — reads vendor partition props)
+    // Rust signature: nativeDetectDeviceCodename() -> jstring (JSON)
+    private external fun nativeDetectDeviceCodename(): String
 }
