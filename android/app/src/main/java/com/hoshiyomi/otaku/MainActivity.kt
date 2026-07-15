@@ -393,10 +393,17 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.Main) {
                 if (result.success) {
                     deviceSupportedPartitions = result.partitions
-                    showLog("Device supports ${result.partitions.size} partitions" +
-                            if (result.dynamicPartitions) " (dynamic)" else " (static GPT)" +
-                            if (result.slotSuffix.isNotEmpty()) ", A/B slot=${result.slotSuffix}" else "" +
-                            ", Android ${result.androidVersion}")
+                    // Build summary string with explicit parens to avoid Kotlin
+                    // if-expression + string-concat precedence bug (the old code
+                    // used `str + if (...) a else b + if (...) c else d + e`
+                    // which parsed as `str + if (...) a else (b + if (...) c else (d + e))`
+                    // — only the dynamic branch was printed, slot/Android were dropped).
+                    val partitionType = if (result.dynamicPartitions) "dynamic" else "static GPT"
+                    val slotInfo = if (result.slotSuffix.isNotEmpty()) ", A/B slot=${result.slotSuffix}" else ""
+                    showLog("Device supports ${result.partitions.size} partitions ($partitionType$slotInfo, Android ${result.androidVersion})")
+                    // Print the actual detected partition list so user can verify
+                    // which partitions are supported before picking .img files.
+                    showLog("  Supported: ${result.partitions.joinToString(", ")}")
                 } else {
                     // Fallback: permissive mode (accept all .img files, no validation)
                     deviceSupportedPartitions = emptyList()
