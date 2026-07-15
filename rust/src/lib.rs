@@ -625,16 +625,32 @@ fn scan_device_partitions() -> String {
 
     // Dynamic partitions (live inside super, resizable via lptools)
     // Same list as dd.rs DYNAMIC_PART_NAMES — kept in sync intentionally.
+    //
+    // EXCLUDED from supported list (gimmick / dangerous for standalone OTA flash):
+    //   - cache: legacy, deprecated since Android 10. OTA doesn't flash cache
+    //     (it's wiped, not flashed). Most modern devices don't have it.
+    //   - userdata: NEVER flash via OTA — would WIPE ALL USER DATA (photos,
+    //     apps, settings). Userdata is wiped via fastboot -w or recovery
+    //     "wipe data", never via dd. Allowing userdata.img risks permanent
+    //     data loss + potential brick.
+    //   - optics, prism: Samsung One UI specific. Only flashed via Odin /
+    //     samflash (Samsung-specific protocol). OTAku doesn't support Odin.
+    //   - my_* (my_bigball, my_carrier, my_company, my_engineering, my_preload,
+    //     my_product, my_region, my_stock): Xiaomi MIUI regional/carrier
+    //     customization partitions. Very rarely flashed standalone — usually
+    //     bundled inside super.img or flashed via MiFlash tool. Allowing them
+    //     individually risks user flashing partitions they don't need.
+    //   - mi_ext: Xiaomi MIUI extension. Same rationale as my_*.
+    //
+    // Note: dd.rs DYNAMIC_PART_NAMES STILL includes these (for the resize step),
+    // because lptools needs to know about ALL dynamic partitions on the device
+    // to manage super partition space. But the APP-SIDE validation list here
+    // is stricter — only partitions that are SAFE and MEANINGFUL to flash via
+    // standalone OTA are listed.
     if dynamic_partitions {
         let dynamic_list: Vec<&'static str> = vec![
             "system", "vendor", "product", "system_ext",
             "odm", "odm_dlkm", "vendor_dlkm",
-            // OEM-specific dynamic partitions (Xiaomi, Realme, Samsung, Vivo, etc.)
-            "mi_ext", "my_product", "my_engineering", "my_stock",
-            "my_carrier", "my_region", "my_bigball", "my_preload",
-            "my_company", "optics", "prism",
-            // AOSP standard but optional
-            "cache", "userdata",
         ];
         partitions.extend(dynamic_list);
     } else {
