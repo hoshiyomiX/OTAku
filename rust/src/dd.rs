@@ -1074,11 +1074,17 @@ unmount_and_unmap_partition() {{
     [ -z "$ptarget" ] && return 0
     [ ! -e "$ptarget" ] && return 0
 
-    dev_name=$(basename "$ptarget" 2>/dev/null)
-    # Find mount points referencing either the full block device path or its
-    # basename (some recoveries report /dev/block/dm-0 rather than the by-name
-    # symlink; basename match catches both).
-    mount_points=$(mount 2>/dev/null | grep -E "($ptarget|$dev_name)" | awk '{{print $3}}')
+    # Resolve symlink to real device path (e.g. /dev/block/by-name/vendor → /dev/block/dm-5).
+    # mount output shows REAL device paths (dm-5, sda1), NOT by-name symlinks.
+    # Without this, grep for the by-name symlink fails, and the old fallback
+    # (grep for basename "vendor") is too broad — it matches mount point PATHS
+    # like /mnt/vendor/persist which may belong to a DIFFERENT partition.
+    local real_dev
+    real_dev=$(readlink -f "$ptarget" 2>/dev/null || echo "$ptarget")
+    dev_name=$(basename "$real_dev" 2>/dev/null)
+    # Find mount points referencing the REAL device path or its basename.
+    # This avoids false positives from matching partition names in mount paths.
+    mount_points=$(mount 2>/dev/null | grep -E "($real_dev|$dev_name)" | awk '{{print $3}}')
     for mp in $mount_points; do
         ui_print "    unmount $pname from $mp"
         umount "$mp" 2>/dev/null
@@ -1147,11 +1153,16 @@ validate_target() {{
         return 1
     fi
 
-    MOUNT_POINT=$(mount 2>/dev/null | grep " $target " | awk '{{print $3}}' | head -1)
-    if [ -z "$MOUNT_POINT" ]; then
-        DEV_NAME=$(basename "$target")
-        MOUNT_POINT=$(mount 2>/dev/null | grep "$DEV_NAME" | awk '{{print $3}}' | head -1)
-    fi
+    # Resolve symlink to real device path (e.g. /dev/block/by-name/vendor → /dev/block/dm-5).
+    # mount output shows REAL device paths (dm-5, sda1), NOT by-name symlinks.
+    # Without readlink -f, grep for the by-name symlink fails, and the old
+    # fallback (grep for basename "vendor") is too broad — it matches mount
+    # point PATHS like /mnt/vendor/persist which may belong to a DIFFERENT
+    # partition (persist, not vendor).
+    local real_dev
+    real_dev=$(readlink -f "$target" 2>/dev/null || echo "$target")
+    DEV_NAME=$(basename "$real_dev")
+    MOUNT_POINT=$(mount 2>/dev/null | grep -E "($real_dev|$DEV_NAME)" | awk '{{print $3}}' | head -1)
     if [ -n "$MOUNT_POINT" ]; then
         ui_print "  Unmounting $name from $MOUNT_POINT..."
         umount "$MOUNT_POINT" 2>/dev/null
