@@ -523,38 +523,32 @@ fn detect_device_codename() -> String {
 //  JNI: nativeScanDevicePartitions
 // ---------------------------------------------------------------------------
 
-/// Scan device for supported partition names (no root required).
+/// Scan device for ACTUAL partition names present on this device (no root required).
 ///
 /// Kotlin: `external fun nativeScanDevicePartitions(): String`
 ///
-/// Returns a JSON list of partition names that this device supports, by:
-///   1. Reading `getprop ro.boot.dynamic_partitions` to detect dynamic partition
-///      support (Android 10+).
-///   2. Reading `getprop ro.boot.slot_suffix` to detect A/B device (affects
-///      which physical partitions exist — e.g. `boot_a` vs `boot`).
-///   3. Compiling a list of standard AOSP + OEM partition names (same list as
-///      dd.rs DYNAMIC_PART_NAMES, plus physical partitions like boot/vbmeta/dtbo).
-///   4. Filtering the list based on device capabilities — e.g. `init_boot`
-///      only exists on Android 13+ devices with GKI 2.0.
+/// Reads /sys/block/ (world-readable on Android) to detect partitions that
+/// physically exist on this device — NOT a static list of "what could exist".
 ///
-/// The app uses this list to validate user-picked .img files: if the filename
-/// (minus .img extension) does not match any partition in this list, the app
-/// refuses to load it and prints a warning. This prevents the user from
-/// accidentally renaming `system.img` to `vendor.img` (which would brick the
-/// device when flashed to the wrong partition).
+/// Detection method:
+///   - GPT partitions: /sys/block/sda/sda1/uevent → PARTNAME=<name>
+///     (boot, dtbo, vbmeta, init_boot, recovery, super, userdata, etc.)
+///   - dm-linear (dynamic) partitions: /sys/block/dm-0/dm/name → <name>
+///     (system, vendor, product, system_ext, odm, vendor_dlkm, etc.)
+///
+/// Normalizes A/B slot suffixes (boot_a → boot, vbmeta_b → vbmeta).
+/// Filters out dangerous/non-flashable partitions (userdata, cache, super,
+/// persist, modem EFS, etc.) via BLOCKLIST.
 ///
 /// Returns JSON:
 ///   { "success": true, "partitions": ["boot","system","vendor",...],
 ///     "dynamic_partitions": true, "slot_suffix": "_a",
-///     "android_version": "13" | "unknown" }
-/// Or on error:
+///     "android_version": "16" }
+/// Or on error (e.g. /sys/block/ not readable):
 ///   { "success": false, "partitions": [], "error": "..." }
 ///
-/// Why no root: This function only reads properties via getprop and returns
-/// a static list filtered by device capability. It does NOT read /dev/block/
-/// or /sys/block/ — those would require root. The list is the SAME set used
-/// by the flasher script's `is_dynamic_partition()` check, so app and
-/// validator agree on what's a valid partition name.
+/// Why no root: /sys/block/ and its subdirectory uevent/dm/name files are
+/// world-readable on Android. SELinux allows untrusted_app to read /sys/block/.
 #[no_mangle]
 pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeScanDevicePartitions(
     env: JNIEnv,
@@ -567,7 +561,16 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeScanDevicePar
     }
 }
 
-/// Scan device for supported partition names. Returns JSON string.
+/// Scan device for ACTUAL partition names present on the device (no root required).
+///
+/// Reads /sys/block/ (world-readable on Android) to detect:
+///   - GPT partitions: /sys/block/sda/sda1/uevent → PARTNAME=<name>
+///   - dm-linear (dynamic) partitions: /sys/block/dm-0/dm/name → <name>
+///
+/// Normalizes A/B slot suffixes (boot_a → boot, vbmeta_b → vbmeta).
+/// Filters out dangerous partitions (userdata, cache, super).
+///
+/// Returns JSON string for JNI bridge.
 fn scan_device_partitions() -> String {
     // Helper: run getprop and trim output
     let getprop = |prop: &str| -> String {
@@ -581,101 +584,179 @@ fn scan_device_partitions() -> String {
             .to_string()
     };
 
-    // Detect dynamic partitions support (Android 10+)
+    // Device metadata (for JSON output, not for building partition list)
     let dp_enabled = getprop("ro.boot.dynamic_partitions");
     let dynamic_partitions = dp_enabled == "true" || dp_enabled == "1";
-
-    // Detect A/B slot suffix
     let slot_suffix = getprop("ro.boot.slot_suffix");
-
-    // Detect Android version for partition capability filtering
     let android_release = getprop("ro.build.version.release");
-    let android_version: u32 = android_release
-        .split('.')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
 
-    // ── Build partition list ──
-    // Physical (GPT) partitions — always present regardless of dynamic partitions
-    let mut partitions: Vec<&'static str> = vec![
-        "boot",
-        "dtbo",
-        "vbmeta",
-        "recovery",  // only on A-only devices; on A/B devices, recovery is in boot
+    // ── Scan /sys/block/ for ACTUAL partitions on this device ──
+    //
+    // Two types of partition names we care about:
+    //
+    // 1. GPT partitions (physical): /sys/block/sda/sda1/uevent contains
+    //    "PARTNAME=boot_a" (or "PARTNAME=vbmeta_b", etc.)
+    //    These are boot, dtbo, vbmeta, init_boot, recovery, super, etc.
+    //
+    // 2. dm-linear partitions (dynamic): /sys/block/dm-0/dm/name contains
+    //    "system" (or "vendor", "product", etc.)
+    //    These are system, vendor, product, system_ext, odm, etc.
+    //    On A/B devices, dm names usually don't have _a/_b suffix (only
+    //    active slot is mapped).
+    //
+    // Both /sys/block/ and its subdirectory uevent/dm/name files are
+    // world-readable on Android (SELinux allows untrusted_app to read
+    // /sys/block/). No root needed.
+
+    // Partitions that should NEVER be in the flashable list
+    // (dangerous or not relevant for standalone OTA flash).
+    const BLOCKLIST: &[&str] = &[
+        "userdata",   // DANGEROUS — would wipe all user data
+        "cache",      // legacy, deprecated, not flashed via OTA
+        "super",      // container for dynamic partitions, not standalone flash target
+        "frp",        // factory reset protection
+        "keystore",   // hardware keystore
+        "modemst1", "modemst2",  // modem EFS — radio calibration data
+        "fsg", "fsc",  // modem backup
+        "ssd",        // secure storage
+        "persist",    // persistent partition (sensor calibration, DRM keys)
+        "misc",       // bootloader misc (recovery command, BCB)
+        "param",      // Samsung param partition
+        "efs",        // Samsung EFS (radio IMEI)
     ];
 
-    // Android 13+ GKI 2.0: init_boot partition exists (kernel modules + init ramdisk
-    // separated from boot). Filtered by Android version.
-    if android_version >= 13 {
-        partitions.push("init_boot");
+    let mut found: Vec<String> = Vec::new();
+
+    // Read /sys/block/ directory
+    let block_dir = match std::fs::read_dir("/sys/block/") {
+        Ok(d) => d,
+        Err(e) => {
+            // /sys/block/ not readable (rare — some heavily restricted devices)
+            // Fall back to permissive mode (empty list = no validation)
+            log::warn!("Cannot read /sys/block/: {} — falling back to permissive mode", e);
+            return serde_json::json!({
+                "success": false,
+                "partitions": [],
+                "dynamic_partitions": dynamic_partitions,
+                "slot_suffix": slot_suffix,
+                "android_version": android_release,
+                "error": format!("Cannot read /sys/block/: {}", e),
+                "native_version": env!("CARGO_PKG_VERSION")
+            }).to_string();
+        }
+    };
+
+    for entry in block_dir.flatten() {
+        let dev_name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip non-partition block devices
+        if dev_name.starts_with("loop")
+            || dev_name.starts_with("zram")
+            || dev_name.starts_with("ram")
+            || dev_name.starts_with("sr")
+        {
+            continue;
+        }
+
+        // ── Case 1: Physical disk (sda, mmcblk0, nvme0n1, etc.) ──
+        // Iterate its partitions and read PARTNAME from uevent
+        if dev_name.starts_with("sd")
+            || dev_name.starts_with("mmcblk")
+            || dev_name.starts_with("nvme")
+        {
+            let disk_path = format!("/sys/block/{}", dev_name);
+            if let Ok(parts) = std::fs::read_dir(&disk_path) {
+                for part in parts.flatten() {
+                    let part_name = part.file_name().to_string_lossy().to_string();
+                    let uevent_path = format!("{}/{}/uevent", disk_path, part_name);
+                    if let Ok(content) = std::fs::read_to_string(&uevent_path) {
+                        // Parse uevent for PARTNAME=<value>
+                        for line in content.lines() {
+                            if let Some(pname) = line.strip_prefix("PARTNAME=") {
+                                let pname = pname.trim();
+                                if !pname.is_empty() {
+                                    found.push(pname.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Case 2: Device-mapper partition (dm-0, dm-1, etc.) ──
+        // Read dm/name for the dm-linear device name
+        if dev_name.starts_with("dm-") {
+            let dm_name_path = format!("/sys/block/{}/dm/name", dev_name);
+            if let Ok(content) = std::fs::read_to_string(&dm_name_path) {
+                let dm_name = content.trim();
+                if !dm_name.is_empty() {
+                    found.push(dm_name.to_string());
+                }
+            }
+        }
     }
 
-    // A/B devices: no separate recovery partition (it's in boot)
-    if !slot_suffix.is_empty() {
-        partitions.retain(|&p| p != "recovery");
-    }
-
-    // vbmeta_system / vbmeta_vendor — present on devices with chained vbmeta
-    // (Android 10+ with dynamic partitions usually have these)
-    if dynamic_partitions {
-        partitions.push("vbmeta_system");
-        partitions.push("vbmeta_vendor");
-    }
-
-    // Dynamic partitions (live inside super, resizable via lptools)
-    // Same list as dd.rs DYNAMIC_PART_NAMES — kept in sync intentionally.
-    //
-    // EXCLUDED from supported list (gimmick / dangerous for standalone OTA flash):
-    //   - cache: legacy, deprecated since Android 10. OTA doesn't flash cache
-    //     (it's wiped, not flashed). Most modern devices don't have it.
-    //   - userdata: NEVER flash via OTA — would WIPE ALL USER DATA (photos,
-    //     apps, settings). Userdata is wiped via fastboot -w or recovery
-    //     "wipe data", never via dd. Allowing userdata.img risks permanent
-    //     data loss + potential brick.
-    //   - optics, prism: Samsung One UI specific. Only flashed via Odin /
-    //     samflash (Samsung-specific protocol). OTAku doesn't support Odin.
-    //   - my_* (my_bigball, my_carrier, my_company, my_engineering, my_preload,
-    //     my_product, my_region, my_stock): Xiaomi MIUI regional/carrier
-    //     customization partitions. Very rarely flashed standalone — usually
-    //     bundled inside super.img or flashed via MiFlash tool. Allowing them
-    //     individually risks user flashing partitions they don't need.
-    //   - mi_ext: Xiaomi MIUI extension. Same rationale as my_*.
-    //
-    // Note: dd.rs DYNAMIC_PART_NAMES STILL includes these (for the resize step),
-    // because lptools needs to know about ALL dynamic partitions on the device
-    // to manage super partition space. But the APP-SIDE validation list here
-    // is stricter — only partitions that are SAFE and MEANINGFUL to flash via
-    // standalone OTA are listed.
-    if dynamic_partitions {
-        let dynamic_list: Vec<&'static str> = vec![
-            "system", "vendor", "product", "system_ext",
-            "odm", "odm_dlkm", "vendor_dlkm",
-        ];
-        partitions.extend(dynamic_list);
+    // ── Normalize: strip A/B slot suffix (_a or _b at end) ──
+    // boot_a → boot, vbmeta_b → vbmeta, init_boot_a → init_boot
+    // But DON'T strip if the partition name genuinely ends with _a/_b
+    // (none do in AOSP standard).
+    let slot_suffix_lower = slot_suffix.to_lowercase();
+    let suffix = if slot_suffix_lower == "_a" {
+        Some("_a")
+    } else if slot_suffix_lower == "_b" {
+        Some("_b")
     } else {
-        // Non-dynamic partition device (Android 9 or older, or retrofit):
-        // system/vendor/product are physical GPT partitions
-        partitions.push("system");
-        partitions.push("vendor");
-        partitions.push("product");
-    }
+        None
+    };
 
-    // Deduplicate (in case any partition appears in both lists)
-    partitions.sort();
-    partitions.dedup();
+    let normalized: Vec<String> = found
+        .iter()
+        .map(|name| {
+            // Strip slot suffix if present
+            if let Some(sfx) = suffix {
+                if name.ends_with(sfx) {
+                    return name[..name.len() - sfx.len()].to_string();
+                }
+            }
+            // Also strip _a/_b even if slot_suffix was empty
+            // (some devices have slot suffixes in GPT even if getprop returned empty)
+            if name.ends_with("_a") && name.len() > 2 {
+                name[..name.len() - 2].to_string()
+            } else if name.ends_with("_b") && name.len() > 2 {
+                name[..name.len() - 2].to_string()
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+
+    // ── Filter: remove blocklisted partitions ──
+    let filtered: Vec<String> = normalized
+        .into_iter()
+        .filter(|name| {
+            let lower = name.to_lowercase();
+            !BLOCKLIST.iter().any(|&blocked| blocked == lower.as_str())
+        })
+        .collect();
+
+    // Deduplicate and sort
+    let mut unique: Vec<String> = filtered;
+    unique.sort();
+    unique.dedup();
 
     serde_json::json!({
-        "success": true,
-        "partitions": partitions,
+        "success": !unique.is_empty(),
+        "partitions": unique,
         "dynamic_partitions": dynamic_partitions,
         "slot_suffix": slot_suffix,
-        "android_version": if android_version > 0 {
-            android_release
+        "android_version": android_release,
+        "native_version": env!("CARGO_PKG_VERSION"),
+        "error": if unique.is_empty() {
+            Some("No partitions detected via /sys/block/ scan".to_string())
         } else {
-            "unknown".to_string()
-        },
-        "native_version": env!("CARGO_PKG_VERSION")
+            None
+        }
     }).to_string()
 }
 
