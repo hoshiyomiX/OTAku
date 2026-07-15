@@ -1296,183 +1296,188 @@ else
     # Clear COW partitions if this is a Virtual A/B device
     lptools clear-cow >/dev/null 2>&1
 
-    # Targeted unmount + unmap — ONLY for partitions that will be resized.
-    #
-    # Rationale (aligned with AOSP non-A/B OTA flow):
-    #   AOSP's update_dynamic_partitions op_list only contains partitions that
-    #   are being resized/added/removed. It does NOT unmap all dynamic
-    #   partitions on the device. Each op `resize` is defined as
-    #   "unmap, then resize" — only the partition being resized needs unmap.
-    #   Source: source.android.com/docs/core/ota/dynamic_partitions/nonab
-    #
-    #   lptools resize only updates metadata in the super partition; it does
-    #   NOT touch other partitions' dm-linear devices. So unmapping partitions
-    #   that won't be resized is unnecessary work AND risks EBUSY on
-    #   recovery-mounted partitions (system_ext, odm, etc.), which was the
-    #   original root cause of the "lptools map fails" bug.
-    #
-    #   Previous approach iterated ALL $DYNAMIC_PART_NAMES (19 names) — too
-    #   broad. Now we only iterate $RESIZE_NEEDED (partitions the bundle needs
-    #   to grow).
-    #
-    # We still use targeted unmount (NOT `umount -a`) per partition via the
-    # helper, so /proc /sys /tmp /data /cache are never touched.
-    # See unmount_and_unmap_partition() docstring for full rationale.
-    if [ -n "$RESIZE_NEEDED" ]; then
-        ui_print "  Unmounting & unmapping partitions that need resize:$RESIZE_NEEDED"
-        UNMAP_FAILED=""
-        for pname in $RESIZE_NEEDED; do
-            pname=$(echo "$pname" | tr -d ' ')
-            [ -z "$pname" ] && continue
-            if ! unmount_and_unmap_partition "$pname"; then
-                UNMAP_FAILED="$UNMAP_FAILED $pname"
-            fi
-        done
-        if [ -n "$UNMAP_FAILED" ]; then
-            ui_print "! WARNING: lptools unmap failed for:$UNMAP_FAILED"
-            ui_print "  These partitions are genuinely busy (a process holds an"
-            ui_print "  open fd on the dm device). Resize will likely fail for them."
-        fi
-    else
-        ui_print "  No partitions need resize — skipping unmap step."
-    fi
+    # ── Refactored resize flow (per-partition: unmap→resize→remap→verify) ──
+        #
+        # Previous approach had 3 separate loops:
+        #   1. Pre-resize unmap loop (all RESIZE_NEEDED)
+        #   2. Resize loop (resize + inline remap)
+        #   3. Post-resize verify-mapped loop (safety net)
+        #
+        # Problem: lptools resize only updates metadata. The old dm-linear device
+        # stays active with the OLD size. The post-resize remap (unmap_and_remap)
+        # was supposed to destroy old + create new, but the safety-net check
+        # "if /dev/block/by-name/$pname exists → skip" incorrectly skipped it
+        # because the by-name symlink still pointed to the old dm-linear.
+        #
+        # Result: dd writes to stale dm-linear with old size → ABORT.
+        #
+        # Fix: Combine into a SINGLE per-partition loop with strict ordering:
+        #   1. TARGETED UMOUNT  — readlink -f → grep mount → umount mount points
+        #   2. LPTOOLS UNMAP    — destroy old dm-linear (must succeed before resize)
+        #   3. LPTOOLS RESIZE   — update metadata in super partition
+        #   4. LPTOOLS MAP      — create new dm-linear from updated metadata
+        #   5. VERIFY MAPPED    — check /dev/block/by-name/<name> exists
+        #   6. VERIFY SIZE      — blockdev --getsize64 >= expected unc_size
+        #
+        # If lptools resize fails → fallback to remove+create (which auto-maps).
+        # If map fails → ABORT (can't flash without a properly sized dm-linear).
+        #
+        # The flash step no longer needs the post-resize size verification hack
+        # (commit a00ff47) because size is verified here before flash begins.
+        if [ -n "$RESIZE_NEEDED" ]; then
+            ui_print "  Resizing partitions:$RESIZE_NEEDED"
+            RESIZE_OK=1
+            for pname in $RESIZE_NEEDED; do
+                pname=$(echo "$pname" | tr -d ' ')
+                [ -z "$pname" ] && continue
 
-    # Resize each partition that needs it
-    ui_print "  Using lptools to resize dynamic partitions..."
-    RESIZE_OK=1
-    # Track partitions created via remove+create fallback (lptools create auto-maps)
-    CREATED_PARTS=""
-    # RESIZED_ORIGINAL is also declared at script top (default "") — we append here.
-    # Each entry is "name:original_size_bytes" so the cleanup trap can restore sizes.
-    for pname in $RESIZE_NEEDED; do
-        pname=$(echo "$pname" | tr -d ' ')
-        [ -z "$pname" ] && continue
+                # Find partition index to get UNC_SIZE
+                FOUND_IDX=-1
+                for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
+                    eval "CHECK_NAME=\$PART_${{j}}_NAME"
+                    if [ "$CHECK_NAME" = "$pname" ]; then
+                        FOUND_IDX=$j
+                        break
+                    fi
+                done
+                if [ "$FOUND_IDX" -lt 0 ]; then continue; fi
 
-        # Find the partition index to get its UNC_SIZE
-        FOUND_IDX=-1
-        for j in $(seq 0 $(( NUM_PARTS - 1 ))); do
-            eval "CHECK_NAME=\$PART_${{j}}_NAME"
-            if [ "$CHECK_NAME" = "$pname" ]; then
-                FOUND_IDX=$j
-                break
-            fi
-        done
+                eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
+                NEW_SIZE_BYTES=$PNAME_SZ
 
-        if [ "$FOUND_IDX" -lt 0 ]; then
-            continue
-        fi
-
-        eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
-        NEW_SIZE_BYTES=$PNAME_SZ
-
-        # Capture ORIGINAL size BEFORE resize for cleanup-trap rollback.
-        # Re-query blockdev because PART_SIZE from validation step is local scope.
-        # If blockdev query fails (e.g. partition not mapped), fallback to NEW_SIZE
-        # (no-op rollback — better than crash).
-        ORIG_PTARGET=$(resolve_target "$pname")
-        ORIG_SIZE_BYTES=0
-        if [ -e "$ORIG_PTARGET" ]; then
-            ORIG_SIZE_BYTES=$(blockdev --getsize64 "$ORIG_PTARGET" 2>/dev/null)
-        fi
-        if [ -z "$ORIG_SIZE_BYTES" ] || [ "$ORIG_SIZE_BYTES" = "0" ]; then
-            # Fallback to sysfs (sectors × 512)
-            DEV_NAME=$(basename "$ORIG_PTARGET" 2>/dev/null)
-            if [ -n "$DEV_NAME" ] && [ -f "/sys/class/block/$DEV_NAME/size" ]; then
-                SECTORS=$(cat "/sys/class/block/$DEV_NAME/size" 2>/dev/null)
-                if [ -n "$SECTORS" ]; then
-                    ORIG_SIZE_BYTES=$(( SECTORS * 512 ))
+                # Capture ORIGINAL size BEFORE resize for cleanup-trap rollback
+                ORIG_PTARGET=$(resolve_target "$pname")
+                ORIG_SIZE_BYTES=0
+                if [ -e "$ORIG_PTARGET" ]; then
+                    ORIG_SIZE_BYTES=$(blockdev --getsize64 "$ORIG_PTARGET" 2>/dev/null)
                 fi
+                if [ -z "$ORIG_SIZE_BYTES" ] || [ "$ORIG_SIZE_BYTES" = "0" ]; then
+                    DEV_NAME=$(basename "$ORIG_PTARGET" 2>/dev/null)
+                    if [ -n "$DEV_NAME" ] && [ -f "/sys/class/block/$DEV_NAME/size" ]; then
+                        SECTORS=$(cat "/sys/class/block/$DEV_NAME/size" 2>/dev/null)
+                        [ -n "$SECTORS" ] && ORIG_SIZE_BYTES=$(( SECTORS * 512 ))
+                    fi
+                fi
+                if [ -n "$ORIG_SIZE_BYTES" ] && [ "$ORIG_SIZE_BYTES" != "0" ]; then
+                    RESIZED_ORIGINAL="$RESIZED_ORIGINAL $pname:$ORIG_SIZE_BYTES"
+                fi
+
+                ui_print "  [$pname] $(( ORIG_SIZE_BYTES / 1048576 )) MB → $(( NEW_SIZE_BYTES / 1048576 )) MB"
+
+                # ── Step 1: Targeted umount ──
+                ui_print "    unmount..."
+                unmount_and_unmap_partition "$pname" >/dev/null 2>&1 || true
+                # Note: this helper does umount + unmap. We call it for the umount
+                # side effect. The unmap also runs but is harmless (idempotent).
+
+                # ── Step 2: Explicit unmap (destroy old dm-linear) ──
+                # Even though the helper above already called unmap, call it
+                # explicitly here to ensure the old dm-linear is destroyed.
+                # This is critical: lptools resize only updates metadata —
+                # the old dm-linear kernel device MUST be destroyed first,
+                # otherwise lptools map will fail with EEXIST.
+                ui_print "    unmap..."
+                lptools unmap "$pname" >/dev/null 2>&1 || true
+                # Idempotent: OK if already unmapped
+
+                # ── Step 3: Resize metadata ──
+                ui_print "    resize..."
+                lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                RESIZE_RC=$?
+
+                if [ $RESIZE_RC -ne 0 ]; then
+                    # Fallback: remove + create (lptools create auto-maps)
+                    ui_print "    resize failed — trying remove+create fallback..."
+                    lptools remove "$pname" >/dev/null 2>&1
+                    lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                    CREATE_RC=$?
+                    if [ $CREATE_RC -ne 0 ]; then
+                        ui_print "    ! remove+create also failed for $pname"
+                        RESIZE_OK=0
+                        RESIZED_ORIGINAL=$(echo "$RESIZED_ORIGINAL" | sed "s/ $pname:[0-9]*//")
+                        continue
+                    fi
+                    ui_print "    recreated at $(( NEW_SIZE_BYTES / 1048576 )) MB"
+                    # lptools create auto-maps — skip explicit map
+                else
+                    # ── Step 4: Map (create new dm-linear from updated metadata) ──
+                    ui_print "    map..."
+                    lptools map "$pname" >/dev/null 2>&1
+                    MAP_RC=$?
+                    if [ $MAP_RC -ne 0 ]; then
+                        ui_print "    ! lptools map failed for $pname (rc=$MAP_RC)"
+                        ui_print "    retrying with unmap+map..."
+                        lptools unmap "$pname" >/dev/null 2>&1
+                        sleep 1
+                        lptools map "$pname" >/dev/null 2>&1
+                        MAP_RC=$?
+                        if [ $MAP_RC -ne 0 ]; then
+                            ui_print "    ! map retry also failed — dd will likely fail"
+                            RESIZE_OK=0
+                            continue
+                        fi
+                    fi
+                fi
+
+                # ── Step 5: Verify mapped ──
+                PTARGET_VERIFY=$(resolve_target "$pname")
+                if [ ! -e "$PTARGET_VERIFY" ]; then
+                    ui_print "    ! $pname not mapped after resize — waiting..."
+                    _W=0
+                    while [ ! -e "$PTARGET_VERIFY" ] && [ $_W -lt 10 ]; do
+                        sleep 1
+                        _W=$(( _W + 1 ))
+                    done
+                    if [ ! -e "$PTARGET_VERIFY" ]; then
+                        ui_print "    ! $pname still not mapped after 10s — ABORT"
+                        RESIZE_OK=0
+                        continue
+                    fi
+                fi
+
+                # ── Step 6: Verify size ──
+                ACTUAL_SIZE=$(blockdev --getsize64 "$PTARGET_VERIFY" 2>/dev/null)
+                if [ -z "$ACTUAL_SIZE" ] || [ "$ACTUAL_SIZE" = "0" ]; then
+                    _DN=$(basename "$PTARGET_VERIFY" 2>/dev/null)
+                    if [ -n "$_DN" ] && [ -f "/sys/class/block/$_DN/size" ]; then
+                        _S=$(cat "/sys/class/block/$_DN/size" 2>/dev/null)
+                        [ -n "$_S" ] && ACTUAL_SIZE=$(( _S * 512 ))
+                    fi
+                fi
+                if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" -gt 0 ]; then
+                    if [ "$ACTUAL_SIZE" -ge "$NEW_SIZE_BYTES" ]; then
+                        ui_print "    ✓ mapped OK: $(( ACTUAL_SIZE / 1048576 )) MB [verified]"
+                    else
+                        ui_print "    ! SIZE MISMATCH: actual=$(( ACTUAL_SIZE / 1048576 )) MB < expected=$(( NEW_SIZE_BYTES / 1048576 )) MB"
+                        ui_print "    ! dm-linear may be stale — forcing unmap+remap..."
+                        lptools unmap "$pname" >/dev/null 2>&1
+                        sleep 1
+                        lptools map "$pname" >/dev/null 2>&1
+                        # Re-check
+                        ACTUAL_SIZE=$(blockdev --getsize64 "$PTARGET_VERIFY" 2>/dev/null)
+                        if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" -ge "$NEW_SIZE_BYTES" ]; then
+                            ui_print "    ✓ re-mapped OK: $(( ACTUAL_SIZE / 1048576 )) MB [verified]"
+                        else
+                            ui_print "    ! still mismatch after re-map — dd will likely fail"
+                            RESIZE_OK=0
+                        fi
+                    fi
+                else
+                    ui_print "    ! cannot verify size — continuing anyway"
+                fi
+            done
+
+            if [ "$RESIZE_OK" != "1" ]; then
+                ui_print "! ABORT: resize+remap failed for one or more partitions."
+                ui_print "!  Try flashing via fastbootd or use a different recovery."
+                exit 1
             fi
-        fi
-        if [ -n "$ORIG_SIZE_BYTES" ] && [ "$ORIG_SIZE_BYTES" != "0" ]; then
-            RESIZED_ORIGINAL="$RESIZED_ORIGINAL $pname:$ORIG_SIZE_BYTES"
-        fi
 
-        ui_print "  Resizing $pname from $(( ORIG_SIZE_BYTES / 1048576 )) MB to $(( NEW_SIZE_BYTES / 1048576 )) MB..."
-
-        # Try lptools resize first (preserves existing data in metadata)
-        # Note: original phhusson lptools resize does NOT re-map after resize
-        lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-        RESIZE_RC=$?
-        if [ $RESIZE_RC -ne 0 ]; then
-            ui_print "!  lptools resize failed for $pname — trying remove+create fallback"
-            # Fallback: remove then create with new size.
-            # lptools remove auto-unmaps before removing.
-            # lptools create auto-maps after creating (creates dm device immediately).
-            lptools remove "$pname" >/dev/null 2>&1
-            lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-            CREATE_RC=$?
-            if [ $CREATE_RC -ne 0 ]; then
-                ui_print "!  lptools remove+create also failed for $pname"
-                RESIZE_OK=0
-                # Rollback entry from RESIZED_ORIGINAL — resize didn't happen,
-                # so cleanup trap should NOT try to re-resize this partition.
-                RESIZED_ORIGINAL=$(echo "$RESIZED_ORIGINAL" | sed "s/ $pname:[0-9]*//")
-            else
-                ui_print "  $pname recreated at $(( NEW_SIZE_BYTES / 1048576 )) MB"
-                CREATED_PARTS="$CREATED_PARTS $pname "
-            fi
-        else
-            ui_print "  $pname resized to $(( NEW_SIZE_BYTES / 1048576 )) MB"
-            # After successful resize, re-map the partition (resize doesn't auto-map
-            # in the original phhusson version — lptools resize only updates
-            # metadata, does NOT create a new dm-linear device).
-            # Use the targeted unmount+unmap+map helper so we don't trip over a
-            # stale dm-linear device left from the resize step.
-            unmap_and_remap_partition "$pname"
+            ui_print "  All partitions resized and verified."
+            ui_print "  Dynamic partition resize complete."
+            ui_print ""
         fi
-    done
-
-    if [ "$RESIZE_OK" != "1" ]; then
-        ui_print "! ABORT: lptools resize failed for one or more partitions."
-        ui_print "!  Try flashing via fastbootd or use a different recovery."
-        exit 1
     fi
-
-    # Verify resized partitions are mapped (safety net for post-resize remap).
-    #
-    # The post-resize remap inside the resize loop (line ~1349) already calls
-    # unmap_and_remap_partition for each successfully resized partition, and
-    # lptools create auto-maps partitions that went through the remove+create
-    # fallback. So at this point, every partition in $RESIZE_NEEDED should
-    # already be mapped — UNLESS the post-resize remap failed.
-    #
-    # Targeted: only iterate $RESIZE_NEEDED (the partitions we touched). Skip
-    # $CREATED_PARTS (already mapped by lptools create). Skip partitions that
-    # are already mapped (post-resize remap succeeded). Only attempt remap for
-    # partitions that are NOT mapped — i.e. post-resize remap failures.
-    #
-    # This replaces the previous broad iteration over ALL $DYNAMIC_PART_NAMES,
-    # which would unnecessarily unmap+remap partitions that were never touched
-    # (e.g. system_ext, odm auto-mounted by recovery) and risk EBUSY/EEXIST.
-    ui_print "  Verifying resized partitions are mapped..."
-    REMAP_FAILED=""
-    for pname in $RESIZE_NEEDED; do
-        pname=$(echo "$pname" | tr -d ' ')
-        [ -z "$pname" ] && continue
-        case "$CREATED_PARTS" in
-            *" $pname "*) continue ;;  # already mapped by lptools create
-        esac
-        # Skip if already mapped (post-resize remap succeeded).
-        if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
-            continue
-        fi
-        # Not mapped — post-resize remap failed or didn't run. Retry.
-        if ! unmap_and_remap_partition "$pname"; then
-            REMAP_FAILED="$REMAP_FAILED $pname"
-        fi
-    done
-
-    if [ -n "$REMAP_FAILED" ]; then
-        ui_print "! WARNING: lptools map failed for:$REMAP_FAILED"
-        ui_print "  Attempting to continue — dd write may fail if device not ready."
-    fi
-
-    ui_print "  lptools resize complete."
-
-    ui_print "  Dynamic partition resize complete."
-    ui_print ""
-fi
 "#,
         resize_step = resize_step,
         total_steps = total_steps,
@@ -1494,65 +1499,6 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     ui_print "  Compressed: $(( PCSIZE / 1048576 )) MB | Offset: $POFFSET"
 
     PTARGET=$(resolve_target "$PNAME")
-
-    # ── Post-resize size verification ──
-    # After lptools resize + remap, the dm-linear device may still have the
-    # OLD size if the remap was skipped (by-name symlink still existed from
-    # the old dm-linear device, so the safety-net check at line ~1446
-    # incorrectly skipped the remap).
-    #
-    # This check compares the actual block device size (blockdev --getsize64)
-    # against PSIZE (expected uncompressed size). If they don't match AND
-    # the partition is dynamic, force a re-unmap+remap to get a fresh
-    # dm-linear device with the correct size from updated metadata.
-    #
-    # Recovery log evidence (Infinix X695C, 2025-07-15):
-    #   vendor resized to 1075 MB (metadata updated)
-    #   but dd write failed: written=7655424 (7.3 MB) < expected=1127534592 (1075 MB)
-    #   → dm-linear kernel device still had old 7 MB size
-    #   → safety-net "if /dev/block/by-name/vendor exists → skip remap" was wrong
-    if is_dynamic_partition "$PNAME"; then
-        ACTUAL_SIZE=0
-        if [ -e "$PTARGET" ]; then
-            ACTUAL_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
-        fi
-        if [ -z "$ACTUAL_SIZE" ] || [ "$ACTUAL_SIZE" = "0" ]; then
-            # Fallback to sysfs
-            _DEV_NAME=$(basename "$PTARGET" 2>/dev/null)
-            if [ -n "$_DEV_NAME" ] && [ -f "/sys/class/block/$_DEV_NAME/size" ]; then
-                _SECTORS=$(cat "/sys/class/block/$_DEV_NAME/size" 2>/dev/null)
-                [ -n "$_SECTORS" ] && ACTUAL_SIZE=$(( _SECTORS * 512 ))
-            fi
-        fi
-        if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" -gt 0 ] && [ "$ACTUAL_SIZE" -lt "$PSIZE" ]; then
-            ui_print "  Post-resize size mismatch: actual=$(( ACTUAL_SIZE / 1048576 )) MB < expected=$(( PSIZE / 1048576 )) MB"
-            ui_print "  Forcing re-unmap+remap to get fresh dm-linear device..."
-            unmap_and_remap_partition "$PNAME"
-            # Re-resolve target after remap
-            PTARGET=$(resolve_target "$PNAME")
-            # Wait for device to appear
-            if [ ! -e "$PTARGET" ]; then
-                ui_print "  Waiting for $PTARGET to appear after remap..."
-                _WAIT=0
-                while [ ! -e "$PTARGET" ] && [ $_WAIT -lt 10 ]; do
-                    sleep 1
-                    _WAIT=$(( _WAIT + 1 ))
-                done
-            fi
-            # Verify new size
-            if [ -e "$PTARGET" ]; then
-                NEW_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
-                if [ -n "$NEW_SIZE" ] && [ "$NEW_SIZE" -ge "$PSIZE" ]; then
-                    ui_print "  Re-mapped OK: $(( NEW_SIZE / 1048576 )) MB [verified]"
-                else
-                    ui_print "!  WARNING: size still mismatch after remap: $(( NEW_SIZE / 1048576 )) MB < $(( PSIZE / 1048576 )) MB"
-                    ui_print "  dd write will likely fail — continuing anyway."
-                fi
-            else
-                ui_print "!  WARNING: $PTARGET not found after remap"
-            fi
-        fi
-    fi
 
     # Step A+B+C: Extract → decompress → write via FIFO pipeline
     # Always use bs=4096 for extraction — much faster than bs=1.
