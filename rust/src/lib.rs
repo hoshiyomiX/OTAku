@@ -562,6 +562,25 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeScanDevicePar
 /// exists via `std::fs::symlink_metadata()`.
 ///
 /// Returns JSON string for JNI bridge.
+/// Detect device partition capabilities via getprop (no filesystem access).
+///
+/// SELinux on Android 12+ blocks untrusted_app from:
+///   - Reading /sys/block/ directory (EACCES on read_dir)
+///   - Accessing /dev/block/by-name/ symlinks (EACCES on stat)
+///
+/// So we use ONLY getprop (system property service — always accessible to
+/// untrusted_app) to detect device capabilities, then return a static list
+/// of known partition names filtered by those capabilities.
+///
+/// Trade-off: the list may include partitions that don't physically exist
+/// on this specific device (false positives). This is acceptable because:
+///   - The flasher script validates block devices at recovery time
+///     (resolve_target + validate_target check if /dev/block/by-name/<name>
+///     exists before dd write)
+///   - False positives just mean user CAN pick a file — flasher catches
+///     non-existent partitions
+///   - False negatives (partition exists but not in list) would BLOCK
+///     user from picking valid files — that's unacceptable
 fn scan_device_partitions() -> String {
     let getprop = |prop: &str| -> String {
         std::process::Command::new("getprop")
@@ -584,77 +603,51 @@ fn scan_device_partitions() -> String {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    // Known partition names to probe via stat().
-    // We check if /dev/block/by-name/<name> exists for each.
-    let mut probe_list: Vec<&str> = vec![
+    // Physical (GPT) partitions — always in list
+    let mut partitions: Vec<&str> = vec![
         "boot", "dtbo", "vbmeta", "recovery",
-        "vbmeta_system", "vbmeta_vendor",
-        "system", "vendor", "product", "system_ext",
-        "odm", "odm_dlkm", "vendor_dlkm",
-        "mi_ext", "my_product", "my_engineering", "my_stock",
-        "my_carrier", "my_region", "my_bigball", "my_preload",
-        "my_company", "optics", "prism",
-        "modem", "modem_user",
     ];
 
+    // Android 13+: init_boot partition
     if android_version >= 13 {
-        probe_list.push("init_boot");
+        partitions.push("init_boot");
     }
 
-    const BLOCKLIST: &[&str] = &[
-        "userdata", "cache", "super",
-        "frp", "keystore", "modemst1", "modemst2",
-        "fsg", "fsc", "ssd", "persist", "misc",
-        "param", "efs",
-    ];
-
-    let mut found: Vec<String> = Vec::new();
-
-    for &pname in &probe_list {
-        let paths_to_try: Vec<String> = vec![
-            format!("/dev/block/by-name/{}", pname),
-            format!("/dev/block/by-name/{}_a", pname),
-            format!("/dev/block/by-name/{}_b", pname),
-            format!("/dev/block/bootdevice/by-name/{}", pname),
-            format!("/dev/block/bootdevice/by-name/{}_a", pname),
-            format!("/dev/block/bootdevice/by-name/{}_b", pname),
-        ];
-
-        let exists = paths_to_try.iter().any(|path| {
-            std::fs::symlink_metadata(path).is_ok()
-        });
-
-        if exists {
-            found.push(pname.to_string());
-        }
+    // A/B devices: no separate recovery partition
+    if !slot_suffix.is_empty() {
+        partitions.retain(|&p| p != "recovery");
     }
 
-    let filtered: Vec<String> = found
-        .into_iter()
-        .filter(|name| {
-            let lower = name.to_lowercase();
-            !BLOCKLIST.iter().any(|&blocked| blocked == lower.as_str())
-        })
-        .collect();
+    // Chained vbmeta (Android 10+ with dynamic partitions)
+    if dynamic_partitions {
+        partitions.push("vbmeta_system");
+        partitions.push("vbmeta_vendor");
+        // Dynamic partitions (same as dd.rs DYNAMIC_PART_NAMES minus gimmicks)
+        partitions.extend(&[
+            "system", "vendor", "product", "system_ext",
+            "odm", "odm_dlkm", "vendor_dlkm",
+        ]);
+    } else {
+        // Non-dynamic: system/vendor/product are physical GPT
+        partitions.push("system");
+        partitions.push("vendor");
+        partitions.push("product");
+    }
 
-    let mut unique: Vec<String> = filtered;
-    unique.sort();
-    unique.dedup();
+    partitions.sort();
+    partitions.dedup();
 
     serde_json::json!({
-        "success": !unique.is_empty(),
-        "partitions": unique,
+        "success": !partitions.is_empty(),
+        "partitions": partitions,
         "dynamic_partitions": dynamic_partitions,
         "slot_suffix": slot_suffix,
         "android_version": android_release,
         "native_version": env!("CARGO_PKG_VERSION"),
-        "error": if unique.is_empty() {
-            Some("No partitions found via /dev/block/by-name/ stat probe".to_string())
-        } else {
-            None
-        }
+        "error": null
     }).to_string()
 }
+
 
 
 // ---------------------------------------------------------------------------
