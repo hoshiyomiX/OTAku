@@ -136,6 +136,11 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var partitionProgress: IntArray = IntArray(0)
         @Volatile private var currentPartitionIndex: Int = -1
         @Volatile private var partitionNames: List<String> = emptyList()
+        // Device-supported partition names (from nativeScanDevicePartitions).
+        // Populated once on app start, used to validate user-picked .img files.
+        // If a filename (minus .img) does not match any name in this list,
+        // the app refuses to load it and prints a warning.
+        @Volatile private var deviceSupportedPartitions: List<String> = emptyList()
 
         // Notification management (survives Activity recreation)
         // Use the same NOTIFICATION_ID as OTAService so progress updates modify
@@ -377,6 +382,30 @@ class MainActivity : AppCompatActivity() {
         }
 
         initializeNative()
+
+        // Scan device for supported partition names (no root — uses getprop).
+        // The result populates deviceSupportedPartitions, which is used to
+        // validate user-picked .img files: filenames that don't match any
+        // partition name in this list will be refused with a warning.
+        // Run async because getprop spawns a subshell (~50-100ms).
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = NativeBridge.scanDevicePartitions()
+            withContext(Dispatchers.Main) {
+                if (result.success) {
+                    deviceSupportedPartitions = result.partitions
+                    showLog("Device supports ${result.partitions.size} partitions" +
+                            if (result.dynamicPartitions) " (dynamic)" else " (static GPT)" +
+                            if (result.slotSuffix.isNotEmpty()) ", A/B slot=${result.slotSuffix}" else "" +
+                            ", Android ${result.androidVersion}")
+                } else {
+                    // Fallback: permissive mode (accept all .img files, no validation)
+                    deviceSupportedPartitions = emptyList()
+                    showLog("Partition scan failed: ${result.error}", LogLevel.WARN)
+                    showLog("Validation disabled — all .img files will be accepted.", LogLevel.WARN)
+                }
+            }
+        }
+
         setupCompressionSelector()
         setupButtons()
         setupToolbar()
@@ -1856,6 +1885,30 @@ class MainActivity : AppCompatActivity() {
                 // Partition name = filename without .img extension
                 val partitionName = fileName.removeSuffix(".img")
                     .removeSuffix(".IMG")
+
+                // ── Validate partition name against device's supported list ──
+                // If deviceSupportedPartitions is populated (scan succeeded) and
+                // the partition name is NOT in the list, refuse to load the file
+                // and print a warning. This prevents the user from accidentally
+                // renaming system.img to vendor.img (which would brick the device
+                // when flashed to the wrong partition).
+                //
+                // If deviceSupportedPartitions is empty (scan failed or not yet
+                // completed), skip validation (permissive mode) — better to allow
+                // the file than to block the user from working.
+                if (deviceSupportedPartitions.isNotEmpty() &&
+                    partitionName !in deviceSupportedPartitions) {
+                    showLog("! Refused: '$fileName' → partition '$partitionName' is not " +
+                            "supported by this device.", LogLevel.ERROR)
+                    showLog("  Supported partitions: " + deviceSupportedPartitions.joinToString(", "),
+                            LogLevel.WARN)
+                    showLog("  Rename the file to match a supported partition name, or " +
+                            "disable validation by clearing device codename field.", LogLevel.WARN)
+                    // Remove placeholder if it was added during the earlier batch loop
+                    imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
+                    runOnUiThread { updateImageListUI() }
+                    continue
+                }
 
                 // Skip if already added (real file, not placeholder).
                 val placeholderStillPresent = imageFiles.any {

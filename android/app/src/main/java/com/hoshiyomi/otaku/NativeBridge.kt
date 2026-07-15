@@ -358,6 +358,51 @@ object NativeBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  Device partition scanner (no root — getprop based)
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Scan device for supported partition names.
+     *
+     * Returns a list of partition names that this device supports, based on
+     * getprop queries (ro.boot.dynamic_partitions, ro.boot.slot_suffix,
+     * ro.build.version.release). No root required.
+     *
+     * The app uses this list to validate user-picked .img files: if the
+     * filename (minus .img) does not match any partition in this list, the
+     * app refuses to load it and prints a warning. This prevents the user
+     * from accidentally renaming system.img to vendor.img (which would brick
+     * the device when flashed to the wrong partition).
+     *
+     * @return DevicePartitionsResult with list of supported partitions
+     */
+    fun scanDevicePartitions(): DevicePartitionsResult {
+        if (!isLoaded) {
+            return DevicePartitionsResult.error("Native library not loaded: $loadError")
+        }
+        return try {
+            val resultJson = nativeScanDevicePartitions()
+            parseDevicePartitionsResult(resultJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "scanDevicePartitions() failed: ${e.message}")
+            DevicePartitionsResult.error("Native scan failed: ${e.message}")
+        }
+    }
+
+    data class DevicePartitionsResult(
+        val success: Boolean,
+        val partitions: List<String> = emptyList(),
+        val dynamicPartitions: Boolean = false,
+        val slotSuffix: String = "",
+        val androidVersion: String = "unknown",
+        val error: String? = null
+    ) {
+        companion object {
+            fun error(msg: String) = DevicePartitionsResult(success = false, error = msg)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  Result data classes
     // ═══════════════════════════════════════════════════════════════
 
@@ -683,6 +728,25 @@ object NativeBridge {
         )
     }
 
+    private fun parseDevicePartitionsResult(jsonStr: String): DevicePartitionsResult {
+        val json = JSONObject(jsonStr)
+        val partitionsArray = json.optJSONArray("partitions")
+        val partitions = mutableListOf<String>()
+        if (partitionsArray != null) {
+            for (i in 0 until partitionsArray.length()) {
+                partitions.add(partitionsArray.optString(i, ""))
+            }
+        }
+        return DevicePartitionsResult(
+            success = json.optBoolean("success", false),
+            partitions = partitions,
+            dynamicPartitions = json.optBoolean("dynamic_partitions", false),
+            slotSuffix = json.optString("slot_suffix", ""),
+            androidVersion = json.optString("android_version", "unknown"),
+            error = if (json.has("error") && !json.isNull("error")) json.optString("error") else null
+        )
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  JNI external declarations
     // ═══════════════════════════════════════════════════════════════
@@ -736,4 +800,8 @@ object NativeBridge {
     // Device codename detection (spoof-resistant — reads vendor partition props)
     // Rust signature: nativeDetectDeviceCodename() -> jstring (JSON)
     private external fun nativeDetectDeviceCodename(): String
+
+    // Device partition scanner (no root — getprop based)
+    // Rust signature: nativeScanDevicePartitions() -> jstring (JSON)
+    private external fun nativeScanDevicePartitions(): String
 }
