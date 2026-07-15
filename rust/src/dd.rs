@@ -1484,6 +1484,65 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 
     PTARGET=$(resolve_target "$PNAME")
 
+    # ── Post-resize size verification ──
+    # After lptools resize + remap, the dm-linear device may still have the
+    # OLD size if the remap was skipped (by-name symlink still existed from
+    # the old dm-linear device, so the safety-net check at line ~1446
+    # incorrectly skipped the remap).
+    #
+    # This check compares the actual block device size (blockdev --getsize64)
+    # against PSIZE (expected uncompressed size). If they don't match AND
+    # the partition is dynamic, force a re-unmap+remap to get a fresh
+    # dm-linear device with the correct size from updated metadata.
+    #
+    # Recovery log evidence (Infinix X695C, 2025-07-15):
+    #   vendor resized to 1075 MB (metadata updated)
+    #   but dd write failed: written=7655424 (7.3 MB) < expected=1127534592 (1075 MB)
+    #   → dm-linear kernel device still had old 7 MB size
+    #   → safety-net "if /dev/block/by-name/vendor exists → skip remap" was wrong
+    if is_dynamic_partition "$PNAME"; then
+        ACTUAL_SIZE=0
+        if [ -e "$PTARGET" ]; then
+            ACTUAL_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
+        fi
+        if [ -z "$ACTUAL_SIZE" ] || [ "$ACTUAL_SIZE" = "0" ]; then
+            # Fallback to sysfs
+            _DEV_NAME=$(basename "$PTARGET" 2>/dev/null)
+            if [ -n "$_DEV_NAME" ] && [ -f "/sys/class/block/$_DEV_NAME/size" ]; then
+                _SECTORS=$(cat "/sys/class/block/$_DEV_NAME/size" 2>/dev/null)
+                [ -n "$_SECTORS" ] && ACTUAL_SIZE=$(( _SECTORS * 512 ))
+            fi
+        fi
+        if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" -gt 0 ] && [ "$ACTUAL_SIZE" -lt "$PSIZE" ]; then
+            ui_print "  Post-resize size mismatch: actual=$(( ACTUAL_SIZE / 1048576 )) MB < expected=$(( PSIZE / 1048576 )) MB"
+            ui_print "  Forcing re-unmap+remap to get fresh dm-linear device..."
+            unmap_and_remap_partition "$PNAME"
+            # Re-resolve target after remap
+            PTARGET=$(resolve_target "$PNAME")
+            # Wait for device to appear
+            if [ ! -e "$PTARGET" ]; then
+                ui_print "  Waiting for $PTARGET to appear after remap..."
+                _WAIT=0
+                while [ ! -e "$PTARGET" ] && [ $_WAIT -lt 10 ]; do
+                    sleep 1
+                    _WAIT=$(( _WAIT + 1 ))
+                done
+            fi
+            # Verify new size
+            if [ -e "$PTARGET" ]; then
+                NEW_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
+                if [ -n "$NEW_SIZE" ] && [ "$NEW_SIZE" -ge "$PSIZE" ]; then
+                    ui_print "  Re-mapped OK: $(( NEW_SIZE / 1048576 )) MB [verified]"
+                else
+                    ui_print "!  WARNING: size still mismatch after remap: $(( NEW_SIZE / 1048576 )) MB < $(( PSIZE / 1048576 )) MB"
+                    ui_print "  dd write will likely fail — continuing anyway."
+                fi
+            else
+                ui_print "!  WARNING: $PTARGET not found after remap"
+            fi
+        fi
+    fi
+
     # Step A+B+C: Extract → decompress → write via FIFO pipeline
     # Always use bs=4096 for extraction — much faster than bs=1.
     # The read count is rounded UP to include the last partial block;
