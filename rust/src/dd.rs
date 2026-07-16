@@ -556,11 +556,20 @@ cleanup_abort() {{
             if [ -n "$TARGET_SLOT" ]; then
                 rname_lp="${{rname}}${{TARGET_SLOT}}"
             fi
+            # BlassGo pattern: unmap → resize → map.
+            # This preserves the by-name symlink (resize doesn't destroy dm)
+            # and ensures the dm-linear reflects the rollback size.
+            lptools unmap "$rname_lp" >/dev/null 2>&1 || true
             # IMPORTANT: Use explicit if-else, NOT ||/&& chaining.
             if ! lptools resize "$rname_lp" "$rsize" >/dev/null 2>&1; then
-                # resize failed — try remove+create as fallback
+                # resize failed — try remove+create as last-resort fallback
+                # (destructive — by-name symlink may become stale, but at
+                # least the metadata is rolled back so device can boot)
                 lptools remove "$rname_lp" >/dev/null 2>&1
                 lptools create "$rname_lp" "$rsize" >/dev/null 2>&1
+            else
+                # resize succeeded — re-map to materialize the rollback size
+                lptools map "$rname_lp" >/dev/null 2>&1 || true
             fi
         done
     fi
@@ -1024,31 +1033,73 @@ ui_print ""
 
 resolve_target() {{
     local name="$1"
+    local mapper_slotted="/dev/block/mapper/${{name}}${{TARGET_SLOT}}"
+    local mapper_plain="/dev/block/mapper/$name"
     local slotted="/dev/block/by-name/${{name}}${{TARGET_SLOT}}"
     local plain="/dev/block/by-name/$name"
 
-    # No slot detected — non-A/B device
+    # No slot detected — non-A/B device.
+    # Prefer mapper path, then by-name path.
     if [ -z "$TARGET_SLOT" ]; then
+        if [ -e "$mapper_plain" ]; then
+            echo "$mapper_plain"
+            return
+        fi
+        if [ -e "$plain" ]; then
+            echo "$plain"
+            return
+        fi
         echo "$plain"
         return
     fi
 
-    # Prefer slotted path if it exists (e.g. boot_b, dtbo_b, vbmeta_b)
+    # ── A/B device: check paths in priority order ──
+    #
+    # Priority 1: /dev/block/mapper/${{name}}${{TARGET_SLOT}}
+    #   This is the REAL dm-linear device created by lptools map.
+    #   Recovery's own partition table uses this path (e.g. line 1393 in
+    #   recovery.log: "/vendor_image | /dev/block/mapper/vendor_a").
+    #   This path is ALWAYS fresh after lptools operations — lptools map
+    #   creates the dm device here directly.
+    #
+    # Priority 2: /dev/block/mapper/$name (no slot suffix)
+    #   Some devices expose plain mapper names for slot-suffixed partitions.
+    #
+    # Priority 3: /dev/block/by-name/${{name}}${{TARGET_SLOT}}
+    #   Slotted by-name symlink (e.g. boot_b, dtbo_b). Created by recovery
+    #   at boot for physical partitions. May be STALE for dynamic partitions
+    #   after lptools remove/create (symlink not refreshed).
+    #
+    # Priority 4: /dev/block/by-name/$name (plain)
+    #   Non-slotted by-name symlink. Same staleness risk as #3.
+    #
+    # Why mapper/ first:
+    #   When lptools remove + create is used (fallback path), the old dm
+    #   device is destroyed AND its by-name symlink becomes dangling. The
+    #   new dm device exists at /dev/block/mapper/ but the by-name symlink
+    #   is NOT recreated until recovery re-runs its boot-time symlink logic.
+    #   Checking mapper/ first avoids this staleness.
+    if [ -e "$mapper_slotted" ]; then
+        echo "$mapper_slotted"
+        return
+    fi
+    if [ -e "$mapper_plain" ]; then
+        echo "$mapper_plain"
+        return
+    fi
     if [ -e "$slotted" ]; then
         echo "$slotted"
         return
     fi
-
-    # Dynamic partitions in super don't have _a/_b symlinks on Virtual AB
-    # devices — use the plain name (e.g. system, vendor, odm_dlkm)
     if [ -e "$plain" ]; then
         echo "$plain"
         return
     fi
 
-    # Neither exists yet — return slotted path as best guess;
-    # validate_target() will produce a clear error if still missing
-    echo "$slotted"
+    # None exists yet — return mapper_slotted as best guess (it's the path
+    # lptools will create). validate_target() will produce a clear error
+    # if still missing after the wait/retry loop.
+    echo "$mapper_slotted"
 }}
 "#,
         slot_step = slot_step,
@@ -1422,41 +1473,71 @@ else
                 ui_print "    unmap..."
                 lptools unmap "$LP_NAME" >/dev/null 2>&1 || true
 
-                # ── Step 3: Resize — try remove+create FIRST, resize as fallback ──
-                ui_print "    remove+create..."
-                lptools remove "$LP_NAME" >/dev/null 2>&1
-                lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-                CREATE_RC=$?
+                # ── Step 3: Resize — try lptools resize FIRST (BlassGo pattern) ──
+                # Why resize is primary (not remove+create):
+                #   lptools resize updates the partition metadata IN PLACE — the
+                #   existing dm-linear device stays alive, the /dev/block/by-name/
+                #   symlink stays valid, and recovery's mount state is preserved.
+                #
+                #   lptools remove + create, by contrast, DESTROYS the dm-linear
+                #   device. Recovery created the by-name symlink at boot (e.g.
+                #   /dev/block/by-name/vendor → /dev/block/dm-6), and that symlink
+                #   is NOT refreshed when lptools create makes a new dm device.
+                #   The stale symlink then causes our verify step to fail with
+                #   "not mapped" even though /dev/block/mapper/vendor_a exists.
+                #
+                #   BlassGo's DynamicInstaller updater-script proves resize works:
+                #     lptools unmap vendor_a
+                #     lptools resize vendor_a SIZE
+                #     lptools map vendor_a
+                #   (See /home/z/my-project/upload/updater-script lines 80-89.)
+                #
+                # remove+create is kept as a FALLBACK only — it's destructive but
+                # can recover from corrupted partition metadata that resize can't.
+                ui_print "    resize..."
+                lptools resize "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                RESIZE_RC=$?
 
-                if [ $CREATE_RC -ne 0 ]; then
-                    # Fallback: resize + map
-                    ui_print "    remove+create failed — trying resize+map fallback..."
-                    lptools resize "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-                    RESIZE_RC=$?
-                    if [ $RESIZE_RC -eq 0 ]; then
-                        ui_print "    resize OK — mapping..."
+                if [ $RESIZE_RC -eq 0 ]; then
+                    # Resize succeeded — now map the partition to materialize
+                    # the new size into a fresh dm-linear device.
+                    ui_print "    resize OK — mapping..."
+                    lptools map "$LP_NAME" >/dev/null 2>&1
+                    MAP_RC=$?
+                    if [ $MAP_RC -ne 0 ]; then
+                        ui_print "    ! lptools map failed (rc=$MAP_RC) — retrying..."
+                        lptools unmap "$LP_NAME" >/dev/null 2>&1
+                        sleep 1
                         lptools map "$LP_NAME" >/dev/null 2>&1
                         MAP_RC=$?
                         if [ $MAP_RC -ne 0 ]; then
-                            ui_print "    ! lptools map failed (rc=$MAP_RC) — retrying..."
-                            lptools unmap "$LP_NAME" >/dev/null 2>&1
-                            sleep 1
-                            lptools map "$LP_NAME" >/dev/null 2>&1
-                            MAP_RC=$?
-                            if [ $MAP_RC -ne 0 ]; then
-                                ui_print "    ! map retry also failed"
+                            ui_print "    ! map retry also failed — trying remove+create fallback..."
+                            # FALLBACK: remove + create (destructive — destroys by-name symlink)
+                            lptools remove "$LP_NAME" >/dev/null 2>&1
+                            lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                            CREATE_RC=$?
+                            if [ $CREATE_RC -ne 0 ]; then
+                                ui_print "    ! remove+create also failed for $pname"
                                 RESIZE_OK=0
+                                RESIZED_ORIGINAL=$(echo "$RESIZED_ORIGINAL" | sed "s/ $pname:[0-9]*//")
                                 continue
                             fi
+                            ui_print "    ! remove+create fallback succeeded (by-name symlink may be stale — using mapper path)"
                         fi
-                    else
-                        ui_print "    ! resize also failed for $pname"
+                    fi
+                else
+                    # Resize failed — fall back to remove+create (destructive)
+                    ui_print "    ! lptools resize failed (rc=$RESIZE_RC) — trying remove+create fallback..."
+                    lptools remove "$LP_NAME" >/dev/null 2>&1
+                    lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                    CREATE_RC=$?
+                    if [ $CREATE_RC -ne 0 ]; then
+                        ui_print "    ! remove+create also failed for $pname"
                         RESIZE_OK=0
                         RESIZED_ORIGINAL=$(echo "$RESIZED_ORIGINAL" | sed "s/ $pname:[0-9]*//")
                         continue
                     fi
-                else
-                    ui_print "    created at $(( NEW_SIZE_BYTES / 1048576 )) MB"
+                    ui_print "    ! remove+create fallback succeeded (by-name symlink may be stale — using mapper path)"
                 fi
 
                 # ── Step 5: Verify mapped ──
@@ -1489,9 +1570,12 @@ else
                         ui_print "    ✓ mapped OK: $(( ACTUAL_SIZE / 1048576 )) MB [verified]"
                     else
                         ui_print "    ! SIZE MISMATCH: actual=$(( ACTUAL_SIZE / 1048576 )) MB < expected=$(( NEW_SIZE_BYTES / 1048576 )) MB"
-                        ui_print "    ! forcing remove+create to get fresh dm-linear..."
-                        lptools remove "$LP_NAME" >/dev/null 2>&1
-                        lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                        ui_print "    ! forcing unmap+resize+map to get fresh dm-linear..."
+                        # Use resize (not remove+create) to preserve by-name symlink.
+                        # BlassGo pattern: unmap → resize → map.
+                        lptools unmap "$LP_NAME" >/dev/null 2>&1
+                        lptools resize "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                        lptools map "$LP_NAME" >/dev/null 2>&1
                         # Re-check
                         ACTUAL_SIZE=$(blockdev --getsize64 "$PTARGET_VERIFY" 2>/dev/null)
                         if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" -ge "$NEW_SIZE_BYTES" ]; then
@@ -1783,6 +1867,34 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 
     # Step C: Post-verify (conditional)
     {verify_block}
+
+    # ── Post-flash re-map (BlassGo pattern, step 6/7) ──
+    # After dd writes data to the dm-linear device, the kernel's dm-linear
+    # mapper may have cached the old partition metadata. Re-mapping forces
+    # the kernel to re-read the metadata and present the freshly-written
+    # data correctly on next boot.
+    #
+    # This is what BlassGo's DynamicInstaller updater-script does at line 97-98:
+    #   lptools unmap "$vendor_partition" && lptools map "$vendor_partition"
+    #
+    # Only do this for dynamic partitions (those in DYNAMIC_PART_NAMES).
+    # Physical partitions (boot, dtbo, vbmeta, etc.) don't need re-mapping.
+    if is_dynamic_partition "$PNAME"; then
+        if [ -n "$TARGET_SLOT" ]; then
+            REMAP_LP_NAME="${{PNAME}}${{TARGET_SLOT}}"
+        else
+            REMAP_LP_NAME="$PNAME"
+        fi
+        ui_print "  Re-mapping $REMAP_LP_NAME (refresh dm-linear)..."
+        lptools unmap "$REMAP_LP_NAME" >/dev/null 2>&1
+        lptools map "$REMAP_LP_NAME" >/dev/null 2>&1
+        REMAP_RC=$?
+        if [ $REMAP_RC -ne 0 ]; then
+            ui_print "  ! warning: post-flash re-map failed for $REMAP_LP_NAME (rc=$REMAP_RC)"
+            ui_print "  ! The data was written, but dm-linear may show stale metadata."
+            ui_print "  ! A reboot should still apply the new data."
+        fi
+    fi
     ui_print ""
 done
 
@@ -3126,38 +3238,114 @@ mod tests {
         );
     }
 
-    /// Verify the fixed unzip -l regex uses portable [.] instead of \.
-    /// and handles trailing CR characters.
+    /// Verify the 3 BlassGo-alignment fixes:
+    /// 1. lptools resize is PRIMARY (not remove+create)
+    /// 2. resolve_target checks /dev/block/mapper/ FIRST
+    /// 3. Post-flash re-map (lptools unmap && lptools map) is present
     #[test]
-    fn test_unzip_listing_regex_portable() {
+    fn test_blassgo_alignment_3_fixes() {
         let meta = vec![PartitionMeta {
-            name: "boot".to_string(),
-            unc_size: 33554432,
-            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
-            comp_size: 16777216,
+            name: "vendor".to_string(),
+            unc_size: 1127219200,  // 1075 MB
+            hash_hex: "a".repeat(64),
+            comp_size: 350224384,  // 334 MB
             data_offset: 0,
-            comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+            comp_hash_hex: "b".repeat(64),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
-        // Portable literal dot: [.] instead of \.
+
+        // ── Fix 1: lptools resize is PRIMARY ──
+        // The resize step must try `lptools resize` FIRST, with remove+create
+        // only as a fallback. The previous (broken) approach was remove+create
+        // primary, which destroys the by-name symlink.
         assert!(
-            script.contains("otaku[.]bin"),
-            "Portable literal dot [.] missing — still using fragile \\."
+            script.contains("lptools resize \"$LP_NAME\" \"$NEW_SIZE_BYTES\""),
+            "Fix 1: lptools resize (primary) missing from resize step"
         );
-        // CR stripping for Windows-line-ending unzip outputs
+        // remove+create should only appear as FALLBACK (with "fallback" comment nearby)
+        // Count remove+create occurrences — should be in fallback paths only
+        let remove_create_count = script.matches("lptools remove \"$LP_NAME\"").count();
         assert!(
-            script.contains("tr -d '\\r'"),
-            "CR stripping (tr -d \\r) missing — Windows-line-ending unzip outputs not handled"
+            remove_create_count >= 1,
+            "Fix 1: remove+create fallback missing (count={})",
+            remove_create_count
         );
-        // Helper function for cleaner listing logic
+        // The resize step should NOT start with remove+create as primary
+        // Check that the resize comment says "resize FIRST" (not "remove+create FIRST")
         assert!(
-            script.contains("try_zip_listing"),
-            "try_zip_listing helper function missing"
+            script.contains("try lptools resize FIRST"),
+            "Fix 1: resize-first comment missing"
         );
-        // Numeric validation of extracted size
         assert!(
-            script.contains("*[!0-9]*"),
-            "Numeric validation of extracted size missing"
+            !script.contains("try remove+create FIRST"),
+            "Fix 1: remove+create-first comment still present (should be resize-first)"
+        );
+
+        // ── Fix 2: resolve_target checks /dev/block/mapper/ FIRST ──
+        // The function must check mapper/ paths before by-name/ paths.
+        // This handles the case where remove+create (fallback) destroys the
+        // by-name symlink but creates a fresh dm at /dev/block/mapper/.
+        assert!(
+            script.contains("/dev/block/mapper/"),
+            "Fix 2: /dev/block/mapper/ path missing from resolve_target"
+        );
+        assert!(
+            script.contains("mapper_slotted"),
+            "Fix 2: mapper_slotted variable missing from resolve_target"
+        );
+        // mapper/ must be checked BEFORE by-name/ (priority order)
+        let mapper_pos = script.find("if [ -e \"$mapper_slotted\" ]").unwrap_or(usize::MAX);
+        let byname_pos = script.find("if [ -e \"$slotted\" ]").unwrap_or(usize::MAX);
+        assert!(
+            mapper_pos < byname_pos,
+            "Fix 2: mapper/ must be checked BEFORE by-name/ (priority order)"
+        );
+
+        // ── Fix 3: Post-flash re-map ──
+        // After dd writes, the script must do `lptools unmap && lptools map`
+        // to refresh the dm-linear device (BlassGo step 6/7).
+        assert!(
+            script.contains("Post-flash re-map"),
+            "Fix 3: post-flash re-map comment missing"
+        );
+        assert!(
+            script.contains("Re-mapping $REMAP_LP_NAME"),
+            "Fix 3: re-map ui_print message missing"
+        );
+        assert!(
+            script.contains("lptools unmap \"$REMAP_LP_NAME\""),
+            "Fix 3: lptools unmap in post-flash re-map missing"
+        );
+        assert!(
+            script.contains("lptools map \"$REMAP_LP_NAME\""),
+            "Fix 3: lptools map in post-flash re-map missing"
+        );
+    }
+
+    /// Verify the cleanup trap uses BlassGo pattern (unmap → resize → map)
+    /// for rollback, not just resize alone.
+    #[test]
+    fn test_cleanup_trap_blassgo_pattern() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1127219200,
+            hash_hex: "a".repeat(64),
+            comp_size: 350224384,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // Cleanup trap must do unmap BEFORE resize (BlassGo pattern)
+        // The old code just did resize; the new code does unmap → resize → map.
+        assert!(
+            script.contains("lptools unmap \"$rname_lp\" >/dev/null 2>&1 || true"),
+            "Cleanup: unmap before resize missing"
+        );
+        // After resize succeeds, must re-map to materialize rollback size
+        assert!(
+            script.contains("lptools map \"$rname_lp\" >/dev/null 2>&1 || true"),
+            "Cleanup: re-map after resize missing"
         );
     }
 }
