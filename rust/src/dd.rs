@@ -2381,8 +2381,9 @@ mod tests {
         );
 
         // Assert: fix is present.
+        // Note: after slot-suffix fix, the variable is $rname_lp not $rname
         assert!(
-            script.contains("if ! lptools resize \"$rname\" \"$rsize\""),
+            script.contains("if ! lptools resize \"$rname_lp\" \"$rsize\""),
             "REGRESSION: cleanup trap if-else fix not found (Bug #1)"
         );
     }
