@@ -1380,43 +1380,63 @@ else
                 lptools unmap "$pname" >/dev/null 2>&1 || true
                 # Idempotent: OK if already unmapped
 
-                # ── Step 3: Resize metadata ──
-                ui_print "    resize..."
-                lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-                RESIZE_RC=$?
+                # ── Step 3: Resize — try remove+create FIRST, resize as fallback ──
+                #
+                # Why remove+create first (not resize first):
+                #   lptools resize ONLY updates metadata in super partition. It does
+                #   NOT destroy/recreate the dm-linear kernel device. On some
+                #   recoveries (OrangeFox on Infinix X695C / mt6785), lptools map
+                #   after resize creates a dm-linear with the OLD size despite
+                #   metadata saying new size. This is likely a metadata slot
+                #   mismatch bug in lptools (reads wrong slot when mapping).
+                #
+                #   lptools remove + lptools create avoids this by:
+                #   1. remove: destroys partition entry in metadata (all slots) +
+                #      destroys dm-linear kernel device
+                #   2. create: creates NEW partition entry with correct size in
+                #      metadata (all slots) + creates NEW dm-linear from fresh
+                #      metadata → correct size guaranteed
+                #
+                #   Recovery.log evidence (2025-07-16, post-210cfab):
+                #     lptools resize → rc=0 (metadata updated)
+                #     lptools map → rc=0 (dm-linear created)
+                #     blockdev --getsize64 → 7 MB (OLD size, not 1075 MB!)
+                #     → lptools map used stale metadata from wrong slot
+                ui_print "    remove+create..."
+                lptools remove "$pname" >/dev/null 2>&1
+                lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                CREATE_RC=$?
 
-                if [ $RESIZE_RC -ne 0 ]; then
-                    # Fallback: remove + create (lptools create auto-maps)
-                    ui_print "    resize failed — trying remove+create fallback..."
-                    lptools remove "$pname" >/dev/null 2>&1
-                    lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
-                    CREATE_RC=$?
-                    if [ $CREATE_RC -ne 0 ]; then
-                        ui_print "    ! remove+create also failed for $pname"
+                if [ $CREATE_RC -ne 0 ]; then
+                    # Fallback: resize + map (may still work on other recoveries)
+                    ui_print "    remove+create failed — trying resize+map fallback..."
+                    lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                    RESIZE_RC=$?
+                    if [ $RESIZE_RC -eq 0 ]; then
+                        ui_print "    resize OK — mapping..."
+                        lptools map "$pname" >/dev/null 2>&1
+                        MAP_RC=$?
+                        if [ $MAP_RC -ne 0 ]; then
+                            ui_print "    ! lptools map failed (rc=$MAP_RC) — retrying..."
+                            lptools unmap "$pname" >/dev/null 2>&1
+                            sleep 1
+                            lptools map "$pname" >/dev/null 2>&1
+                            MAP_RC=$?
+                            if [ $MAP_RC -ne 0 ]; then
+                                ui_print "    ! map retry also failed"
+                                RESIZE_OK=0
+                                continue
+                            fi
+                        fi
+                    else
+                        ui_print "    ! resize also failed for $pname"
                         RESIZE_OK=0
                         RESIZED_ORIGINAL=$(echo "$RESIZED_ORIGINAL" | sed "s/ $pname:[0-9]*//")
                         continue
                     fi
-                    ui_print "    recreated at $(( NEW_SIZE_BYTES / 1048576 )) MB"
-                    # lptools create auto-maps — skip explicit map
                 else
-                    # ── Step 4: Map (create new dm-linear from updated metadata) ──
-                    ui_print "    map..."
-                    lptools map "$pname" >/dev/null 2>&1
-                    MAP_RC=$?
-                    if [ $MAP_RC -ne 0 ]; then
-                        ui_print "    ! lptools map failed for $pname (rc=$MAP_RC)"
-                        ui_print "    retrying with unmap+map..."
-                        lptools unmap "$pname" >/dev/null 2>&1
-                        sleep 1
-                        lptools map "$pname" >/dev/null 2>&1
-                        MAP_RC=$?
-                        if [ $MAP_RC -ne 0 ]; then
-                            ui_print "    ! map retry also failed — dd will likely fail"
-                            RESIZE_OK=0
-                            continue
-                        fi
-                    fi
+                    ui_print "    created at $(( NEW_SIZE_BYTES / 1048576 )) MB"
+                    # lptools create auto-maps — no explicit map needed
                 fi
 
                 # ── Step 5: Verify mapped ──
@@ -1449,10 +1469,9 @@ else
                         ui_print "    ✓ mapped OK: $(( ACTUAL_SIZE / 1048576 )) MB [verified]"
                     else
                         ui_print "    ! SIZE MISMATCH: actual=$(( ACTUAL_SIZE / 1048576 )) MB < expected=$(( NEW_SIZE_BYTES / 1048576 )) MB"
-                        ui_print "    ! dm-linear may be stale — forcing unmap+remap..."
-                        lptools unmap "$pname" >/dev/null 2>&1
-                        sleep 1
-                        lptools map "$pname" >/dev/null 2>&1
+                        ui_print "    ! forcing remove+create to get fresh dm-linear..."
+                        lptools remove "$pname" >/dev/null 2>&1
+                        lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                         # Re-check
                         ACTUAL_SIZE=$(blockdev --getsize64 "$PTARGET_VERIFY" 2>/dev/null)
                         if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" -ge "$NEW_SIZE_BYTES" ]; then
