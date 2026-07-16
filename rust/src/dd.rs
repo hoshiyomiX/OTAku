@@ -544,15 +544,16 @@ cleanup_abort() {{
             [ -z "$rname" ] && continue
             [ -z "$rsize" ] && continue
             ui_print "  Restoring $rname to original size..."
+            # Build slot-suffixed name for lptools (same as resize step)
+            rname_lp="$rname"
+            if [ -n "$TARGET_SLOT" ]; then
+                rname_lp="${{rname}}${{TARGET_SLOT}}"
+            fi
             # IMPORTANT: Use explicit if-else, NOT ||/&& chaining.
-            # Shell || and && have SAME precedence and left-to-right associativity,
-            # so `a || b && c` parses as `(a || b) && c` — meaning if `a` fails
-            # and `b` succeeds, `c` runs unconditionally. That would create a
-            # partition we don't want. Use if-else to make intent explicit.
-            if ! lptools resize "$rname" "$rsize" >/dev/null 2>&1; then
+            if ! lptools resize "$rname_lp" "$rsize" >/dev/null 2>&1; then
                 # resize failed — try remove+create as fallback
-                lptools remove "$rname" >/dev/null 2>&1
-                lptools create "$rname" "$rsize" >/dev/null 2>&1
+                lptools remove "$rname_lp" >/dev/null 2>&1
+                lptools create "$rname_lp" "$rsize" >/dev/null 2>&1
             fi
         done
     fi
@@ -575,10 +576,14 @@ cleanup_abort() {{
             if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
                 continue
             fi
-            # Not mapped — try to map. unmount_and_unmap_partition is idempotent
-            # (returns 0 if not present/mapped), so safe to call as a prep step.
+            # Build slot-suffixed name for lptools (same as resize step)
+            pname_lp="$pname"
+            if [ -n "$TARGET_SLOT" ]; then
+                pname_lp="${{pname}}${{TARGET_SLOT}}"
+            fi
+            # Not mapped — try to map.
             unmount_and_unmap_partition "$pname" >/dev/null 2>&1
-            lptools map "$pname" >/dev/null 2>&1
+            lptools map "$pname_lp" >/dev/null 2>&1
         done
     fi
     sync
@@ -1364,63 +1369,51 @@ else
 
                 ui_print "  [$pname] $(( ORIG_SIZE_BYTES / 1048576 )) MB → $(( NEW_SIZE_BYTES / 1048576 )) MB"
 
+                # ── Build slot-suffixed partition name for lptools ──
+                # On A/B devices, lptools partition names in super partition
+                # metadata are SLOT-SUFFIXED (e.g. vendor_a, vendor_b).
+                # Passing plain "vendor" to lptools resize/map may silently
+                # fail or operate on the wrong partition.
+                #
+                # Evidence: working DynamicInstaller updater-script uses
+                #   vendor_partition="vendor$current_slot"  (e.g. vendor_a)
+                # for ALL lptools calls. OTAku was passing plain "vendor"
+                # → lptools resize reported success but didn't actually resize
+                # the correct slot-suffixed partition → dm-linear stayed old size.
+                LP_NAME="$pname"
+                if [ -n "$TARGET_SLOT" ]; then
+                    LP_NAME="${{pname}}${{TARGET_SLOT}}"
+                    ui_print "    (lptools name: $LP_NAME)"
+                fi
+
                 # ── Step 1: Targeted umount ──
                 ui_print "    unmount..."
                 unmount_and_unmap_partition "$pname" >/dev/null 2>&1 || true
-                # Note: this helper does umount + unmap. We call it for the umount
-                # side effect. The unmap also runs but is harmless (idempotent).
 
                 # ── Step 2: Explicit unmap (destroy old dm-linear) ──
-                # Even though the helper above already called unmap, call it
-                # explicitly here to ensure the old dm-linear is destroyed.
-                # This is critical: lptools resize only updates metadata —
-                # the old dm-linear kernel device MUST be destroyed first,
-                # otherwise lptools map will fail with EEXIST.
                 ui_print "    unmap..."
-                lptools unmap "$pname" >/dev/null 2>&1 || true
-                # Idempotent: OK if already unmapped
+                lptools unmap "$LP_NAME" >/dev/null 2>&1 || true
 
                 # ── Step 3: Resize — try remove+create FIRST, resize as fallback ──
-                #
-                # Why remove+create first (not resize first):
-                #   lptools resize ONLY updates metadata in super partition. It does
-                #   NOT destroy/recreate the dm-linear kernel device. On some
-                #   recoveries (OrangeFox on Infinix X695C / mt6785), lptools map
-                #   after resize creates a dm-linear with the OLD size despite
-                #   metadata saying new size. This is likely a metadata slot
-                #   mismatch bug in lptools (reads wrong slot when mapping).
-                #
-                #   lptools remove + lptools create avoids this by:
-                #   1. remove: destroys partition entry in metadata (all slots) +
-                #      destroys dm-linear kernel device
-                #   2. create: creates NEW partition entry with correct size in
-                #      metadata (all slots) + creates NEW dm-linear from fresh
-                #      metadata → correct size guaranteed
-                #
-                #   Recovery.log evidence (2025-07-16, post-210cfab):
-                #     lptools resize → rc=0 (metadata updated)
-                #     lptools map → rc=0 (dm-linear created)
-                #     blockdev --getsize64 → 7 MB (OLD size, not 1075 MB!)
-                #     → lptools map used stale metadata from wrong slot
                 ui_print "    remove+create..."
-                lptools remove "$pname" >/dev/null 2>&1
-                lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                lptools remove "$LP_NAME" >/dev/null 2>&1
+                lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                 CREATE_RC=$?
 
                 if [ $CREATE_RC -ne 0 ]; then
-                    # Fallback: resize + map (may still work on other recoveries)
+                    # Fallback: resize + map
                     ui_print "    remove+create failed — trying resize+map fallback..."
-                    lptools resize "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                    lptools resize "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                     RESIZE_RC=$?
                     if [ $RESIZE_RC -eq 0 ]; then
                         ui_print "    resize OK — mapping..."
-                        lptools map "$pname" >/dev/null 2>&1
+                        lptools map "$LP_NAME" >/dev/null 2>&1
                         MAP_RC=$?
                         if [ $MAP_RC -ne 0 ]; then
                             ui_print "    ! lptools map failed (rc=$MAP_RC) — retrying..."
-                            lptools unmap "$pname" >/dev/null 2>&1
+                            lptools unmap "$LP_NAME" >/dev/null 2>&1
                             sleep 1
-                            lptools map "$pname" >/dev/null 2>&1
+                            lptools map "$LP_NAME" >/dev/null 2>&1
                             MAP_RC=$?
                             if [ $MAP_RC -ne 0 ]; then
                                 ui_print "    ! map retry also failed"
@@ -1436,7 +1429,6 @@ else
                     fi
                 else
                     ui_print "    created at $(( NEW_SIZE_BYTES / 1048576 )) MB"
-                    # lptools create auto-maps — no explicit map needed
                 fi
 
                 # ── Step 5: Verify mapped ──
@@ -1470,8 +1462,8 @@ else
                     else
                         ui_print "    ! SIZE MISMATCH: actual=$(( ACTUAL_SIZE / 1048576 )) MB < expected=$(( NEW_SIZE_BYTES / 1048576 )) MB"
                         ui_print "    ! forcing remove+create to get fresh dm-linear..."
-                        lptools remove "$pname" >/dev/null 2>&1
-                        lptools create "$pname" "$NEW_SIZE_BYTES" >/dev/null 2>&1
+                        lptools remove "$LP_NAME" >/dev/null 2>&1
+                        lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                         # Re-check
                         ACTUAL_SIZE=$(blockdev --getsize64 "$PTARGET_VERIFY" 2>/dev/null)
                         if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" -ge "$NEW_SIZE_BYTES" ]; then
