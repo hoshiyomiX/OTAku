@@ -436,8 +436,8 @@ VERIFY_HASH=""
 #
 # bs=1M (1048576) matches dd write block + UFS page size, eliminating
 # the byte-by-byte syscall overhead of the old bs=1 remainder read.
-VERIFY_FIFO="/tmp/verify_${{i}}.fifo"
-VERIFY_HASHFILE="/tmp/verify_${{i}}.hash"
+VERIFY_FIFO="/tmp/verify_${i}.fifo"
+VERIFY_HASHFILE="/tmp/verify_${i}.hash"
 rm -f "$VERIFY_FIFO" "$VERIFY_HASHFILE"
 
 FAST_OK=0
@@ -1150,7 +1150,18 @@ is_dynamic_partition() {{
 #   android::fs_mgr::DestroyLogicalPartition which issues DM_DEV_REMOVE —
 #   that fails EBUSY if the device is still mounted, so the unmount above is
 #   mandatory.
-unmount_and_unmap_partition() {{
+# unmount_partition: targeted umount of mount points referencing a partition's
+# block device. Does NOT call lptools unmap — that's the caller's responsibility
+# (with the correct slot-suffixed name).
+#
+# This is split from unmount_and_unmap_partition to avoid REDUNDANT lptools unmap
+# calls. The resize step needs to:
+#   1. unmount_partition "$pname"  (release mount points)
+#   2. lptools unmap "$LP_NAME"    (destroy dm-linear, slot-suffixed name)
+# The old unmount_and_unmap_partition did both, but used the PLAIN name for
+# lptools unmap (wrong on A/B devices) — and the resize step then called
+# lptools unmap again with the slot-suffixed name (redundant).
+unmount_partition() {{
     local pname="$1"
     local ptarget dev_name mount_points mp
 
@@ -1180,11 +1191,29 @@ unmount_and_unmap_partition() {{
             sleep 1
             umount -l "$mp" 2>/dev/null
         fi
+        # If still mounted after lazy umount, try TWRP/OrangeFox builtin.
+        # `twrp unmount <name>` handles recovery-specific mount state that
+        # regular umount can't reach (e.g. dm-verity, fuse overlays).
+        # Available in TWRP-based recoveries (TWRP, OrangeFox, RedWolf, etc.)
+        if mount 2>/dev/null | grep -q " $mp "; then
+            if command -v twrp >/dev/null 2>&1; then
+                ui_print "    trying twrp unmount $pname..."
+                twrp unmount "$pname" 2>/dev/null
+            fi
+        fi
     done
+    return 0
+}}
 
-    # lptools unmap is idempotent: returns 0 if already unmapped (state != ACTIVE).
-    # If it still fails after targeted unmount, the partition is either genuinely
-    # busy (some process holds an open fd) or not a dynamic partition.
+# unmount_and_unmap_partition: convenience wrapper — unmount + lptools unmap.
+# Kept for backward compat with the cleanup trap and other callers that need
+# both operations in one call. NOTE: lptools unmap here uses PLAIN name
+# (no slot suffix) — callers that need slot-suffixed unmap should call
+# unmount_partition + lptools unmap "$LP_NAME" directly.
+unmount_and_unmap_partition() {{
+    local pname="$1"
+    unmount_partition "$pname" || true
+    # lptools unmap is idempotent: returns 0 if already unmapped.
     if ! lptools unmap "$pname" >/dev/null 2>&1; then
         return 1
     fi
@@ -1465,11 +1494,14 @@ else
                     ui_print "    (lptools name: $LP_NAME)"
                 fi
 
-                # ── Step 1: Targeted umount ──
+                # ── Step 1: Targeted umount (release mount points) ──
+                # Uses unmount_partition (not unmount_and_unmap_partition) to avoid
+                # REDUNDANT lptools unmap. The unmap is done in Step 2 below with
+                # the correct slot-suffixed name ($LP_NAME).
                 ui_print "    unmount..."
-                unmount_and_unmap_partition "$pname" >/dev/null 2>&1 || true
+                unmount_partition "$pname" || true
 
-                # ── Step 2: Explicit unmap (destroy old dm-linear) ──
+                # ── Step 2: Explicit unmap (destroy old dm-linear, slot-suffixed) ──
                 ui_print "    unmap..."
                 lptools unmap "$LP_NAME" >/dev/null 2>&1 || true
 
@@ -1736,7 +1768,13 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         # Without this, we only see "status=2" with no diagnostic info.
         GZIP_ERR="/tmp/ddpart_${{i}}.err"
         rm -f "$GZIP_ERR"
+        # Add `head -c $PCSIZE` to strip trailing alignment padding before
+        # decompressor. Without this, gzip -d sees padding bytes after the
+        # gzip EOF marker and returns status=2 with "trailing junk which was
+        # ignored" — a FALSE FAILURE (data is actually fine). This eliminates
+        # the need for the fallback decompressor chain in the common case.
         dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+            head -c "$PCSIZE" 2>/dev/null | \
             $DECOMP_CMD -d > "$TMP_FIFO" 2>"$GZIP_ERR" &
         DECOMP_PID=$!
 
@@ -1779,6 +1817,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
                         continue
                     fi
                     dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+                        head -c "$PCSIZE" 2>/dev/null | \
                         $FB_DECOMP > "$TMP_FIFO2" 2>"$GZIP_ERR" &
                     FB_PID=$!
                     dd of="$PTARGET" bs=1048576 if="$TMP_FIFO2" 2>/dev/null
@@ -1842,9 +1881,12 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         # FIFO not available (very rare) — fall back to direct 3-pipeline.
         # We lose decompressor error detection (sh $? = last pipe stage only),
         # but this avoids tmpfs exhaustion by never writing a temp file.
+        # head -c $PCSIZE strips trailing alignment padding (prevents gzip
+        # "trailing junk" false failure).
         GZIP_ERR="/tmp/ddpart_${{i}}.err"
         rm -f "$GZIP_ERR"
         dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+            head -c "$PCSIZE" 2>/dev/null | \
             $DECOMP_CMD -d 2>"$GZIP_ERR" | \
             dd of="$PTARGET" bs=1048576 2>/dev/null
         DD_STATUS=$?
@@ -1869,30 +1911,27 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     {verify_block}
 
     # ── Post-flash re-map (BlassGo pattern, step 6/7) ──
-    # After dd writes data to the dm-linear device, the kernel's dm-linear
-    # mapper may have cached the old partition metadata. Re-mapping forces
-    # the kernel to re-read the metadata and present the freshly-written
-    # data correctly on next boot.
+    # After dd writes data to the dm-linear device, re-map to refresh the
+    # kernel's dm-linear mapper. This is defensive — `sync` already flushes
+    # the page cache, but BlassGo's DynamicInstaller does this re-map so we
+    # follow the proven pattern.
     #
-    # This is what BlassGo's DynamicInstaller updater-script does at line 97-98:
-    #   lptools unmap "$vendor_partition" && lptools map "$vendor_partition"
-    #
-    # Only do this for dynamic partitions (those in DYNAMIC_PART_NAMES).
+    # Only for dynamic partitions (those in DYNAMIC_PART_NAMES).
     # Physical partitions (boot, dtbo, vbmeta, etc.) don't need re-mapping.
+    #
+    # Silent on success (reduce log noise), warn only on failure.
     if is_dynamic_partition "$PNAME"; then
         if [ -n "$TARGET_SLOT" ]; then
             REMAP_LP_NAME="${{PNAME}}${{TARGET_SLOT}}"
         else
             REMAP_LP_NAME="$PNAME"
         fi
-        ui_print "  Re-mapping $REMAP_LP_NAME (refresh dm-linear)..."
         lptools unmap "$REMAP_LP_NAME" >/dev/null 2>&1
         lptools map "$REMAP_LP_NAME" >/dev/null 2>&1
         REMAP_RC=$?
         if [ $REMAP_RC -ne 0 ]; then
             ui_print "  ! warning: post-flash re-map failed for $REMAP_LP_NAME (rc=$REMAP_RC)"
-            ui_print "  ! The data was written, but dm-linear may show stale metadata."
-            ui_print "  ! A reboot should still apply the new data."
+            ui_print "  ! Data was written + sync'd — re-map is defensive only."
         fi
     fi
     ui_print ""
@@ -3346,6 +3385,67 @@ mod tests {
         assert!(
             script.contains("lptools map \"$rname_lp\" >/dev/null 2>&1 || true"),
             "Cleanup: re-map after resize missing"
+        );
+    }
+
+    /// Verify optimization changes:
+    /// 1. unmount_partition function is split from unmount_and_unmap_partition
+    /// 2. twrp unmount fallback is present
+    /// 3. head -c $PCSIZE strips trailing padding (fixes gzip "trailing junk")
+    /// 4. verify_block uses ${i} not ${{i}} (format!() escaping bug fixed)
+    /// 5. Post-flash re-map is silent on success
+    #[test]
+    fn test_optimization_changes() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1127219200,
+            hash_hex: "a".repeat(64),
+            comp_size: 350224384,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // 1. unmount_partition function is defined (split from unmount_and_unmap)
+        assert!(
+            script.contains("unmount_partition()"),
+            "Optimize: unmount_partition function not defined"
+        );
+
+        // 2. twrp unmount fallback is present
+        assert!(
+            script.contains("twrp unmount"),
+            "Optimize: twrp unmount fallback missing"
+        );
+
+        // 3. head -c $PCSIZE strips trailing padding
+        assert!(
+            script.contains("head -c \"$PCSIZE\""),
+            "Optimize: head -c $PCSIZE missing from flash pipeline"
+        );
+
+        // 4. verify_block uses ${i} (not ${{i}} — that was a format!() escaping bug)
+        // The verify_block is a raw string assigned to a variable, so it should
+        // contain literal ${i}, not ${{i}}.
+        assert!(
+            script.contains("verify_${i}.fifo"),
+            "Optimize: verify_block should use ${{i}} (not ${{{i}}})"
+        );
+        assert!(
+            !script.contains("verify_${{i}}.fifo"),
+            "Optimize: verify_block still has ${{{i}}} (format!() escaping bug)"
+        );
+
+        // 5. Post-flash re-map is silent on success (no "Re-mapping" ui_print)
+        assert!(
+            !script.contains("Re-mapping $REMAP_LP_NAME"),
+            "Optimize: post-flash re-map should be silent (remove 'Re-mapping' ui_print)"
+        );
+
+        // 6. Resize step uses unmount_partition (not unmount_and_unmap_partition)
+        assert!(
+            script.contains("unmount_partition \"$pname\" || true"),
+            "Optimize: resize step should use unmount_partition (not unmount_and_unmap_partition)"
         );
     }
 }
