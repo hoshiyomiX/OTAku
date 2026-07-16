@@ -150,6 +150,11 @@ struct PartitionMeta {
     hash_hex: String,
     comp_size: u64,
     data_offset: u64,
+    /// SHA-256 of the COMPRESSED partition data (not the uncompressed data).
+    /// Used for pre-flash integrity verification to catch corrupt bundles
+    /// before any block device is touched. Empty string for bundles built
+    /// with older OTAku versions (flash script skips the check when empty).
+    comp_hash_hex: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -237,8 +242,10 @@ fn build_update_script(
              PART_{}_UNC_SIZE=\"{}\"\n\
              PART_{}_HASH=\"{}\"\n\
              PART_{}_COMP_SIZE=\"{}\"\n\
-             PART_{}_DATA_OFFSET=\"{}\"\n",
-            i, p.name, i, p.unc_size, i, p.hash_hex, i, p.comp_size, i, p.data_offset
+             PART_{}_DATA_OFFSET=\"{}\"\n\
+             PART_{}_COMP_HASH=\"{}\"\n",
+            i, p.name, i, p.unc_size, i, p.hash_hex, i, p.comp_size, i, p.data_offset,
+            i, p.comp_hash_hex
         ));
     }
 
@@ -635,28 +642,49 @@ ZIP_LIST_OK=0
 # Try system unzip first, then busybox, then toybox.
 # `unzip -l` output is parsed by looking for a line whose last token is "otaku.bin".
 # The first numeric token on that line is the uncompressed size in bytes.
-# Use a single robust regex: ^[0-9]+ otaku\.bin$
-# (no leading space — `awk '{{print $1, $NF}}'` outputs "$1 $NF" with single space,
-# not " $1 $NF"). The previous `^ [0-9]*` pattern required a leading space and
-# never matched, so the whole ZIP listing check was silently skipped.
-# `[0-9]+` instead of `[0-9]*` to reject empty size (malformed line).
-ZIP_LIST_REGEX='^[0-9]+ otaku\.bin$'
+#
+# Bug fix: the previous regex `^[0-9]+ otaku\.bin$` failed on some recoveries
+# because:
+#   1. busybox grep might not handle `\.` in basic regex correctly
+#   2. Some unzip -l outputs have extra trailing whitespace or CR characters
+#   3. The `awk '{{print $1, $NF}}'` output might have inconsistent spacing
+#
+# New approach: use `grep 'otaku[.]bin$'` (portable literal dot — works in
+# both basic and extended regex), then extract the first field. Validate
+# that the result is a positive integer before accepting it.
+#
+# Using `[.]` instead of `\.` is more portable across busybox/grep variants.
+# Trailing `\r` (from Windows-line-ending unzip outputs) is stripped with tr.
+ZIP_LIST_NAME_PATTERN='otaku[.]bin$'
+
+# Helper: try to get otaku.bin size from a given unzip variant
+# Sets EXPECTED_BUNDLE_SIZE and returns 0 on success, 1 on failure
+try_zip_listing() {{
+    local unzip_cmd="$1"
+    local listing
+    listing=$($unzip_cmd -l "$ZIPFILE" 2>/dev/null | tr -d '\r' | awk '{{print $1, $NF}}' | grep "$ZIP_LIST_NAME_PATTERN")
+    [ -z "$listing" ] && return 1
+    EXPECTED_BUNDLE_SIZE=$(echo "$listing" | awk '{{print $1}}' | tr -d ' ')
+    # Validate: must be a positive integer
+    case "$EXPECTED_BUNDLE_SIZE" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$EXPECTED_BUNDLE_SIZE" -gt 0 ] 2>/dev/null || return 1
+    return 0
+}}
 
 if which unzip >/dev/null 2>&1; then
-    if unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q "$ZIP_LIST_REGEX"; then
-        EXPECTED_BUNDLE_SIZE=$(unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep 'otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
+    if try_zip_listing "unzip"; then
         ZIP_LIST_OK=1
     fi
 fi
 if [ "$ZIP_LIST_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
-    if busybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q "$ZIP_LIST_REGEX"; then
-        EXPECTED_BUNDLE_SIZE=$(busybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep 'otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
+    if try_zip_listing "busybox unzip"; then
         ZIP_LIST_OK=1
     fi
 fi
 if [ "$ZIP_LIST_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
-    if toybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep -q "$ZIP_LIST_REGEX"; then
-        EXPECTED_BUNDLE_SIZE=$(toybox unzip -l "$ZIPFILE" 2>/dev/null | awk '{{print $1, $NF}}' | grep 'otaku\.bin$' | awk '{{print $1}}' | tr -d ' ')
+    if try_zip_listing "toybox unzip"; then
         ZIP_LIST_OK=1
     fi
 fi
@@ -1503,6 +1531,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     eval "PHASH=\$PART_${{i}}_HASH"
     eval "PCSIZE=\$PART_${{i}}_COMP_SIZE"
     eval "POFFSET=\$PART_${{i}}_DATA_OFFSET"
+    eval "PCOMP_HASH=\$PART_${{i}}_COMP_HASH"
 
     STEP_NUM=$(( i + {flash_step_offset} ))
 
@@ -1536,6 +1565,48 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
     SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
     READ_COUNT=$(( (PCSIZE + 4095) / 4096 ))
+
+    # ── Pre-flash compressed-data hash verification ──
+    # Compute SHA-256 of the compressed partition data and compare to the
+    # expected hash stored in PART_i_COMP_HASH. This catches bundle
+    # corruption (MTP transfer errors, tmpfs issues, ZIP CRC errors) BEFORE
+    # we touch any block device — preventing partial writes that would
+    # leave the partition in a broken state.
+    #
+    # We use `head -c $PCSIZE` to hash EXACTLY PCSIZE bytes (not the
+    # aligned read count, which includes trailing zero padding that would
+    # change the hash).
+    #
+    # Backward compat: old bundles built before this feature don't have
+    # PART_i_COMP_HASH (empty string) — skip the check.
+    if [ -n "$PCOMP_HASH" ]; then
+        ui_print "  Verifying compressed data integrity..."
+        COMP_HASH_ACTUAL=$(dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+            head -c "$PCSIZE" 2>/dev/null | sha256sum 2>/dev/null | awk '{{print $1}}')
+        if [ -z "$COMP_HASH_ACTUAL" ]; then
+            ui_print "! ABORT: Cannot compute compressed data hash for $PNAME"
+            ui_print "!  Bundle may be unreadable or sha256sum not available."
+            ui_print "!  Bundle size: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes"
+            ui_print "!  Extract skip: $EXTRACT_SKIP bytes ($SKIP_BLOCKS blocks)"
+            ui_print "!  Read count: $READ_COUNT blocks ($(( READ_COUNT * 4096 )) bytes)"
+            ui_print "!  Expected compressed size: $PCSIZE bytes"
+            exit 1
+        fi
+        if [ "$COMP_HASH_ACTUAL" != "$PCOMP_HASH" ]; then
+            ui_print "! ABORT: Compressed data hash mismatch for $PNAME"
+            ui_print "!  Expected: $PCOMP_HASH"
+            ui_print "!  Actual:   $COMP_HASH_ACTUAL"
+            ui_print "!  The bundle is CORRUPT — compressed data does not match."
+            ui_print "!  Likely causes:"
+            ui_print "!    - ZIP corrupted during transfer (MTP/ADB corruption)"
+            ui_print "!    - tmpfs full during extraction"
+            ui_print "!    - Storage I/O error"
+            ui_print "!  Rebuild the bundle and re-transfer to device."
+            ui_print "!  Bundle size: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes"
+            exit 1
+        fi
+        ui_print "  ✓ Compressed data hash verified [OK]"
+    fi
 
     # Verify block device exists and is writable before flashing.
     # After lptools resize + remap, the dm device may take a moment to
@@ -1572,8 +1643,17 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 
     if [ "$FIFO_OK" = "0" ]; then
         # FIFO available — pipeline via FIFO with full error capture
+        #
+        # CRITICAL: Capture gzip stderr to a temp file (NOT /dev/null).
+        # When decompression fails, the stderr message tells us WHY:
+        #   "unexpected end of file"  → truncated input
+        #   "invalid compressed data" → corrupt gzip stream
+        #   "not in gzip format"      → wrong compression / offset bug
+        # Without this, we only see "status=2" with no diagnostic info.
+        GZIP_ERR="/tmp/ddpart_${{i}}.err"
+        rm -f "$GZIP_ERR"
         dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
-            $DECOMP_CMD -d > "$TMP_FIFO" 2>/dev/null &
+            $DECOMP_CMD -d > "$TMP_FIFO" 2>"$GZIP_ERR" &
         DECOMP_PID=$!
 
         # No conv= flags — busybox dd ftruncate() on dm-linear is a false-failure
@@ -1586,40 +1666,118 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         rm -f "$TMP_FIFO"
 
         if [ $DECOMP_STATUS -ne 0 ]; then
+            # Print diagnostic info on decompression failure.
+            # This is critical for debugging — without it, we only see
+            # "status=2" with no context.
+            GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3)
+            rm -f "$GZIP_ERR"
             ui_print "! ABORT: Decompression failed for $PNAME (status=$DECOMP_STATUS)"
-            exit 1
+            ui_print "!  Decompressor: $DECOMP_CMD -d"
+            ui_print "!  GZIP error: $GZIP_ERR_MSG"
+            ui_print "!  Bundle: $BUNDLE ($(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes)"
+            ui_print "!  Extract: skip=$SKIP_BLOCKS blocks, count=$READ_COUNT blocks ($(( READ_COUNT * 4096 )) bytes)"
+            ui_print "!  Expected compressed: $PCSIZE bytes"
+            ui_print "!  Expected uncompressed: $PSIZE bytes"
+
+            # If compressed-data hash was verified above (PCOMP_HASH non-empty),
+            # the compressed data IS intact — the issue is with the decompressor
+            # itself (e.g., busybox gzip quirk). Try fallback decompressors.
+            if [ -n "$PCOMP_HASH" ]; then
+                ui_print "!  Compressed hash was verified OK — trying fallback decompressors..."
+                FALLBACK_OK=0
+                for FB_DECOMP in "gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc"; do
+                    ui_print "!  Trying: $FB_DECOMP..."
+                    TMP_FIFO2="/tmp/ddpart_${{i}}.fifo2"
+                    rm -f "$TMP_FIFO2" "$GZIP_ERR"
+                    mkfifo "$TMP_FIFO2" 2>/dev/null
+                    if [ $? -ne 0 ]; then
+                        ui_print "!    FIFO creation failed — skipping $FB_DECOMP"
+                        continue
+                    fi
+                    dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+                        $FB_DECOMP > "$TMP_FIFO2" 2>"$GZIP_ERR" &
+                    FB_PID=$!
+                    dd of="$PTARGET" bs=1048576 if="$TMP_FIFO2" 2>/dev/null
+                    FB_DD_STATUS=$?
+                    wait $FB_PID 2>/dev/null
+                    FB_DECOMP_STATUS=$?
+                    rm -f "$TMP_FIFO2"
+                    if [ $FB_DECOMP_STATUS -eq 0 ]; then
+                        ui_print "!  ✓ $FB_DECOMP succeeded!"
+                        FALLBACK_OK=1
+                        # Check dd write status
+                        if [ $FB_DD_STATUS -ne 0 ]; then
+                            WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
+                            if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
+                                ui_print "  Note: dd status=$FB_DD_STATUS (busybox ftruncate — data OK)"
+                            else
+                                ui_print "! ABORT: dd write failed in fallback (status=$FB_DD_STATUS)"
+                                rm -f "$GZIP_ERR"
+                                exit 1
+                            fi
+                        fi
+                        rm -f "$GZIP_ERR"
+                        break
+                    else
+                        FB_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -1)
+                        ui_print "!    $FB_DECOMP failed (status=$FB_DECOMP_STATUS): $FB_ERR_MSG"
+                        rm -f "$GZIP_ERR"
+                    fi
+                done
+                if [ "$FALLBACK_OK" = "1" ]; then
+                    : # Fall through to post-verify
+                else
+                    ui_print "!  All fallback decompressors failed."
+                    ui_print "!  The gzip stream may use features unsupported by this recovery."
+                    ui_print "!  Try rebuilding the bundle with --compress none or a different level."
+                    exit 1
+                fi
+            else
+                rm -f "$GZIP_ERR"
+                exit 1
+            fi
+        else
+            rm -f "$GZIP_ERR"
         fi
 
-        # busybox dd may return status=1 on block devices (ftruncate EINVAL)
-        # even when all data was written. Verify by checking partition size.
-        if [ $DD_STATUS -ne 0 ]; then
-            WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
-            if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
-                ui_print "  Note: dd reported status=$DD_STATUS (busybox ftruncate on block device — data OK)"
-            else
-                ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS, written=$WRITTEN_SIZE < expected=$PSIZE)"
-                exit 1
+        # Only check DD_STATUS if we didn't already handle it in the fallback path
+        if [ "$DECOMP_STATUS" -eq 0 ]; then
+            # busybox dd may return status=1 on block devices (ftruncate EINVAL)
+            # even when all data was written. Verify by checking partition size.
+            if [ $DD_STATUS -ne 0 ]; then
+                WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
+                if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
+                    ui_print "  Note: dd reported status=$DD_STATUS (busybox ftruncate on block device — data OK)"
+                else
+                    ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS, written=$WRITTEN_SIZE < expected=$PSIZE)"
+                    exit 1
+                fi
             fi
         fi
     else
         # FIFO not available (very rare) — fall back to direct 3-pipeline.
         # We lose decompressor error detection (sh $? = last pipe stage only),
         # but this avoids tmpfs exhaustion by never writing a temp file.
+        GZIP_ERR="/tmp/ddpart_${{i}}.err"
+        rm -f "$GZIP_ERR"
         dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
-            $DECOMP_CMD -d 2>/dev/null | \
+            $DECOMP_CMD -d 2>"$GZIP_ERR" | \
             dd of="$PTARGET" bs=1048576 2>/dev/null
         DD_STATUS=$?
 
-        # busybox dd may return status=1 on block devices (ftruncate EINVAL)
-        # even when all data was written. Verify by checking partition size.
         if [ $DD_STATUS -ne 0 ]; then
+            GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -1)
+            rm -f "$GZIP_ERR"
             WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
             if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
                 ui_print "  Note: dd reported status=$DD_STATUS (busybox ftruncate on block device — data OK)"
             else
                 ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS, written=$WRITTEN_SIZE < expected=$PSIZE)"
+                ui_print "!  Decompressor stderr: $GZIP_ERR_MSG"
                 exit 1
             fi
+        else
+            rm -f "$GZIP_ERR"
         fi
     fi
 
@@ -1978,12 +2136,24 @@ pub fn run_dd_build(
                 let comp_size = compressed.len() as u64;
                 let data_offset = tmp_file.metadata().map(|m| m.len()).unwrap_or(0) - HEADER_SIZE as u64;
 
+                // Compute SHA-256 of the COMPRESSED data for pre-flash integrity
+                // verification. This catches bundle corruption (e.g., from MTP
+                // transfer errors or tmpfs issues) BEFORE we touch any block
+                // device. The uncompressed hash (hash_hex) is used post-flash.
+                let comp_hash_hex: String = {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(&compressed);
+                    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+                };
+
                 partitions_meta.push(PartitionMeta {
                     name: name.clone(),
                     unc_size,
                     hash_hex,
                     comp_size,
                     data_offset,
+                    comp_hash_hex,
                 });
 
                 // Write compressed data directly to temp file (incremental!)
@@ -2267,11 +2437,13 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
         assert!(script.starts_with("#!/sbin/sh"));
         assert!(script.contains("PART_0_NAME=\"boot\""));
         assert!(script.contains("PART_0_HASH=\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\""));
+        assert!(script.contains("PART_0_COMP_HASH=\"testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345\""));
         assert!(script.contains("check_decompressor \"gzip\""));
         assert!(script.contains("sha256sum"));
         assert!(script.contains("VERIFIED OK"));
@@ -2286,6 +2458,7 @@ mod tests {
             hash_hex: "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567".to_string(),
             comp_size: 536870912,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", true);
         assert!(script.contains("Verification skipped"));
@@ -2301,6 +2474,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "crosshatch", false);
         assert!(script.contains("TARGET_DEVICE=\"crosshatch\""));
@@ -2315,6 +2489,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let info = build_flash_info("gzip", 16781312, 1, &meta, "crosshatch", 6, false);
         assert!(info.contains("OTAku v1.0"));
@@ -2365,6 +2540,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 536870912,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
@@ -2400,6 +2576,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
@@ -2440,6 +2617,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 536870912,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
@@ -2471,6 +2649,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 536870912,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
@@ -2500,6 +2679,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "alioth", false);
 
@@ -2537,6 +2717,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "alioth", false);
 
@@ -2573,6 +2754,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         for skip in [false, true] {
             for device in ["", "alioth"] {
@@ -2617,6 +2799,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
@@ -2679,6 +2862,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
@@ -2729,6 +2913,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
 
@@ -2764,6 +2949,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         // Without device check
         let script_no_dev = build_update_script(1, 1, "gzip", &meta, "", false);
@@ -2818,6 +3004,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
         assert!(script.contains("empty_offset"), "Bug NEW-A: empty_offset guard missing");
@@ -2832,6 +3019,7 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
         // The fix uses ${VUNC:-0} — check for the literal string in output
@@ -2846,9 +3034,130 @@ mod tests {
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 4096,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
         assert!(script.contains("HASH_SHORT"), "Bug NEW-C: HASH_SHORT variable missing");
         assert!(script.contains("printf"), "Bug NEW-C: printf fix missing");
+    }
+
+    /// Verify the new pre-flash compressed-data hash verification is present.
+    /// This catches bundle corruption (MTP transfer, tmpfs issues) BEFORE
+    /// we touch any block device.
+    #[test]
+    fn test_preflash_compressed_hash_verification() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1075,
+            hash_hex: "a".repeat(64),
+            comp_size: 334,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        // PCOMP_HASH eval is present
+        assert!(
+            script.contains("PCOMP_HASH"),
+            "PCOMP_HASH variable missing from flash step"
+        );
+        // Pre-flash hash verification block is present
+        assert!(
+            script.contains("Compressed data hash verified"),
+            "Compressed data hash verification block missing"
+        );
+        // Hash mismatch abort message is present
+        assert!(
+            script.contains("Compressed data hash mismatch"),
+            "Hash mismatch abort message missing"
+        );
+        // Uses head -c for exact byte count
+        assert!(
+            script.contains("head -c"),
+            "head -c (exact byte extraction) missing"
+        );
+    }
+
+    /// Verify the fallback decompressor and gzip stderr capture are present.
+    /// When the primary decompressor fails, the script should:
+    /// 1. Capture gzip's stderr (not suppress it)
+    /// 2. Print diagnostic info
+    /// 3. Try fallback decompressors (gzip -dc, gunzip, zcat, busybox gzip)
+    #[test]
+    fn test_fallback_decompressor_and_diagnostics() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1075,
+            hash_hex: "a".repeat(64),
+            comp_size: 334,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        // GZIP_ERR temp file is used (not 2>/dev/null on decompressor)
+        assert!(
+            script.contains("GZIP_ERR"),
+            "GZIP_ERR temp file variable missing — stderr is being suppressed"
+        );
+        // Diagnostic info on failure
+        assert!(
+            script.contains("GZIP error:"),
+            "GZIP error diagnostic message missing"
+        );
+        assert!(
+            script.contains("Bundle:"),
+            "Bundle diagnostic info missing"
+        );
+        // Fallback decompressor list
+        assert!(
+            script.contains("gzip -dc"),
+            "Fallback 'gzip -dc' missing"
+        );
+        assert!(
+            script.contains("gunzip -c"),
+            "Fallback 'gunzip -c' missing"
+        );
+        assert!(
+            script.contains("zcat"),
+            "Fallback 'zcat' missing"
+        );
+        assert!(
+            script.contains("busybox gzip -dc"),
+            "Fallback 'busybox gzip -dc' missing"
+        );
+    }
+
+    /// Verify the fixed unzip -l regex uses portable [.] instead of \.
+    /// and handles trailing CR characters.
+    #[test]
+    fn test_unzip_listing_regex_portable() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            comp_size: 16777216,
+            data_offset: 0,
+            comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        // Portable literal dot: [.] instead of \.
+        assert!(
+            script.contains("otaku[.]bin"),
+            "Portable literal dot [.] missing — still using fragile \\."
+        );
+        // CR stripping for Windows-line-ending unzip outputs
+        assert!(
+            script.contains("tr -d '\\r'"),
+            "CR stripping (tr -d \\r) missing — Windows-line-ending unzip outputs not handled"
+        );
+        // Helper function for cleaner listing logic
+        assert!(
+            script.contains("try_zip_listing"),
+            "try_zip_listing helper function missing"
+        );
+        // Numeric validation of extracted size
+        assert!(
+            script.contains("*[!0-9]*"),
+            "Numeric validation of extracted size missing"
+        );
     }
 }
