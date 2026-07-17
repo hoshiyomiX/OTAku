@@ -377,7 +377,6 @@ if [ -n "$TARGET_DEVICE" ]; then
         ui_print "  Device: $CURRENT_DEVICE [OK]"
     fi
 fi
-ui_print ""
 "#
         )
     } else {
@@ -616,9 +615,7 @@ BUNDLE="/tmp/otaku.bin"
 {part_vars}NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
 
-ui_print ""
 ui_print "  OTAku {script_version}"
-ui_print ""
 "#,
         script_version = SCRIPT_VERSION,
         header_info = header_info,
@@ -762,7 +759,6 @@ if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BU
 fi
 
 ui_print "  Extracted: $BUNDLE ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
-ui_print ""
 "#,
         extract_step = extract_step,
         total_steps = total_steps,
@@ -882,7 +878,6 @@ if [ "$VERIFY_OK" != "1" ]; then
 fi
 
 ui_print "  All $NUM_PARTS partition(s) passed structural verify."
-ui_print ""
 "#,
         verify_step = verify_step,
         total_steps = total_steps,
@@ -985,7 +980,6 @@ DATA_OFFSET=$HDR_HDR_SIZE
 
 ui_print "  Version=$HDR_VERSION Compress=$HDR_COMPRESS Parts=$HDR_NUM_PARTS"
 ui_print "  Header=$HDR_HDR_SIZE DataOffset=$DATA_OFFSET"
-ui_print ""
 "#,
         integrity_step = integrity_step,
         total_steps = total_steps,
@@ -1029,7 +1023,6 @@ case "$TARGET_SLOT" in
 esac
 
 ui_print "  Active slot: ${{TARGET_SLOT:-none (non-A/B device)}}"
-ui_print ""
 
 resolve_target() {{
     local name="$1"
@@ -1191,16 +1184,6 @@ unmount_partition() {{
             sleep 1
             umount -l "$mp" 2>/dev/null
         fi
-        # If still mounted after lazy umount, try TWRP/OrangeFox builtin.
-        # `twrp unmount <name>` handles recovery-specific mount state that
-        # regular umount can't reach (e.g. dm-verity, fuse overlays).
-        # Available in TWRP-based recoveries (TWRP, OrangeFox, RedWolf, etc.)
-        if mount 2>/dev/null | grep -q " $mp "; then
-            if command -v twrp >/dev/null 2>&1; then
-                ui_print "    trying twrp unmount $pname..."
-                twrp unmount "$pname" 2>/dev/null
-            fi
-        fi
     done
     return 0
 }}
@@ -1333,7 +1316,6 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         exit 1
     fi
 done
-ui_print ""
 "#,
         validation_step = validation_step,
         total_steps = total_steps,
@@ -1346,9 +1328,8 @@ ui_print "[Step {resize_step}/{total_steps}] Resize dynamic partitions..."
 
 if [ -z "$RESIZE_NEEDED" ]; then
     ui_print "  No dynamic partitions need resizing."
-    ui_print ""
 else
-    ui_print "  Partitions needing resize:$RESIZE_NEEDED"
+    ui_print "  Partitions needing resize: $RESIZE_NEEDED"
     ui_print "  Additional space needed: $(( RESIZE_TOTAL / 1048576 )) MB"
 
     # ── Detect lptools ──
@@ -1438,7 +1419,7 @@ else
         # The flash step no longer needs the post-resize size verification hack
         # (commit a00ff47) because size is verified here before flash begins.
         if [ -n "$RESIZE_NEEDED" ]; then
-            ui_print "  Resizing partitions:$RESIZE_NEEDED"
+            ui_print "  Resizing partitions: $RESIZE_NEEDED"
             RESIZE_OK=1
             for pname in $RESIZE_NEEDED; do
                 pname=$(echo "$pname" | tr -d ' ')
@@ -1630,7 +1611,6 @@ else
 
             ui_print "  All partitions resized and verified."
             ui_print "  Dynamic partition resize complete."
-            ui_print ""
         fi
     fi
 "#,
@@ -1793,7 +1773,10 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             # "status=2" with no context.
             GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3)
             rm -f "$GZIP_ERR"
-            ui_print "! ABORT: Decompression failed for $PNAME (status=$DECOMP_STATUS)"
+            # Use "! WARNING" (not "! ABORT") because we'll try fallback decompressors
+            # if the compressed hash was verified OK. Only say ABORT when all fallbacks
+            # fail (see bottom of this block).
+            ui_print "! WARNING: Decompression failed for $PNAME (status=$DECOMP_STATUS)"
             ui_print "!  Decompressor: $DECOMP_CMD -d"
             ui_print "!  GZIP error: $GZIP_ERR_MSG"
             ui_print "!  Bundle: $BUNDLE ($(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes)"
@@ -1934,7 +1917,6 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             ui_print "  ! Data was written + sync'd — re-map is defensive only."
         fi
     fi
-    ui_print ""
 done
 
 # Sync ALL partition writes at once (deferred from individual writes).
@@ -1973,7 +1955,6 @@ fi
 ui_print "──────────────────────────────────────────"
 ui_print " All $NUM_PARTS partition(s) flashed {verified_word} successfully!"
 ui_print "──────────────────────────────────────────"
-ui_print ""
 exit 0
 "#,
         flash_step_offset = flash_step_offset,
@@ -3390,7 +3371,8 @@ mod tests {
 
     /// Verify optimization changes:
     /// 1. unmount_partition function is split from unmount_and_unmap_partition
-    /// 2. twrp unmount fallback is present
+    /// 2. twrp unmount dead code is REMOVED (was never callable — twrp binary
+    ///    is PID 1 recovery, not in PATH for shell exec)
     /// 3. head -c $PCSIZE strips trailing padding (fixes gzip "trailing junk")
     /// 4. verify_block uses ${i} not ${{i}} (format!() escaping bug fixed)
     /// 5. Post-flash re-map is silent on success
@@ -3412,10 +3394,12 @@ mod tests {
             "Optimize: unmount_partition function not defined"
         );
 
-        // 2. twrp unmount fallback is present
+        // 2. twrp unmount dead code is REMOVED
+        // (twrp binary is PID 1 recovery, not shell-callable — command -v twrp
+        //  always returns false. Dead code removed for cleanliness.)
         assert!(
-            script.contains("twrp unmount"),
-            "Optimize: twrp unmount fallback missing"
+            !script.contains("twrp unmount"),
+            "Optimize: twrp unmount dead code should be removed"
         );
 
         // 3. head -c $PCSIZE strips trailing padding
