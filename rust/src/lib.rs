@@ -603,17 +603,32 @@ fn scan_device_partitions() -> String {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    // Physical (GPT) partitions — always in list
+    // Physical (GPT) partitions — always in list.
+    // AOSP-standard physical partitions present on virtually all Android devices.
     let mut partitions: Vec<&str> = vec![
         "boot", "dtbo", "vbmeta", "recovery",
     ];
 
-    // Android 13+: init_boot partition
+    // Transsion (Infinix/itel/Tecno) MediaTek physical partitions.
+    // These live at /dev/block/platform/bootdevice/by-name/<name>_a — NOT in
+    // /dev/block/by-name/ (which only has dynamic-partition symlinks).
+    // Source: recovery.log Infinix X695C + Transsion device trees on GitHub
+    // (e.g. github.com/twrpdtgen/android_device_infinix_Infinix-X6886).
+    //   - lk:        bootloader (MediaTek LK = Little Kernel)
+    //   - logo:      splash screen / boot logo
+    //   - spmfw:     SPM (System Power Manager) firmware
+    //   - tee:       Trusted Execution Environment (OP-TEE / Trusty)
+    //   - vendor_boot: vendor boot partition (Android 11+ GKI)
+    // Note: lk flash is HIGH RISK (hard brick if wrong image). App should
+    // show extra warning for lk, but whitelist allows it for advanced users.
+    partitions.extend(&["lk", "logo", "spmfw", "tee", "vendor_boot"]);
+
+    // Android 13+: init_boot partition (GKI ramdisk moved out of boot)
     if android_version >= 13 {
         partitions.push("init_boot");
     }
 
-    // A/B devices: no separate recovery partition
+    // A/B devices: no separate recovery partition (recovery-as-boot)
     if !slot_suffix.is_empty() {
         partitions.retain(|&p| p != "recovery");
     }

@@ -1030,9 +1030,17 @@ resolve_target() {{
     local mapper_plain="/dev/block/mapper/$name"
     local slotted="/dev/block/by-name/${{name}}${{TARGET_SLOT}}"
     local plain="/dev/block/by-name/$name"
+    # Transsion (Infinix/itel/Tecno) MediaTek devices expose PHYSICAL GPT
+    # partitions at /dev/block/platform/bootdevice/by-name/<name>_a — NOT at
+    # /dev/block/by-name/. The by-name/ dir only has symlinks for DYNAMIC
+    # partitions (in super). Physical partitions (lk, logo, spmfw, tee, boot,
+    # dtbo, vbmeta, vendor_boot) need platform/bootdevice/ path resolution.
+    # Source: recovery.log lines 1036-1380 (Infinix X695C Transsion device).
+    local bootdev_slotted="/dev/block/platform/bootdevice/by-name/${{name}}${{TARGET_SLOT}}"
+    local bootdev_plain="/dev/block/platform/bootdevice/by-name/$name"
 
     # No slot detected — non-A/B device.
-    # Prefer mapper path, then by-name path.
+    # Check mapper/ first (dynamic), then by-name/, then platform/bootdevice/.
     if [ -z "$TARGET_SLOT" ]; then
         if [ -e "$mapper_plain" ]; then
             echo "$mapper_plain"
@@ -1042,6 +1050,10 @@ resolve_target() {{
             echo "$plain"
             return
         fi
+        if [ -e "$bootdev_plain" ]; then
+            echo "$bootdev_plain"
+            return
+        fi
         echo "$plain"
         return
     fi
@@ -1049,29 +1061,28 @@ resolve_target() {{
     # ── A/B device: check paths in priority order ──
     #
     # Priority 1: /dev/block/mapper/${{name}}${{TARGET_SLOT}}
-    #   This is the REAL dm-linear device created by lptools map.
-    #   Recovery's own partition table uses this path (e.g. line 1393 in
-    #   recovery.log: "/vendor_image | /dev/block/mapper/vendor_a").
-    #   This path is ALWAYS fresh after lptools operations — lptools map
-    #   creates the dm device here directly.
+    #   DYNAMIC partitions in super (system, vendor, product, etc.)
+    #   Created by lptools map. Always fresh after lptools operations.
     #
     # Priority 2: /dev/block/mapper/$name (no slot suffix)
     #   Some devices expose plain mapper names for slot-suffixed partitions.
     #
     # Priority 3: /dev/block/by-name/${{name}}${{TARGET_SLOT}}
-    #   Slotted by-name symlink (e.g. boot_b, dtbo_b). Created by recovery
-    #   at boot for physical partitions. May be STALE for dynamic partitions
-    #   after lptools remove/create (symlink not refreshed).
+    #   Slotted by-name symlink. Recovery creates this at boot for DYNAMIC
+    #   partitions (e.g. /dev/block/by-name/system → /dev/block/dm-3).
+    #   May be STALE for dynamic partitions after lptools remove/create.
     #
     # Priority 4: /dev/block/by-name/$name (plain)
-    #   Non-slotted by-name symlink. Same staleness risk as #3.
+    #   Non-slotted by-name symlink.
     #
-    # Why mapper/ first:
-    #   When lptools remove + create is used (fallback path), the old dm
-    #   device is destroyed AND its by-name symlink becomes dangling. The
-    #   new dm device exists at /dev/block/mapper/ but the by-name symlink
-    #   is NOT recreated until recovery re-runs its boot-time symlink logic.
-    #   Checking mapper/ first avoids this staleness.
+    # Priority 5: /dev/block/platform/bootdevice/by-name/${{name}}${{TARGET_SLOT}}
+    #   PHYSICAL GPT partitions on Transsion MediaTek devices.
+    #   Examples: lk_a, logo_a, spmfw_a, tee_a, boot_a, dtbo_a, vbmeta_a,
+    #   vbmeta_system_a, vbmeta_vendor_a, vendor_boot_a.
+    #   These are NOT in /dev/block/by-name/ — only in platform/bootdevice/.
+    #
+    # Priority 6: /dev/block/platform/bootdevice/by-name/$name (plain)
+    #   Non-slotted physical partition (e.g. for non-A/B devices).
     if [ -e "$mapper_slotted" ]; then
         echo "$mapper_slotted"
         return
@@ -1088,10 +1099,18 @@ resolve_target() {{
         echo "$plain"
         return
     fi
+    if [ -e "$bootdev_slotted" ]; then
+        echo "$bootdev_slotted"
+        return
+    fi
+    if [ -e "$bootdev_plain" ]; then
+        echo "$bootdev_plain"
+        return
+    fi
 
-    # None exists yet — return mapper_slotted as best guess (it's the path
-    # lptools will create). validate_target() will produce a clear error
-    # if still missing after the wait/retry loop.
+    # None exists yet — return mapper_slotted as best guess for dynamic
+    # partitions (lptools will create it). For physical partitions, this
+    # will fail validation with a clear "not found" error.
     echo "$mapper_slotted"
 }}
 "#,
@@ -3430,6 +3449,54 @@ mod tests {
         assert!(
             script.contains("unmount_partition \"$pname\" || true"),
             "Optimize: resize step should use unmount_partition (not unmount_and_unmap_partition)"
+        );
+    }
+
+    /// Verify Transsion (Infinix/itel/Tecno) physical partition support:
+    /// 1. resolve_target checks /dev/block/platform/bootdevice/by-name/ (Priority 5+6)
+    /// 2. bootdev_slotted + bootdev_plain variables defined
+    /// 3. Transsion physical partitions can be resolved (lk, logo, spmfw, tee, vendor_boot)
+    #[test]
+    fn test_transsion_physical_partition_support() {
+        let meta = vec![PartitionMeta {
+            name: "lk".to_string(),
+            unc_size: 2097152,  // 2 MB
+            hash_hex: "a".repeat(64),
+            comp_size: 1048576,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // 1. /dev/block/platform/bootdevice/by-name/ path resolution
+        assert!(
+            script.contains("/dev/block/platform/bootdevice/by-name/"),
+            "Transsion: /dev/block/platform/bootdevice/by-name/ path missing from resolve_target"
+        );
+
+        // 2. bootdev_slotted + bootdev_plain variables
+        assert!(
+            script.contains("bootdev_slotted"),
+            "Transsion: bootdev_slotted variable missing from resolve_target"
+        );
+        assert!(
+            script.contains("bootdev_plain"),
+            "Transsion: bootdev_plain variable missing from resolve_target"
+        );
+
+        // 3. Priority 5 comment (Transsion physical GPT)
+        assert!(
+            script.contains("PHYSICAL GPT partitions on Transsion"),
+            "Transsion: Priority 5 comment for physical GPT missing"
+        );
+
+        // 4. bootdev paths checked AFTER by-name paths (priority order)
+        // Priority 5 (bootdev_slotted) must come AFTER Priority 4 (plain by-name)
+        let bootdev_pos = script.find("if [ -e \"$bootdev_slotted\" ]").unwrap_or(usize::MAX);
+        let plain_pos = script.find("if [ -e \"$plain\" ]").unwrap_or(usize::MAX);
+        assert!(
+            plain_pos < bootdev_pos,
+            "Transsion: bootdev paths must be checked AFTER by-name paths (priority order)"
         );
     }
 }
