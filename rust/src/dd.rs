@@ -1258,6 +1258,39 @@ validate_target() {{
         is_dynamic=1
     fi
 
+    # ── Auto-map unmapped dynamic partitions ──
+    # After operations like Format Data, recovery runs Unmap_Super_Devices which
+    # destroys dm-linear devices (e.g. system_b, vendor_b, product_b). Recovery
+    # does NOT re-map them automatically — the flasher script must do it.
+    #
+    # Symptom (recovery.log CRC32 0x57923752, Itel S666LN):
+    #   I:removing dynamic partition: system_b   ← Format Data destroyed it
+    #   ... (sideload OTAku) ...
+    #   ! ABORT: /dev/block/mapper/system_b not found for partition 'system'
+    #
+    # Fix: if target doesn't exist AND it's a dynamic partition AND lptools is
+    # available, call `lptools map $LP_NAME` to re-create the dm-linear device.
+    # Then re-resolve the target path. If still missing, fall through to the
+    # existing ABORT logic.
+    if [ ! -e "$target" ] && [ "$is_dynamic" = "1" ]; then
+        local lp_name="$name"
+        if [ -n "$TARGET_SLOT" ]; then
+            lp_name="${{name}}${{TARGET_SLOT}}"
+        fi
+        if command -v lptools >/dev/null 2>&1; then
+            ui_print "  $name not mapped (unmapped after Format Data?) — trying lptools map $lp_name..."
+            lptools map "$lp_name" >/dev/null 2>&1
+            local map_rc=$?
+            if [ $map_rc -eq 0 ]; then
+                # Re-resolve target after successful map
+                target=$(resolve_target "$name")
+                ui_print "  ✓ lptools map $lp_name succeeded — partition now at $target"
+            else
+                ui_print "  ! lptools map $lp_name failed (rc=$map_rc) — partition may not exist in super metadata"
+            fi
+        fi
+    fi
+
     if [ ! -e "$target" ]; then
         ui_print "! ABORT: $target not found for partition '$name'"
         return 1
@@ -3497,6 +3530,75 @@ mod tests {
         assert!(
             plain_pos < bootdev_pos,
             "Transsion: bootdev paths must be checked AFTER by-name paths (priority order)"
+        );
+    }
+
+    /// Verify auto-map fix for unmapped dynamic partitions (Format Data recovery).
+    ///
+    /// Root cause (recovery.log CRC32 0x57923752, Itel S666LN):
+    ///   User did Format Data → recovery Unmap_Super_Devices destroyed system_b
+    ///   → OTAku validate_target found /dev/block/mapper/system_b missing → ABORT
+    ///
+    /// Fix: validate_target now calls `lptools map $LP_NAME` when target doesn't
+    ///      exist AND it's a dynamic partition, before falling through to ABORT.
+    #[test]
+    fn test_auto_map_unmapped_dynamic_partition() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 5013785600,  // 4788 MB
+            hash_hex: "a".repeat(64),
+            comp_size: 4158234112,  // 3965 MB
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // 1. Auto-map comment present (references Format Data / Unmap_Super_Devices)
+        assert!(
+            script.contains("Auto-map unmapped dynamic partitions"),
+            "Auto-map: comment block missing from validate_target"
+        );
+
+        // 2. Auto-map trigger condition: target missing + is_dynamic + lptools available
+        assert!(
+            script.contains("if [ ! -e \"$target\" ] && [ \"$is_dynamic\" = \"1\" ]"),
+            "Auto-map: trigger condition (target missing + is_dynamic) missing"
+        );
+
+        // 3. lptools map call present
+        assert!(
+            script.contains("lptools map \"$lp_name\""),
+            "Auto-map: 'lptools map $lp_name' call missing"
+        );
+
+        // 4. Slot-suffixed LP_NAME construction
+        assert!(
+            script.contains("lp_name=\"${{name}}${{TARGET_SLOT}}\""),
+            "Auto-map: slot-suffixed lp_name construction missing"
+        );
+
+        // 5. Re-resolve target after successful map
+        assert!(
+            script.contains("target=$(resolve_target \"$name\")"),
+            "Auto-map: re-resolve target after map missing"
+        );
+
+        // 6. Success message
+        assert!(
+            script.contains("lptools map $lp_name succeeded"),
+            "Auto-map: success ui_print message missing"
+        );
+
+        // 7. Failure message (lptools map failed)
+        assert!(
+            script.contains("lptools map $lp_name failed"),
+            "Auto-map: failure ui_print message missing"
+        );
+
+        // 8. Reference to Format Data (root cause documentation in code)
+        assert!(
+            script.contains("Format Data"),
+            "Auto-map: Format Data reference (root cause doc) missing"
         );
     }
 }
