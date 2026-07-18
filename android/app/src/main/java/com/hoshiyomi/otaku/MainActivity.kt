@@ -67,7 +67,11 @@ class MainActivity : AppCompatActivity() {
     companion object {
         // Application-scoped coroutine scope for long-running build operations.
         // Survives Activity destruction when the user minimizes the app.
-        private val buildScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        // Uses Dispatchers.Default (CPU-bound) instead of Main.immediate to
+        // prevent UI thread blocking during progress callbacks and notification
+        // updates — critical for floating window mode where UI thread is shared
+        // between smaller rendering area and progress updates.
+        private val buildScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
         // Partition image list — moved to companion so it survives Activity recreation
         // (theme switch via AppCompatDelegate.setDefaultNightMode triggers recreation
@@ -124,7 +128,17 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var lastNotifPercent: Int = -1
 
         // Persisted log text (survives Activity recreation)
+        // Truncated to MAX_LOG_BYTES to prevent OOM during long builds in
+        // floating window mode (rapid onResume/onPause cycles cause full
+        // StringBuffer.toString() copies — unbounded growth = OOM crash).
         @Volatile private var savedLogText: StringBuffer = StringBuffer()
+        private const val MAX_LOG_BYTES = 51200  // 50 KB — ~500 lines of progress output
+        private fun appendToSavedLog(line: String) {
+            savedLogText.append(line)
+            if (savedLogText.length > MAX_LOG_BYTES) {
+                savedLogText.delete(0, savedLogText.length - MAX_LOG_BYTES)
+            }
+        }
 
         // Heartbeat: last time a progress update was received (epoch millis)
         @Volatile private var lastProgressTime: Long = 0L
@@ -268,10 +282,10 @@ class MainActivity : AppCompatActivity() {
                     else "${result.durationMs / 60000}m ${result.durationMs % 60000 / 1000}s"
                 showProgressNotification("Build complete!", 100)
                 showCompletionNotification(true, "Finished in $duration")
-                savedLogText.append("\n═══ Build complete ═══\n")
+                appendToSavedLog("\n═══ Build complete ═══\n")
             } else {
                 showCompletionNotification(false, result.error ?: "Unknown error")
-                savedLogText.append("\n[ERROR] ${result.error ?: "Unknown error"}\n")
+                appendToSavedLog("\n[ERROR] ${result.error ?: "Unknown error"}\n")
             }
 
             // Mark all partition progress as complete (companion state)
@@ -869,7 +883,7 @@ class MainActivity : AppCompatActivity() {
             // then refresh the TextView to match.
             val initBanner = buildInitBanner()
             savedLogText.setLength(0)
-            savedLogText.append(initBanner)
+            appendToSavedLog(initBanner)
             findViewById<android.widget.TextView>(R.id.textViewLog).text = initBanner
         }
 
@@ -2233,8 +2247,9 @@ class MainActivity : AppCompatActivity() {
 
                 // Start heartbeat coroutine — fallback that shows elapsed time
                 // when no progress sidecar file is available yet (first few seconds)
+                // Uses buildScope (not standalone CoroutineScope) to prevent orphan.
                 val buildStartTime = System.currentTimeMillis()
-                val heartbeatJob = CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                val heartbeatJob = buildScope.launch {
                     delay(15_000) // Wait 15s before activating heartbeat fallback
                     while (isActive) {
                         // Only show heartbeat if no real progress has arrived
@@ -2331,7 +2346,7 @@ class MainActivity : AppCompatActivity() {
                                     progress.message
                                 }
                                 val line = if (logMsg.endsWith("\n")) logMsg else "$logMsg\n"
-                                savedLogText.append(line)  // always persist
+                                appendToSavedLog(line)  // always persist
                                 line
                             } else {
                                 null
@@ -2369,7 +2384,7 @@ class MainActivity : AppCompatActivity() {
                             // Previously this was inside the activityRef gate, so log lines were lost
                             // when the app was backgrounded during the build.
                             val logLine = if (line.endsWith("\n")) line else "$line\n"
-                            savedLogText.append(logLine)
+                            appendToSavedLog(logLine)
 
                             // UI update only if Activity is alive (bypass showLog to avoid double-persist)
                             val current = activityRef?.get()
@@ -2767,6 +2782,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Handle floating window resize / multi-window mode / theme change
+        // without Activity recreation. This prevents memory spikes from
+        // savedLogText.toString() full copy that would occur on recreate.
+        // Re-layout progress bars if a build is in progress.
+        if (isBuilding && imageFiles.isNotEmpty()) {
+            setupSplitProgressBar(imageFiles.map { it.first })
+        }
+        // Scroll log to bottom (layout may have shifted)
+        val scrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
+        scrollView?.post {
+            val child = scrollView.getChildAt(0)
+            if (child != null) {
+                val target = child.bottom - scrollView.height
+                scrollView.smoothScrollTo(0, if (target > 0) target else 0)
+            }
+        }
+    }
+
     override fun onPause() {
         super.onPause()
         activityRef = null
@@ -2937,7 +2972,7 @@ class MainActivity : AppCompatActivity() {
     private fun showLog(text: String, level: LogLevel = LogLevel.INFO) {
         val line = if (text.endsWith("\n")) text else "$text\n"
         // Persist to companion object (survives Activity recreation)
-        savedLogText.append(line)
+        appendToSavedLog(line)
 
         runOnUiThread {
             appendLogLineUI(line, level)

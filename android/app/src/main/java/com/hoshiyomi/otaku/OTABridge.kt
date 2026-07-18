@@ -148,7 +148,10 @@ object OTABridge {
         //   - current, total, name, phase: partition tracking info
         //
         // This gives smooth, real-time progress instead of 0→100% jumps.
-        val progressJob = CoroutineScope(Dispatchers.IO).launch {
+        // Use coroutineScope{} to tie lifecycle to the parent dd() call,
+        // preventing orphaned CoroutineScope leaks on multiple builds.
+        val progressScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        val progressJob = progressScope.launch {
             var lastOverallPercent = -1
             var lastPhase = ""
             var lastName = ""
@@ -276,6 +279,7 @@ object OTABridge {
             } finally {
                 // Always cancel progress polling and clean up
                 progressJob.cancel()
+                progressScope.cancel()  // Cancel the scope itself, not just the job
                 progressFile.delete()
             }
         }

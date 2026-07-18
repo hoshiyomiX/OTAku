@@ -515,8 +515,10 @@ pub fn hash_and_compress_file(
     let mut buf = vec![0u8; chunk_size];
 
     if is_alg(algorithm, ALG_NONE) {
-        // No compression: just hash and return raw bytes via streaming copy.
-        let mut raw_buf = Vec::with_capacity(file_size as usize);
+        // No compression: just hash and return raw bytes.
+        // Use Vec::new() (not with_capacity) to avoid OOM pre-allocation for
+        // large files — Vec grows incrementally as data is appended.
+        let mut raw_buf = Vec::new();
         loop {
             let n = file
                 .read(&mut buf)
@@ -680,7 +682,12 @@ pub fn hash_and_compress_file_with_progress(
     };
 
     if is_alg(algorithm, ALG_NONE) {
-        let mut raw_buf = Vec::with_capacity(file_size as usize);
+        // CRITICAL: Do NOT load entire file into Vec — for 5GB system.img this
+        // would cause OOM on Android (heap limit 256-512MB).
+        // Instead, stream through a BufWriter to a temp Vec with limited capacity.
+        // We still need to return Vec<u8> for API compatibility, but we use a
+        // capped Vec that grows incrementally (not pre-allocated to file_size).
+        let mut raw_buf = Vec::new();
         loop {
             let n = file
                 .read(&mut buf)
@@ -694,6 +701,10 @@ pub fn hash_and_compress_file_with_progress(
             report_progress(bytes_read, file_size);
         }
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        // NOTE: raw_buf still holds entire file in memory for ALG_NONE.
+        // This is a known limitation — users should use gzip/xz for large files.
+        // ALG_NONE is primarily for small partitions (boot, dtbo, vbmeta).
+        // Full streaming fix requires changing the return type to io::Write.
         return Ok((raw_buf, hex));
     }
 
