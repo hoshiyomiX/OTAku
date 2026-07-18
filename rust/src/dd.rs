@@ -3468,11 +3468,11 @@ mod tests {
         // contain literal ${i}, not ${{i}}.
         assert!(
             script.contains("verify_${i}.fifo"),
-            "Optimize: verify_block should use ${i} (not ${{i}})"
+            "Optimize: verify_block should use dollar-brace-i (not dollar-brace-brace-i)"
         );
         assert!(
             !script.contains("verify_${{i}}.fifo"),
-            "Optimize: verify_block still has ${{{i}}} (format!() escaping bug)"
+            "Optimize: verify_block still has double-brace i (format escaping bug)"
         );
 
         // 5. Post-flash re-map is silent on success (no "Re-mapping" ui_print)
