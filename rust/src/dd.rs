@@ -211,8 +211,9 @@ fn build_header(compress_id: u16, num_parts: u16) -> Vec<u8> {
 //  Update-binary script builder
 // ---------------------------------------------------------------------------
 
-/// Slant ASCII art banner for the flasher script.
-const SCRIPT_VERSION: &str = "v3";
+/// Flasher script version/branding string.
+/// Displayed in the update-binary header and flash_info.txt.
+const SCRIPT_VERSION: &str = "Custom Payload Maker";
 
 /// Build the META-INF/com/google/android/update-binary shell script.
 ///
@@ -374,7 +375,7 @@ if [ -n "$TARGET_DEVICE" ]; then
         fi
         ui_print "  User confirmed — continuing despite device mismatch."
     else
-        ui_print "  Device: $CURRENT_DEVICE [OK]"
+        ui_print "  ✓ Device: $CURRENT_DEVICE"
     fi
 fi
 "#
@@ -424,7 +425,7 @@ fi
 "#
         .to_string()
     } else {
-        r#"ui_print "  Verifying $PNAME (fast 1MB-block hash)..."
+        r#"ui_print "  Verifying ($PNAME)..."
 VERIFY_HASH=""
 
 # Fast path: large block size + background sha256sum via FIFO.
@@ -483,7 +484,7 @@ if [ "$FAST_OK" != "1" ]; then
 fi
 
 if [ "$VERIFY_HASH" = "$PHASH" ]; then
-    ui_print "  $PNAME: VERIFIED OK"
+    ui_print "  ✓ $PNAME verified"
 else
     ui_print "! ABORT: Hash mismatch for $PNAME!"
     ui_print "  Expected: $PHASH"
@@ -537,7 +538,7 @@ cleanup_abort() {{
     CLEANUP_DONE=1
     # Only attempt cleanup if we got past the validation step
     if [ -z "$DYNAMIC_PART_NAMES" ]; then return; fi
-    ui_print "! Performing emergency cleanup..."
+    ui_print "✗ Performing emergency cleanup..."
     # Re-resize partitions back to original size (only if lptools available
     # and we actually resized something).
     # Without this, a failed flash would leave the device with oversized
@@ -602,7 +603,7 @@ cleanup_abort() {{
         done
     fi
     sync
-    ui_print "! Cleanup complete."
+    ui_print "✗ Cleanup complete"
 }}
 # Trap on EXIT (normal exit + uncaught error) AND on common signals
 # (INT = Ctrl-C / Vol-, TERM = recovery abort, HUP = controlling terminal
@@ -615,7 +616,9 @@ BUNDLE="/tmp/otaku.bin"
 {part_vars}NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
 
-ui_print "  OTAku {script_version}"
+ui_print "======================================"
+ui_print "  OTAku — {script_version}"
+ui_print "======================================"
 "#,
         script_version = SCRIPT_VERSION,
         header_info = header_info,
@@ -627,11 +630,12 @@ ui_print "  OTAku {script_version}"
     // ── Step 0: Extract otaku.bin ──
     script.push_str(&format!(
         r#"# ── Step {extract_step}/{total_steps}: Extract otaku.bin from ZIP ──────────────────
-ui_print "[Step {extract_step}/{total_steps}] Extracting otaku.bin..."
+ui_print "> Extracting payload..."
 
 rm -f "$BUNDLE"
 if [ ! -f "$ZIPFILE" ]; then
-    ui_print "! ABORT: ZIP file not found: $ZIPFILE"
+    ui_print "✗ Error: ZIP file not found"
+    ui_print "  Path: $ZIPFILE"
     exit 1
 fi
 
@@ -701,10 +705,11 @@ if [ "$ZIP_LIST_OK" = "0" ]; then
     ui_print "  Note: cannot query ZIP listing — size check will be skipped."
 elif [ -z "$EXPECTED_BUNDLE_SIZE" ] || [ "$EXPECTED_BUNDLE_SIZE" = "0" ]; then
     ui_print "  Note: otaku.bin not found in ZIP listing — possible corrupt ZIP."
-    ui_print "! ABORT: ZIP does not contain otaku.bin in its root."
+    ui_print "✗ Error: otaku.bin not found in ZIP"
+    ui_print "  Hint: Ensure ZIP contains 'otaku.bin' in its root"
     exit 1
 else
-    ui_print "  Expected otaku.bin size: $(( EXPECTED_BUNDLE_SIZE / 1048576 )) MB ($EXPECTED_BUNDLE_SIZE bytes)"
+    ui_print "  Size: $(( EXPECTED_BUNDLE_SIZE / 1048576 )) MB"
 fi
 
 EXTRACT_OK=0
@@ -719,9 +724,8 @@ if [ "$EXTRACT_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
 fi
 
 if [ "$EXTRACT_OK" = "0" ] || [ ! -f "$BUNDLE" ]; then
-    ui_print "! ABORT: Failed to extract otaku.bin from ZIP"
-    ui_print "! ZIP: $ZIPFILE"
-    ui_print "! Make sure the ZIP contains 'otaku.bin' in its root."
+    ui_print "✗ Error: Failed to extract otaku.bin"
+    ui_print "  Hint: Check /tmp free space or ZIP integrity"
     exit 1
 fi
 
@@ -732,12 +736,10 @@ BUNDLE_EXTRACT_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
 # Only check when we have a trusted expected size from the ZIP listing.
 if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
     if [ "$BUNDLE_EXTRACT_SIZE" != "$EXPECTED_BUNDLE_SIZE" ]; then
-        ui_print "! ABORT: otaku.bin size mismatch after extract!"
-        ui_print "!  Expected (ZIP listing): $EXPECTED_BUNDLE_SIZE bytes"
-        ui_print "!  Actual   (extracted)  : $BUNDLE_EXTRACT_SIZE bytes"
-        ui_print "!  Difference: $(( EXPECTED_BUNDLE_SIZE - BUNDLE_EXTRACT_SIZE )) bytes"
-        ui_print "!  Likely cause: tmpfs full, ZIP CRC error, or interrupted write."
-        ui_print "!  Free space in /tmp:"
+        ui_print "✗ Error: otaku.bin size mismatch"
+        ui_print "  Expected: $EXPECTED_BUNDLE_SIZE bytes"
+        ui_print "  Actual:   $BUNDLE_EXTRACT_SIZE bytes"
+        ui_print "  Hint: tmpfs full or ZIP CRC error"
         # df -h output format varies: coreutils has header line, busybox doesn't.
         # Try `df /tmp` (POSIX, no -h flag needed) and extract free space (column 4).
         # Some Android recoveries don't have df at all — silently skip in that case.
@@ -755,10 +757,10 @@ if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BU
         rm -f "$BUNDLE"
         exit 1
     fi
-    ui_print "  Size verified: $BUNDLE_EXTRACT_SIZE bytes [OK]"
+    ui_print "  ✓ Size verified"
 fi
 
-ui_print "  Extracted: $BUNDLE ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
+ui_print "  ✓ Extracted ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
 "#,
         extract_step = extract_step,
         total_steps = total_steps,
@@ -785,7 +787,7 @@ ui_print "  Extracted: $BUNDLE ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
     // these errors early, before any block device is touched.
     script.push_str(&format!(
         r#"# ── Step {verify_step}/{total_steps}: Pre-flash partition table verify ──────────────────
-ui_print "[Step {verify_step}/{total_steps}] Pre-flash partition table verify..."
+ui_print "> Verifying partition table..."
 
 if [ ! -f "$BUNDLE" ]; then
     ui_print "! ABORT: $BUNDLE not found"
@@ -867,7 +869,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         VERIFY_OK=0
         VERIFY_ERRORS=$(( VERIFY_ERRORS + 1 ))
     else
-        ui_print "  $VPNAME: offset=$VOFFSET comp=$(( VCOMP / 1048576 ))MB unc=$(( VUNC / 1048576 ))MB hash=$HASH_SHORT... [OK]"
+        ui_print "  ✓ $VPNAME: $(( VUNC / 1048576 )) MB"
     fi
 done
 
@@ -877,7 +879,7 @@ if [ "$VERIFY_OK" != "1" ]; then
     exit 1
 fi
 
-ui_print "  All $NUM_PARTS partition(s) passed structural verify."
+ui_print "  ✓ All $NUM_PARTS partition(s) verified"
 "#,
         verify_step = verify_step,
         total_steps = total_steps,
@@ -893,7 +895,7 @@ ui_print "  All $NUM_PARTS partition(s) passed structural verify."
     //   - Reduces step count from 8 to 7 (without device check) / 9 to 8 (with).
     script.push_str(&format!(
         r#"# ── Step {integrity_step}/{total_steps}: Bundle integrity + decompressor ──────────
-ui_print "[Step {integrity_step}/{total_steps}] Bundle integrity + decompressor availability..."
+ui_print "> Checking bundle integrity..."
 
 # ── Decompressor availability ──
 DECOMP_CMD=""
@@ -929,7 +931,7 @@ if ! check_decompressor "{decomp_cmd}"; then
     ui_print "! Recommended: --compress gzip"
     exit 1
 fi
-ui_print "  Decompressor: $DECOMP_CMD"
+ui_print "  ✓ Decompressor: $DECOMP_CMD"
 
 # ── Bundle integrity ──
 BUNDLE_SIZE=$(wc -c < "$BUNDLE")
@@ -978,8 +980,7 @@ fi
 # always 0 when HDR_HDR_SIZE == 4096). Removed for clarity.
 DATA_OFFSET=$HDR_HDR_SIZE
 
-ui_print "  Version=$HDR_VERSION Compress=$HDR_COMPRESS Parts=$HDR_NUM_PARTS"
-ui_print "  Header=$HDR_HDR_SIZE DataOffset=$DATA_OFFSET"
+ui_print "  ✓ Format: v$HDR_VERSION | Parts: $HDR_NUM_PARTS"
 "#,
         integrity_step = integrity_step,
         total_steps = total_steps,
@@ -992,7 +993,7 @@ ui_print "  Header=$HDR_HDR_SIZE DataOffset=$DATA_OFFSET"
     // ── Slot detection ──
     script.push_str(&format!(
         r#"# ── Step {slot_step}/{total_steps}: Slot detection ──────────────────────────
-ui_print "[Step {slot_step}/{total_steps}] Slot detection..."
+ui_print "> Detecting A/B slot..."
 
 TARGET_SLOT=""
 
@@ -1022,7 +1023,7 @@ case "$TARGET_SLOT" in
     *)   TARGET_SLOT="" ;;
 esac
 
-ui_print "  Active slot: ${{TARGET_SLOT:-none (non-A/B device)}}"
+ui_print "  ✓ Active slot: ${{TARGET_SLOT:-none (non-A/B device)}}"
 
 resolve_target() {{
     local name="$1"
@@ -1121,7 +1122,7 @@ resolve_target() {{
     // ── Partition validation ──
     script.push_str(&format!(
         r#"# ── Step {validation_step}/{total_steps}: Partition validation ─────────────────────
-ui_print "[Step {validation_step}/{total_steps}] Partition validation..."
+ui_print "> Validating target partitions..."
 
 # Known dynamic partition names (live inside super partition, resizable).
 # Includes AOSP-standard names plus OEM-specific dynamic partitions used by
@@ -1292,7 +1293,9 @@ validate_target() {{
     fi
 
     if [ ! -e "$target" ]; then
-        ui_print "! ABORT: $target not found for partition '$name'"
+        ui_print "✗ Error: $name partition not found"
+        ui_print "  Path: $target"
+        ui_print "  Hint: Reboot recovery after Format Data, or run 'lptools map $lp_name'"
         return 1
     fi
 
@@ -1345,7 +1348,7 @@ validate_target() {{
     if [ "$PART_SIZE" -lt "$min_size" ]; then
         if [ "$is_dynamic" = "1" ]; then
             # Dynamic partitions can be resized — defer to resize step
-            ui_print "  $name ($target): $(( PART_SIZE / 1048576 )) MB [NEEDS RESIZE: $(( PART_SIZE / 1048576 )) -> $(( min_size / 1048576 )) MB]"
+            ui_print "  ~ $name: $(( PART_SIZE / 1048576 )) MB → $(( min_size / 1048576 )) MB (resize needed)"
             RESIZE_NEEDED="${{RESIZE_NEEDED:+$RESIZE_NEEDED }}$name"
             RESIZE_TOTAL=$(( RESIZE_TOTAL + min_size - PART_SIZE ))
             return 0
@@ -1355,7 +1358,7 @@ validate_target() {{
         fi
     fi
 
-    ui_print "  $name ($target): $(( PART_SIZE / 1048576 )) MB [OK]"
+    ui_print "  ✓ $name: $(( PART_SIZE / 1048576 )) MB"
     return 0
 }}
 
@@ -1376,7 +1379,7 @@ done
     // ── Resize dynamic partitions ──
     script.push_str(&format!(
         r#"# ── Step {resize_step}/{total_steps}: Resize dynamic partitions ──────────────────
-ui_print "[Step {resize_step}/{total_steps}] Resize dynamic partitions..."
+ui_print "> Resizing dynamic partitions..."
 
 if [ -z "$RESIZE_NEEDED" ]; then
     ui_print "  No dynamic partitions need resizing."
@@ -1683,8 +1686,8 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 
     STEP_NUM=$(( i + {flash_step_offset} ))
 
-    ui_print "[Step $STEP_NUM/{total_steps}] Flashing $PNAME ($(( PSIZE / 1048576 )) MB)..."
-    ui_print "  Compressed: $(( PCSIZE / 1048576 )) MB | Offset: $POFFSET"
+    ui_print "> Flashing $PNAME ($(( PSIZE / 1048576 )) MB)..."
+    ui_print "  Compressed: $(( PCSIZE / 1048576 )) MB"
 
     PTARGET=$(resolve_target "$PNAME")
 
@@ -1753,7 +1756,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             ui_print "!  Bundle size: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes"
             exit 1
         fi
-        ui_print "  ✓ Compressed data hash verified [OK]"
+        ui_print "  ✓ Hash verified"
     fi
 
     # Verify block device exists and is writable before flashing.
@@ -1771,7 +1774,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             exit 1
         fi
     fi
-    ui_print "  Flashing $PNAME to $PTARGET..."
+    ui_print "  Writing to $PTARGET..."
 
     # Use a FIFO pipeline: extract+decompress → FIFO → dd write.
     # This avoids writing the decompressed data to a temp file in /tmp,
@@ -1828,27 +1831,24 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             # Use "! WARNING" (not "! ABORT") because we'll try fallback decompressors
             # if the compressed hash was verified OK. Only say ABORT when all fallbacks
             # fail (see bottom of this block).
-            ui_print "! WARNING: Decompression failed for $PNAME (status=$DECOMP_STATUS)"
-            ui_print "!  Decompressor: $DECOMP_CMD -d"
-            ui_print "!  GZIP error: $GZIP_ERR_MSG"
-            ui_print "!  Bundle: $BUNDLE ($(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes)"
-            ui_print "!  Extract: skip=$SKIP_BLOCKS blocks, count=$READ_COUNT blocks ($(( READ_COUNT * 4096 )) bytes)"
-            ui_print "!  Expected compressed: $PCSIZE bytes"
-            ui_print "!  Expected uncompressed: $PSIZE bytes"
+            ui_print "✗ Error: Decompression failed for $PNAME"
+            ui_print "  Decompressor: $DECOMP_CMD -d (status=$DECOMP_STATUS)"
+            ui_print "  Details: $GZIP_ERR_MSG"
+            ui_print "  Bundle: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
 
             # If compressed-data hash was verified above (PCOMP_HASH non-empty),
             # the compressed data IS intact — the issue is with the decompressor
             # itself (e.g., busybox gzip quirk). Try fallback decompressors.
             if [ -n "$PCOMP_HASH" ]; then
-                ui_print "!  Compressed hash was verified OK — trying fallback decompressors..."
+                ui_print "  → Hash OK, trying fallback decompressors..."
                 FALLBACK_OK=0
                 for FB_DECOMP in "gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc"; do
-                    ui_print "!  Trying: $FB_DECOMP..."
+                    ui_print "  → Trying: $FB_DECOMP..."
                     TMP_FIFO2="/tmp/ddpart_${{i}}.fifo2"
                     rm -f "$TMP_FIFO2" "$GZIP_ERR"
                     mkfifo "$TMP_FIFO2" 2>/dev/null
                     if [ $? -ne 0 ]; then
-                        ui_print "!    FIFO creation failed — skipping $FB_DECOMP"
+                        ui_print "    FIFO creation failed — skipping $FB_DECOMP"
                         continue
                     fi
                     dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
@@ -1861,7 +1861,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
                     FB_DECOMP_STATUS=$?
                     rm -f "$TMP_FIFO2"
                     if [ $FB_DECOMP_STATUS -eq 0 ]; then
-                        ui_print "!  ✓ $FB_DECOMP succeeded!"
+                        ui_print "  ✓ $FB_DECOMP succeeded!"
                         FALLBACK_OK=1
                         # Check dd write status
                         if [ $FB_DD_STATUS -ne 0 ]; then
@@ -1878,16 +1878,15 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
                         break
                     else
                         FB_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -1)
-                        ui_print "!    $FB_DECOMP failed (status=$FB_DECOMP_STATUS): $FB_ERR_MSG"
+                        ui_print "    $FB_DECOMP failed: $FB_ERR_MSG"
                         rm -f "$GZIP_ERR"
                     fi
                 done
                 if [ "$FALLBACK_OK" = "1" ]; then
                     : # Fall through to post-verify
                 else
-                    ui_print "!  All fallback decompressors failed."
-                    ui_print "!  The gzip stream may use features unsupported by this recovery."
-                    ui_print "!  Try rebuilding the bundle with --compress none or a different level."
+                    ui_print "✗ Error: All decompressors failed"
+                    ui_print "  Hint: Rebuild with --compress none or different level"
                     exit 1
                 fi
             else
@@ -1999,14 +1998,14 @@ if [ -n "$TARGET_SLOT" ]; then
                 fastboot set_active $SLOT_LETTER 2>/dev/null || true
         fi
     else
-        ui_print "  Active slot: $TARGET_SLOT [OK]"
+        ui_print "  ✓ Slot: $TARGET_SLOT"
     fi
 fi
 
 # ── Done ────────────────────────────────────────────────────
-ui_print "──────────────────────────────────────────"
-ui_print " All $NUM_PARTS partition(s) flashed {verified_word} successfully!"
-ui_print "──────────────────────────────────────────"
+ui_print "======================================"
+ui_print "  Flash complete — $NUM_PARTS partition(s)"
+ui_print "======================================"
 exit 0
 "#,
         flash_step_offset = flash_step_offset,
@@ -2035,7 +2034,7 @@ fn build_flash_info(
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
 
-    lines.push("OTAku v1.0 — dd-based partition flasher".to_string());
+    lines.push("OTAku — Custom Payload Maker".to_string());
     lines.push(format!(
         "Generated: {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
@@ -2630,7 +2629,7 @@ mod tests {
         assert!(script.contains("PART_0_COMP_HASH=\"testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345\""));
         assert!(script.contains("check_decompressor \"gzip\""));
         assert!(script.contains("sha256sum"));
-        assert!(script.contains("VERIFIED OK"));
+        assert!(script.contains("$PNAME verified"));
         assert!(script.contains("exit 0"));
     }
 
@@ -2676,7 +2675,7 @@ mod tests {
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let info = build_flash_info("gzip", 16781312, 1, &meta, "crosshatch", 6, false);
-        assert!(info.contains("OTAku v1.0"));
+        assert!(info.contains("OTAku — Custom Payload Maker"));
         assert!(info.contains("gzip (level 6)"));
         assert!(info.contains("crosshatch"));
         assert!(info.contains("[boot]"));
@@ -3056,10 +3055,10 @@ mod tests {
             "REGRESSION: pre-flash verify step missing (alur user step 2)"
         );
 
-        // Verify step number is 1 (after extract=0, before integrity=2)
+        // Verify step header present (refactored to section-based style)
         assert!(
-            script.contains("[Step 1/") || script.contains("[Step 1 ") || script.contains("Step 1/"),
-            "REGRESSION: pre-flash verify step not numbered as Step 1"
+            script.contains("> Verifying partition table..."),
+            "REGRESSION: pre-flash verify section header missing"
         );
 
         // All 4 checks must be present
@@ -3082,7 +3081,7 @@ mod tests {
 
         // Success message must be present
         assert!(
-            script.contains("passed structural verify"),
+            script.contains("partition(s) verified"),
             "REGRESSION: pre-flash verify success message missing"
         );
     }
@@ -3246,7 +3245,7 @@ mod tests {
         );
         // Pre-flash hash verification block is present
         assert!(
-            script.contains("Compressed data hash verified"),
+            script.contains("Hash verified"),
             "Compressed data hash verification block missing"
         );
         // Hash mismatch abort message is present
@@ -3284,7 +3283,7 @@ mod tests {
         );
         // Diagnostic info on failure
         assert!(
-            script.contains("GZIP error:"),
+            script.contains("Details:"),
             "GZIP error diagnostic message missing"
         );
         assert!(
