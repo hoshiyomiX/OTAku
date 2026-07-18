@@ -321,6 +321,8 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     output_path: JString,
     device: JString,
     skip_verify: jboolean,
+    rom_name: JString,
+    maker: JString,
 ) -> jstring {
     // Parse JNI string arguments
     let images_str: String = match env.get_string(&images_json) {
@@ -336,6 +338,14 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
         Err(_) => return make_error_json(&env, "Invalid output path"),
     };
     let device_str: String = match env.get_string(&device) {
+        Ok(s) => s.into(),
+        Err(_) => String::new(),
+    };
+    let rom_name_str: String = match env.get_string(&rom_name) {
+        Ok(s) => s.into(),
+        Err(_) => String::new(),
+    };
+    let maker_str: String = match env.get_string(&maker) {
         Ok(s) => s.into(),
         Err(_) => String::new(),
     };
@@ -363,6 +373,8 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
         &output_str,
         &device_str,
         skip_verify != 0,
+        &rom_name_str,
+        &maker_str,
     );
 
     // Serialize result to JSON

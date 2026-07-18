@@ -2265,12 +2265,18 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 try {
+                    // Read ROM name and Maker from UI inputs
+                    val romName = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextRomName)?.text?.toString()?.trim() ?: ""
+                    val maker = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextMaker)?.text?.toString()?.trim() ?: ""
+
                     val result = OTABridge.dd(
                         images = images,
                         device = deviceValue,
                         compression = selectedCompression,
                         level = selectedCompressionLevel,
                         outputPath = outPath,
+                        romName = romName,
+                        maker = maker,
                         onProgress = { progress ->
                             // Cancel heartbeat — real progress is arriving from file polling
                             heartbeatJob.cancel()

@@ -108,6 +108,8 @@ object OTABridge {
         level: Int = 0,
         skipVerify: Boolean = false,
         outputPath: String,
+        romName: String = "",
+        maker: String = "",
         onProgress: ((ProgressUpdate) -> Unit)? = null,
         onOutputLine: ((String) -> Unit)? = null
     ): OTAResult {
@@ -248,7 +250,9 @@ object OTABridge {
                     level = level,
                     outputPath = outputPath,
                     device = effectiveDevice,
-                    skipVerify = skipVerify
+                    skipVerify = skipVerify,
+                    romName = romName,
+                    maker = maker
                 )
 
                 // Emit all Rust output lines to the log

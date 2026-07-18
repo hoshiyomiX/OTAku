@@ -292,18 +292,20 @@ object NativeBridge {
         level: Int = 0,
         outputPath: String,
         device: String = "generic",
-        skipVerify: Boolean = false
+        skipVerify: Boolean = false,
+        romName: String = "",
+        maker: String = ""
     ): DdBuildResult {
         if (!isLoaded) {
             return DdBuildResult.error("Native library not loaded: $loadError")
         }
-        Log.d(TAG, "buildDd() images=${images.keys}, compression=$compression, level=$level, output=$outputPath, device=$device, skipVerify=$skipVerify")
+        Log.d(TAG, "buildDd() images=${images.keys}, compression=$compression, level=$level, output=$outputPath, device=$device, skipVerify=$skipVerify, romName=$romName, maker=$maker")
 
         return try {
             val imagesJson = JSONObject(images).toString()
             val resultJson = nativeBuildDd(
                 imagesJson, compression, level, outputPath, device,
-                skipVerify
+                skipVerify, romName, maker
             )
             val result = parseDdBuildResult(resultJson)
             Log.d(TAG, "buildDd() result: success=${result.success}, zip_path=${result.zipPath}, duration=${result.durationMs}ms")
@@ -794,7 +796,9 @@ object NativeBridge {
         level: Int,
         outputPath: String,
         device: String,
-        skipVerify: Boolean
+        skipVerify: Boolean,
+        romName: String,
+        maker: String
     ): String
 
     // Device codename detection (spoof-resistant — reads vendor partition props)

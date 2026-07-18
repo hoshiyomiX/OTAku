@@ -623,6 +623,7 @@ COMPRESS_ID={compress_id}
 
 ui_print "======================================"
 ui_print "  OTAku — {script_version}"
+ui_print "        by hoshiyomiX"
 ui_print "======================================"
 "#,
         script_version = SCRIPT_VERSION,
@@ -2035,10 +2036,20 @@ fn build_flash_info(
     device: &str,
     level: i32,
     skip_verify: bool,
+    rom_name: &str,
+    maker: &str,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     lines.push("OTAku — Custom Payload Maker".to_string());
+    lines.push("by hoshiyomiX".to_string());
+    if !rom_name.is_empty() || !maker.is_empty() {
+        lines.push(String::new());
+        let rom = if rom_name.is_empty() { "N/A" } else { rom_name };
+        let mk = if maker.is_empty() { "N/A" } else { maker };
+        lines.push(format!("ROM: {} | Maker: {}", rom, mk));
+    }
+    lines.push(String::new());
     lines.push(format!(
         "Generated: {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
@@ -2110,6 +2121,8 @@ pub fn run_dd_build(
     output_path: &str,
     device: &str,
     skip_verify: bool,
+    rom_name: &str,
+    maker: &str,
 ) -> DdBuildResult {
     let start = std::time::Instant::now();
     let mut lines: Vec<String> = Vec::new();
@@ -2432,6 +2445,8 @@ pub fn run_dd_build(
             device,
             level,
             skip_verify,
+            rom_name,
+            maker,
         );
 
         lines.push(format!(
@@ -2679,7 +2694,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let info = build_flash_info("gzip", 16781312, 1, &meta, "crosshatch", 6, false);
+        let info = build_flash_info("gzip", 16781312, 1, &meta, "crosshatch", 6, false, "TestROM", "TestMaker");
         assert!(info.contains("OTAku — Custom Payload Maker"));
         assert!(info.contains("gzip (level 6)"));
         assert!(info.contains("crosshatch"));
@@ -2690,7 +2705,7 @@ mod tests {
 
     #[test]
     fn test_run_dd_build_no_images() {
-        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false);
+        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false, "", "");
         assert!(!result.success);
         assert!(result.error.unwrap().contains("no images specified"));
     }
@@ -2704,6 +2719,8 @@ mod tests {
             "/tmp/test.zip",
             "",
             false,
+            "",
+            "",
         );
         assert!(!result.success);
         assert!(result.error.unwrap().contains("unsupported compression"));

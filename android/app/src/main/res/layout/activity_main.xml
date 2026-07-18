@@ -93,6 +93,104 @@
                         android:orientation="vertical"
                         android:padding="16dp">
 
+                        <!-- ── 0. Flashable Information ── -->
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Flashable Information"
+                            style="@style/TextAppearance.OTAku.SectionTitle"
+                            android:layout_marginBottom="4dp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="ROM name and maker (cosmetic — shown in flasher banner)"
+                            android:textSize="12sp"
+                            android:textColor="?attr/colorOnSurfaceVariant"
+                            android:layout_marginBottom="8dp" />
+
+                        <!-- ROM name + Maker (horizontal) -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:layout_marginBottom="2dp">
+
+                            <com.google.android.material.textfield.TextInputLayout
+                                android:id="@+id/layoutRomName"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:hint="ROM name"
+                                android:layout_gravity="center_vertical"
+                                app:boxBackgroundColor="?attr/colorSurface"
+                                app:boxCornerRadiusTopStart="12dp"
+                                app:boxCornerRadiusTopEnd="12dp"
+                                app:boxCornerRadiusBottomStart="12dp"
+                                app:boxCornerRadiusBottomEnd="12dp"
+                                app:boxStrokeWidth="1dp">
+
+                                <com.google.android.material.textfield.TextInputEditText
+                                    android:id="@+id/editTextRomName"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:inputType="text"
+                                    android:maxLines="1"
+                                    android:textSize="14sp"
+                                    android:gravity="center_vertical"
+                                    android:paddingTop="10dp"
+                                    android:paddingBottom="10dp" />
+
+                            </com.google.android.material.textfield.TextInputLayout>
+
+                            <com.google.android.material.textfield.TextInputLayout
+                                android:id="@+id/layoutMaker"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:hint="Maker"
+                                android:layout_gravity="center_vertical"
+                                android:layout_marginStart="8dp"
+                                app:boxBackgroundColor="?attr/colorSurface"
+                                app:boxCornerRadiusTopStart="12dp"
+                                app:boxCornerRadiusTopEnd="12dp"
+                                app:boxCornerRadiusBottomStart="12dp"
+                                app:boxCornerRadiusBottomEnd="12dp"
+                                app:boxStrokeWidth="1dp">
+
+                                <com.google.android.material.textfield.TextInputEditText
+                                    android:id="@+id/editTextMaker"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:inputType="text"
+                                    android:maxLines="1"
+                                    android:textSize="14sp"
+                                    android:gravity="center_vertical"
+                                    android:paddingTop="10dp"
+                                    android:paddingBottom="10dp" />
+
+                            </com.google.android.material.textfield.TextInputLayout>
+
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Optional — leave blank for default banner"
+                            style="@style/TextAppearance.OTAku.Micro"
+                            android:layout_marginStart="4dp"
+                            android:layout_marginBottom="4dp" />
+
+                        <!-- Divider -->
+                        <View
+                            android:layout_width="match_parent"
+                            android:layout_height="1dp"
+                            android:background="?attr/colorOutlineVariant"
+                            android:layout_marginTop="14dp"
+                            android:layout_marginBottom="14dp" />
+
                         <!-- ── 1. Device ── -->
                         <LinearLayout
                             android:layout_width="match_parent"
