@@ -263,7 +263,7 @@ jobs:
               "script_version", "header_info", "part_vars", "num_parts", "compress_id",
               "extract_step", "verify_step", "integrity_step", "slot_step",
               "validation_step", "resize_step", "flash_step_offset",
-              "num_parts_minus_1", "total_steps", "verify_block", "verified_word",
+              "num_parts_minus_1", "total_steps", "verify_block",
               "device_check_step", "device",
           ]
           missing = []
