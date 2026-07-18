@@ -446,12 +446,24 @@ if command -v sha256sum >/dev/null 2>&1; then
         sha256sum < "$VERIFY_FIFO" > "$VERIFY_HASHFILE" 2>/dev/null &
         VERIFY_PID=$!
 
-        # Read PSIZE bytes in 1MB blocks. count is computed to cover the
-        # whole partition (rounds UP to next MB, which is safe because
-        # sha256sum only hashes what it actually receives — dd will stop
-        # at end of partition anyway).
+        # Read PSIZE bytes in 1MB blocks. count rounds UP to next MB to ensure
+        # we cover the full partition, but `head -c "$PSIZE"` trims the stream
+        # to EXACTLY PSIZE bytes before it reaches sha256sum.
+        #
+        # Without head -c, if PSIZE is not 1MB-aligned (common for Android
+        # system.img — raw ext4 with arbitrary byte count), dd reads
+        # VERIFY_BLOCKS * 1MB bytes which is MORE than PSIZE. The extra bytes
+        # are OLD partition data (from previous ROM), which changes the hash
+        # and causes a FALSE-NEGATIVE hash mismatch.
+        #
+        # Evidence: recovery (1).log CRC32 0x1e7c775, Itel S666LN
+        #   ✓ Compressed data hash verified [OK]    ← bundle intact
+        #   Flashing system to ...                  ← write succeeded
+        #   ! ABORT: Hash mismatch for system!      ← false-negative
+        #     Expected: 999c8faadf98484d...         ← hash of .img (PSIZE bytes)
+        #     Got:      68ee9379004d3593...         ← hash of PSIZE + extra old data
         VERIFY_BLOCKS=$(( (PSIZE + 1048575) / 1048576 ))
-        dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | tee "$VERIFY_FIFO" >/dev/null
+        dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | head -c "$PSIZE" | tee "$VERIFY_FIFO" >/dev/null
 
         # Close FIFO and wait for hash to complete.
         rm -f "$VERIFY_FIFO"
@@ -470,17 +482,12 @@ fi
 # (possible on ancient busybox with broken bs=1M support).
 if [ "$FAST_OK" != "1" ]; then
     ui_print "  Note: fast hash unavailable — using legacy 4KB path."
-    FULL_BLOCKS=$(( PSIZE / 4096 ))
-    REMAINDER_BYTES=$(( PSIZE % 4096 ))
-
-    if [ "$REMAINDER_BYTES" -eq 0 ]; then
-        VERIFY_HASH=$(dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null | sha256sum | cut -d' ' -f1)
-    else
-        VERIFY_HASH=$(
-            dd if="$PTARGET" bs=4096 count=$FULL_BLOCKS 2>/dev/null
-            dd if="$PTARGET" bs=1 skip=$(( FULL_BLOCKS * 4096 )) count=$REMAINDER_BYTES 2>/dev/null
-        ) | sha256sum | cut -d' ' -f1
-    fi
+    # Use head -c "$PSIZE" to ensure we hash EXACTLY PSIZE bytes, same as
+    # the fast path. The old 2-dd approach (FULL_BLOCKS + REMAINDER) was
+    # correct but slower and more complex. head -c is simpler and available
+    # in busybox/toybox.
+    VERIFY_BLOCKS=$(( (PSIZE + 1048575) / 1048576 ))
+    VERIFY_HASH=$(dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | head -c "$PSIZE" | sha256sum | cut -d' ' -f1)
 fi
 
 if [ "$VERIFY_HASH" = "$PHASH" ]; then
