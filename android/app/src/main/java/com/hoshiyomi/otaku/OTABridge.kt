@@ -150,7 +150,7 @@ object OTABridge {
         // This gives smooth, real-time progress instead of 0→100% jumps.
         // Use coroutineScope{} to tie lifecycle to the parent dd() call,
         // preventing orphaned CoroutineScope leaks on multiple builds.
-        val progressScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        val progressScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
         val progressJob = progressScope.launch {
             var lastOverallPercent = -1
             var lastPhase = ""
@@ -279,7 +279,7 @@ object OTABridge {
             } finally {
                 // Always cancel progress polling and clean up
                 progressJob.cancel()
-                progressScope.cancel()  // Cancel the scope itself, not just the job
+                progressScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()  // Cancel the scope itself
                 progressFile.delete()
             }
         }
