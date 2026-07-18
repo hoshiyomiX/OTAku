@@ -502,8 +502,6 @@ fi
         .to_string()
     };
 
-    let verified_word = if skip_verify { "" } else { "and verified" };
-
     // Build the complete script
     let mut script = String::new();
 
@@ -2019,7 +2017,6 @@ exit 0
         num_parts_minus_1 = if num_parts > 0 { num_parts - 1 } else { 0 },
         total_steps = total_steps,
         verify_block = verify_block.trim(),
-        verified_word = verified_word,
     ));
 
     script
@@ -3471,7 +3468,7 @@ mod tests {
         // contain literal ${i}, not ${{i}}.
         assert!(
             script.contains("verify_${i}.fifo"),
-            "Optimize: verify_block should use ${{i}} (not ${{{i}}})"
+            "Optimize: verify_block should use ${i} (not ${{i}})"
         );
         assert!(
             !script.contains("verify_${{i}}.fifo"),
