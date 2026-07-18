@@ -2649,8 +2649,9 @@ mod tests {
         }];
         let script = build_update_script(1, 1, "gzip", &meta, "", true);
         assert!(script.contains("Verification skipped"));
-        assert!(!script.contains("sha256sum"));
-        assert!(script.contains("flashed  successfully!"));
+        // sha256sum appears in pre-flash compressed hash verification even when
+        // post-flash verify is skipped — that's expected behavior.
+        assert!(script.contains("Flash complete"));
     }
 
     #[test]
@@ -2780,14 +2781,14 @@ mod tests {
             );
         }
 
-        // Assert: fix is present (shared regex variable with no leading space).
+        // Assert: fix is present (refactored to try_zip_listing helper).
         assert!(
-            script.contains("ZIP_LIST_REGEX="),
-            "REGRESSION: ZIP_LIST_REGEX variable not defined (Bug #2)"
+            script.contains("try_zip_listing"),
+            "REGRESSION: try_zip_listing helper not defined (Bug #2 refactor)"
         );
         assert!(
-            script.contains("^[0-9]+ otaku"),
-            "REGRESSION: fixed regex pattern not found (Bug #2)"
+            script.contains("otaku[.]bin"),
+            "REGRESSION: fixed regex pattern (otaku[.]bin) not found (Bug #2)"
         );
     }
 
@@ -3383,10 +3384,8 @@ mod tests {
             script.contains("Post-flash re-map"),
             "Fix 3: post-flash re-map comment missing"
         );
-        assert!(
-            script.contains("Re-mapping $REMAP_LP_NAME"),
-            "Fix 3: re-map ui_print message missing"
-        );
+        // Post-flash re-map is silent on success (cosmetic refactor cacdf13)
+        // — only check that lptools unmap + map are present, not the ui_print
         assert!(
             script.contains("lptools unmap \"$REMAP_LP_NAME\""),
             "Fix 3: lptools unmap in post-flash re-map missing"
@@ -3575,8 +3574,9 @@ mod tests {
         );
 
         // 4. Slot-suffixed LP_NAME construction
+        // Note: script contains POST-format!() output, so single braces ${name}
         assert!(
-            script.contains("lp_name=\"${{name}}${{TARGET_SLOT}}\""),
+            script.contains("lp_name=\"${name}${TARGET_SLOT}\""),
             "Auto-map: slot-suffixed lp_name construction missing"
         );
 
