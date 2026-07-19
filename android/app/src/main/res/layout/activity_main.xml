@@ -95,9 +95,8 @@
 
                         <!-- ── 0. Flashable Information ── -->
                         <TextView
-                            android:layout_width="0dp"
+                            android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
                             android:text="Flashable Information"
                             style="@style/TextAppearance.OTAku.SectionTitle"
                             android:layout_marginBottom="4dp" />
@@ -108,23 +107,20 @@
                             android:text="ROM name and maker (cosmetic — shown in flasher banner)"
                             android:textSize="12sp"
                             android:textColor="?attr/colorOnSurfaceVariant"
-                            android:layout_marginBottom="8dp" />
+                            android:layout_marginBottom="4dp" />
 
-                        <!-- ROM name + Maker (horizontal) -->
+                        <!-- ROM name + Maker (vertical stack) -->
                         <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:orientation="horizontal"
-                            android:gravity="center_vertical"
+                            android:orientation="vertical"
                             android:layout_marginBottom="2dp">
 
                             <com.google.android.material.textfield.TextInputLayout
                                 android:id="@+id/layoutRomName"
-                                android:layout_width="0dp"
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:layout_weight="1"
                                 android:hint="ROM name"
-                                android:layout_gravity="center_vertical"
                                 app:boxBackgroundColor="?attr/colorSurface"
                                 app:boxCornerRadiusTopStart="12dp"
                                 app:boxCornerRadiusTopEnd="12dp"
@@ -147,12 +143,10 @@
 
                             <com.google.android.material.textfield.TextInputLayout
                                 android:id="@+id/layoutMaker"
-                                android:layout_width="0dp"
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:layout_weight="1"
                                 android:hint="Maker"
-                                android:layout_gravity="center_vertical"
-                                android:layout_marginStart="8dp"
+                                android:layout_marginTop="8dp"
                                 app:boxBackgroundColor="?attr/colorSurface"
                                 app:boxCornerRadiusTopStart="12dp"
                                 app:boxCornerRadiusTopEnd="12dp"

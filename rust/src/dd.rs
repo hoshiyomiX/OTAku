@@ -2452,6 +2452,39 @@ pub fn run_dd_build(
             device,
             skip_verify,
         );
+
+        // Inject ROM name and Maker into the flasher banner (Issue #4 fix).
+        //
+        // build_update_script generates a fixed banner:
+        //   ======================================
+        //     OTAku — Custom Payload Maker
+        //           by hoshiyomiX
+        //   ======================================
+        //
+        // When the user provides ROM name and/or Maker via the UI input
+        // fields, we inject a "ROM: ... | Maker: ..." line between
+        // "by hoshiyomiX" and the closing border. This appears in the
+        // recovery flashing log (TWRP/OrangeFox ui_print) so the user
+        // can identify what they're flashing.
+        //
+        // We use post-processing (not a build_update_script parameter) to
+        // avoid changing 26 test call sites — rom_name/maker are cosmetic,
+        // not functional, so tests don't need to know about them.
+        let update_binary = if !rom_name.is_empty() || !maker.is_empty() {
+            let rom_display = if rom_name.is_empty() { "N/A" } else { rom_name };
+            let maker_display = if maker.is_empty() { "N/A" } else { maker };
+            let injection = format!(
+                "ui_print \"        by hoshiyomiX\"\nui_print \"  ROM: {} | Maker: {}\"",
+                rom_display, maker_display
+            );
+            update_binary.replacen(
+                "ui_print \"        by hoshiyomiX\"",
+                &injection,
+                1,
+            )
+        } else {
+            update_binary
+        };
         // updater-script is a stub — TWRP/OrangeFox only require the file to
         // exist and contain a valid edify expression. The actual flash logic
         // lives in update-binary (a shell script invoked by recovery).
