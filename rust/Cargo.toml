@@ -14,7 +14,12 @@ jni = "0.21"
 
 # Compression
 flate2 = { version = "1.0", default-features = false, features = ["miniz_oxide"] }
-bzip2 = "0.4"
+# bzip2: bumped from 0.4 → 0.6 (latest stable).
+# 0.6 uses libbz2-rs-sys (pure Rust) instead of C bindings — better for
+# Android NDK cross-compile (no need to bundle libbz2 C source). API is
+# unchanged: BzEncoder::new, Compression::new(u32), BzDecoder::new.
+# Changelog: https://github.com/gendx/bzip2-rs/releases
+bzip2 = "0.6"
 xz2 = "0.1"
 brotli = "6.0"
 
@@ -29,7 +34,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # ZIP creation
-zip = "2.1"
+# zip: bumped from 2.1 → 2.4 (latest stable in 2.x series).
+# 2.4 includes bug fixes for ZIP64 large files (>4GB) and improved
+# SimpleFileOptions API (backward compatible).
+# Note: 9.x is pre-release — not for production.
+zip = "2.4"
 
 # Date/time for flash_info.txt timestamps
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

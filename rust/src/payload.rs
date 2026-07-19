@@ -31,7 +31,7 @@ use crate::proto::{
 // ---------------------------------------------------------------------------
 
 /// Payload magic bytes: "CrAU"
-pub const DELTA_MAGIC: [u8; 4] = [b'C', b'r', b'A', b'U'];
+pub const DELTA_MAGIC: [u8; 4] = *b"CrAU";
 pub const HEADER_PROTOBUF_SIZE: usize = 8; // uint64 big-endian
 pub const MAJOR_VERSION: u32 = 2; // Brillo v2
 pub const DEFAULT_BLOCK_SIZE: u32 = 4096;
@@ -383,6 +383,13 @@ pub fn write_payload(
         ));
 
         // Hash and compress the image in a single streaming pass
+        // hash_and_compress_file returns (compressed_data, sha256_hex_of_raw).
+        // The raw-file SHA-256 is what we need for both:
+        //   - InstallOperation.data_sha256_hash (hash_bytes)
+        //   - PartitionInfo.hash (new_info.hash)
+        // Computing sha256_file separately would re-read + re-hash the entire
+        // image — for a 5GB system.img that's ~10s of wasted I/O + CPU per
+        // partition. Reuse the hash we already computed during compression.
         let (compressed, hash_hex) = match hash_and_compress_file(image_path, alg, None) {
             Ok(result) => result,
             Err(e) => {
@@ -398,11 +405,15 @@ pub fn write_payload(
             }
         };
 
-        let hash_bytes = crate::compression::sha256_file(image_path).unwrap_or_default();
+        // Decode the hex string back to bytes for protobuf fields.
+        // hash_hex came from hash_and_compress_file which hex-encodes the
+        // 32-byte SHA-256 digest. If decoding fails (shouldn't happen —
+        // sha256 output is always 64 hex chars), fall back to empty Vec.
+        let hash_bytes: Vec<u8> = decode_hex_sha256(&hash_hex).unwrap_or_default();
 
         // Build InstallOperation
         let op_type = operation_type_for_algorithm(alg);
-        let num_blocks = (img_size + block_size as u64 - 1) / block_size as u64;
+        let num_blocks = img_size.div_ceil(block_size as u64);
         let dst_extent = build_extent(0, num_blocks);
 
         let op = build_replace_operation(
@@ -410,13 +421,13 @@ pub fn write_payload(
             current_data_offset,
             compressed.len() as u64,
             vec![dst_extent],
-            hash_bytes,
+            hash_bytes.clone(),
             img_size as u32,
         );
         let _op_encoded = crate::proto::encode_install_operation(&op);
 
-        // Build PartitionUpdate
-        let new_info = build_partition_info(img_size, crate::compression::sha256_file(image_path).unwrap_or_default());
+        // Build PartitionUpdate (reuse hash_bytes — no second sha256_file call)
+        let new_info = build_partition_info(img_size, hash_bytes);
         let part_update =
             build_partition_update(name.clone(), vec![op], Some(new_info));
         let part_encoded = crate::proto::encode_partition_update(&part_update);
@@ -650,4 +661,26 @@ pub fn human_size(size_bytes: u64) -> String {
     } else {
         format!("{:.2} GB", size_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+/// Decode a hex-encoded SHA-256 digest (64 hex chars) back to 32 raw bytes.
+///
+/// Used to convert the hex string returned by `hash_and_compress_file` back
+/// into the `Vec<u8>` expected by protobuf fields
+/// (`InstallOperation.data_sha256_hash`, `PartitionInfo.hash`). Avoids a
+/// second `sha256_file()` pass over the image — for a 5GB system.img that
+/// saves ~10s of I/O + CPU per partition.
+///
+/// Returns None if the input is not exactly 64 hex chars (e.g. empty string
+/// when `hash_and_compress_file` had an internal error and returned "").
+fn decode_hex_sha256(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(32);
+    for i in (0..64).step_by(2) {
+        let byte = u8::from_str_radix(&hex[i..i + 2], 16).ok()?;
+        out.push(byte);
+    }
+    Some(out)
 }

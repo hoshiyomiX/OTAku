@@ -6,11 +6,24 @@
 //!
 //! JNI naming convention:
 //!   Java_com_hoshiyomi_otaku_NativeBridge_<method_name>
+//!
+//! # Panic safety
+//!
+//! Every JNI entry point is wrapped in `std::panic::catch_unwind`.
+//! Per the Rust FFI guide, a panic crossing the FFI boundary is
+//! Undefined Behavior in the JVM — it can corrupt the JNI local
+//! reference table, leave the JNIEnv in an inconsistent state, or
+//! crash the entire Android process. Even though current code paths
+//! use `match`/`unwrap_or` (no explicit panics), future refactors
+//! might introduce a `.unwrap()` or array index out of bounds.
+//! catch_unwind catches those before they reach the JVM, logs them,
+//! and returns a safe default (null pointer or error JSON).
 
 use jni::objects::JClass;
 use jni::objects::JString;
 use jni::sys::{jboolean, jint, jstring};
 use jni::JNIEnv;
+use std::panic::AssertUnwindSafe;
 
 // ---------------------------------------------------------------------------
 //  Modules
@@ -20,6 +33,32 @@ pub mod proto;
 pub mod compression;
 pub mod payload;
 pub mod dd;
+
+// ---------------------------------------------------------------------------
+//  Panic-safety helpers
+// ---------------------------------------------------------------------------
+
+/// Build a null `jstring` for safe return when a JNI function panics or
+/// when string allocation itself fails. Returning null is the standard
+/// JNI recovery pattern — Kotlin/Java sees `null` and can surface a
+/// generic error to the user instead of crashing the app process.
+fn null_jstring() -> jstring {
+    std::ptr::null_mut()
+}
+
+/// Log a panic message to Android logcat (best-effort) so the failure is
+/// debuggable. We can't call `env.new_string()` here because the JNIEnv
+/// may be in an inconsistent state post-panic — just log the message.
+fn log_panic(location: &str, panic_info: &str) {
+    // Truncate panic_info to 500 chars — panic messages can include long
+    // backtraces that would flood logcat.
+    let truncated = if panic_info.len() > 500 {
+        &panic_info[..500]
+    } else {
+        panic_info
+    };
+    log::error!("PANIC in {} (caught via catch_unwind): {}", location, truncated);
+}
 
 // ---------------------------------------------------------------------------
 //  JNI: nativeGetVersion
@@ -33,20 +72,26 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeGetVersion(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let version = format!(
-        "otaku-native {} (rust)",
-        env!("CARGO_PKG_VERSION")
-    );
-    match env.new_string(version) {
-        Ok(s) => s.into_raw(),
-        Err(_) => {
-            let fallback = env.new_string("otaku-native (unknown)");
-            match fallback {
-                Ok(s) => s.into_raw(),
-                Err(_) => std::ptr::null_mut(),
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let version = format!(
+            "otaku-native {} (rust)",
+            env!("CARGO_PKG_VERSION")
+        );
+        match env.new_string(version) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                let fallback = env.new_string("otaku-native (unknown)");
+                match fallback {
+                    Ok(s) => s.into_raw(),
+                    Err(_) => null_jstring(),
+                }
             }
         }
-    }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeGetVersion", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -62,16 +107,22 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCheckDeps(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let result = serde_json::json!({
-        "available": ["none", "gzip", "bzip2", "xz", "brotli"],
-        "missing": [],
-        "all_ok": true,
-        "native_version": env!("CARGO_PKG_VERSION")
-    });
-    match env.new_string(result.to_string()) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let result = serde_json::json!({
+            "available": ["none", "gzip", "bzip2", "xz", "brotli"],
+            "missing": [],
+            "all_ok": true,
+            "native_version": env!("CARGO_PKG_VERSION")
+        });
+        match env.new_string(result.to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeCheckDeps", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -92,38 +143,44 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeReadPayload(
     _class: JClass,
     path: JString,
 ) -> jstring {
-    let path_str: String = match env.get_string(&path) {
-        Ok(s) => s.into(),
-        Err(_) => {
-            return make_error_json(&env, "Invalid path string");
-        }
-    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let path_str: String = match env.get_string(&path) {
+            Ok(s) => s.into(),
+            Err(_) => {
+                return make_error_json(&env, "Invalid path string");
+            }
+        };
 
-    let result = match payload::read_payload(&path_str) {
-        Ok(info) => {
-            let json = payload::payload_info_to_json(&info);
-            serde_json::json!({
-                "success": true,
-                "header": json.header,
-                "manifest": json.manifest,
-                "data_offset": json.data_offset,
-                "file_size": json.file_size,
-                "native_version": env!("CARGO_PKG_VERSION"),
-            })
-        }
-        Err(e) => {
-            serde_json::json!({
-                "success": false,
-                "error": e,
-                "native_version": env!("CARGO_PKG_VERSION"),
-            })
-        }
-    };
+        let result = match payload::read_payload(&path_str) {
+            Ok(info) => {
+                let json = payload::payload_info_to_json(&info);
+                serde_json::json!({
+                    "success": true,
+                    "header": json.header,
+                    "manifest": json.manifest,
+                    "data_offset": json.data_offset,
+                    "file_size": json.file_size,
+                    "native_version": env!("CARGO_PKG_VERSION"),
+                })
+            }
+            Err(e) => {
+                serde_json::json!({
+                    "success": false,
+                    "error": e,
+                    "native_version": env!("CARGO_PKG_VERSION"),
+                })
+            }
+        };
 
-    match env.new_string(result.to_string()) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match env.new_string(result.to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeReadPayload", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -146,67 +203,73 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
     partition_name: JString,
     output_path: JString,
 ) -> jstring {
-    let payload_str: String = match env.get_string(&payload_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid payload path"),
-    };
-    let partition_str: String = match env.get_string(&partition_name) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid partition name"),
-    };
-    let output_str: String = match env.get_string(&output_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid output path"),
-    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let payload_str: String = match env.get_string(&payload_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid payload path"),
+        };
+        let partition_str: String = match env.get_string(&partition_name) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid partition name"),
+        };
+        let output_str: String = match env.get_string(&output_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid output path"),
+        };
 
-    let start = std::time::Instant::now();
+        let start = std::time::Instant::now();
 
-    // Read payload info
-    let info = match payload::read_payload(&payload_str) {
-        Ok(i) => i,
-        Err(e) => {
-            return make_error_json(&env, &format!("Read payload failed: {}", e));
+        // Read payload info
+        let info = match payload::read_payload(&payload_str) {
+            Ok(i) => i,
+            Err(e) => {
+                return make_error_json(&env, &format!("Read payload failed: {}", e));
+            }
+        };
+
+        // Extract and decompress
+        let data = match payload::extract_and_decompress_partition(&info, &partition_str) {
+            Ok(d) => d,
+            Err(e) => {
+                return make_error_json(
+                    &env,
+                    &format!("Extract partition '{}' failed: {}", partition_str, e),
+                );
+            }
+        };
+
+        // Write to output file
+        if let Some(parent) = std::path::Path::new(&output_str).parent() {
+            std::fs::create_dir_all(parent).ok();
         }
-    };
-
-    // Extract and decompress
-    let data = match payload::extract_and_decompress_partition(&info, &partition_str) {
-        Ok(d) => d,
-        Err(e) => {
-            return make_error_json(
-                &env,
-                &format!("Extract partition '{}' failed: {}", partition_str, e),
-            );
+        match std::fs::write(&output_str, &data) {
+            Ok(_) => {}
+            Err(e) => {
+                return make_error_json(&env, &format!("Write output failed: {}", e));
+            }
         }
-    };
 
-    // Write to output file
-    if let Some(parent) = std::path::Path::new(&output_str).parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    match std::fs::write(&output_str, &data) {
-        Ok(_) => {}
-        Err(e) => {
-            return make_error_json(&env, &format!("Write output failed: {}", e));
+        let elapsed = start.elapsed();
+        let file_size = data.len() as u64;
+        let result = serde_json::json!({
+            "success": true,
+            "partition": partition_str,
+            "output_path": output_str,
+            "file_size": file_size,
+            "human_size": payload::human_size(file_size),
+            "duration_ms": elapsed.as_millis() as u64,
+            "native_version": env!("CARGO_PKG_VERSION"),
+        });
+
+        match env.new_string(result.to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
         }
-    }
-
-    let elapsed = start.elapsed();
-    let file_size = data.len() as u64;
-    let result = serde_json::json!({
-        "success": true,
-        "partition": partition_str,
-        "output_path": output_str,
-        "file_size": file_size,
-        "human_size": payload::human_size(file_size),
-        "duration_ms": elapsed.as_millis() as u64,
-        "native_version": env!("CARGO_PKG_VERSION"),
-    });
-
-    match env.new_string(result.to_string()) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeExtractPartition", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -233,60 +296,66 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
     block_size: jint,
     minor_version: jint,
 ) -> jstring {
-    let images_str: String = match env.get_string(&images_json) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid images JSON"),
-    };
-    let comp_str: String = match env.get_string(&compression) {
-        Ok(s) => s.into(),
-        Err(_) => "gzip".to_string(),
-    };
-    let output_str: String = match env.get_string(&output_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid output path"),
-    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let images_str: String = match env.get_string(&images_json) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid images JSON"),
+        };
+        let comp_str: String = match env.get_string(&compression) {
+            Ok(s) => s.into(),
+            Err(_) => "gzip".to_string(),
+        };
+        let output_str: String = match env.get_string(&output_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid output path"),
+        };
 
-    // Parse images JSON: {"partition_name": "path", ...}
-    let images: std::collections::HashMap<String, String> = match serde_json::from_str(&images_str)
-    {
-        Ok(m) => m,
-        Err(e) => {
-            return make_error_json(&env, &format!("Invalid images JSON: {}", e));
+        // Parse images JSON: {"partition_name": "path", ...}
+        let images: std::collections::HashMap<String, String> = match serde_json::from_str(&images_str)
+        {
+            Ok(m) => m,
+            Err(e) => {
+                return make_error_json(&env, &format!("Invalid images JSON: {}", e));
+            }
+        };
+
+        let partitions_data: Vec<payload::PartitionData> = images
+            .into_iter()
+            .map(|(name, path)| payload::PartitionData {
+                name,
+                image_path: path,
+                compress: comp_str.clone(),
+            })
+            .collect();
+
+        let result = payload::write_payload(
+            &output_str,
+            &partitions_data,
+            if block_size > 0 {
+                block_size as u32
+            } else {
+                payload::DEFAULT_BLOCK_SIZE
+            },
+            minor_version as u32,
+        );
+
+        // Serialize result to JSON
+        let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(
+                "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
+                e
+            )
+        });
+
+        match env.new_string(json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
         }
-    };
-
-    let partitions_data: Vec<payload::PartitionData> = images
-        .into_iter()
-        .map(|(name, path)| payload::PartitionData {
-            name,
-            image_path: path,
-            compress: comp_str.clone(),
-        })
-        .collect();
-
-    let result = payload::write_payload(
-        &output_str,
-        &partitions_data,
-        if block_size > 0 {
-            block_size as u32
-        } else {
-            payload::DEFAULT_BLOCK_SIZE
-        },
-        minor_version as u32,
-    );
-
-    // Serialize result to JSON
-    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
-        format!(
-            "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
-            e
-        )
-    });
-
-    match env.new_string(json) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeWritePayload", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -324,71 +393,77 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     rom_name: JString,
     maker: JString,
 ) -> jstring {
-    // Parse JNI string arguments
-    let images_str: String = match env.get_string(&images_json) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid images JSON"),
-    };
-    let comp_str: String = match env.get_string(&compression) {
-        Ok(s) => s.into(),
-        Err(_) => "gzip".to_string(),
-    };
-    let output_str: String = match env.get_string(&output_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid output path"),
-    };
-    let device_str: String = match env.get_string(&device) {
-        Ok(s) => s.into(),
-        Err(_) => String::new(),
-    };
-    let rom_name_str: String = match env.get_string(&rom_name) {
-        Ok(s) => s.into(),
-        Err(_) => String::new(),
-    };
-    let maker_str: String = match env.get_string(&maker) {
-        Ok(s) => s.into(),
-        Err(_) => String::new(),
-    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // Parse JNI string arguments
+        let images_str: String = match env.get_string(&images_json) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid images JSON"),
+        };
+        let comp_str: String = match env.get_string(&compression) {
+            Ok(s) => s.into(),
+            Err(_) => "gzip".to_string(),
+        };
+        let output_str: String = match env.get_string(&output_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid output path"),
+        };
+        let device_str: String = match env.get_string(&device) {
+            Ok(s) => s.into(),
+            Err(_) => String::new(),
+        };
+        let rom_name_str: String = match env.get_string(&rom_name) {
+            Ok(s) => s.into(),
+            Err(_) => String::new(),
+        };
+        let maker_str: String = match env.get_string(&maker) {
+            Ok(s) => s.into(),
+            Err(_) => String::new(),
+        };
 
-    // Parse images JSON: {"partition_name": "path", ...}
-    let images_map: std::collections::HashMap<String, String> = match serde_json::from_str(&images_str) {
-        Ok(m) => m,
-        Err(e) => {
-            return make_error_json(&env, &format!("Invalid images JSON: {}", e));
+        // Parse images JSON: {"partition_name": "path", ...}
+        let images_map: std::collections::HashMap<String, String> = match serde_json::from_str(&images_str) {
+            Ok(m) => m,
+            Err(e) => {
+                return make_error_json(&env, &format!("Invalid images JSON: {}", e));
+            }
+        };
+
+        // Convert HashMap to Vec<(String, String)> and sort alphabetically by partition name.
+        // Kotlin sorts partition names for the progress bar (images.keys.sorted()),
+        // so Rust must compress in the same order so that log messages and per-partition
+        // progress bar indices match.
+        let mut images_vec: Vec<(String, String)> = images_map.into_iter().collect();
+        images_vec.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Call the DD build pipeline
+        let result = dd::run_dd_build(
+            &images_vec,
+            &comp_str,
+            level,
+            &output_str,
+            &device_str,
+            skip_verify != 0,
+            &rom_name_str,
+            &maker_str,
+        );
+
+        // Serialize result to JSON
+        let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(
+                "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
+                e
+            )
+        });
+
+        match env.new_string(json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
         }
-    };
-
-    // Convert HashMap to Vec<(String, String)> and sort alphabetically by partition name.
-    // Kotlin sorts partition names for the progress bar (images.keys.sorted()),
-    // so Rust must compress in the same order so that log messages and per-partition
-    // progress bar indices match.
-    let mut images_vec: Vec<(String, String)> = images_map.into_iter().collect();
-    images_vec.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Call the DD build pipeline
-    let result = dd::run_dd_build(
-        &images_vec,
-        &comp_str,
-        level,
-        &output_str,
-        &device_str,
-        skip_verify != 0,
-        &rom_name_str,
-        &maker_str,
-    );
-
-    // Serialize result to JSON
-    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
-        format!(
-            "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
-            e
-        )
-    });
-
-    match env.new_string(json) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeBuildDd", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -431,19 +506,23 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeDetectDeviceC
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let result = detect_device_codename();
-    match env.new_string(result) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let result = detect_device_codename();
+        match env.new_string(result) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeDetectDeviceCodename", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 /// Read device codename from 4 vendor-partition sources.
 /// Returns JSON string for JNI bridge.
 fn detect_device_codename() -> String {
     let mut sources_tried: Vec<&'static str> = Vec::new();
-    let mut vendor_device = String::new();
-    let mut board = String::new();
 
     // Helper: run getprop and trim output
     let getprop = |prop: &str| -> String {
@@ -477,11 +556,11 @@ fn detect_device_codename() -> String {
 
     // Source 1: getprop ro.product.vendor.device
     sources_tried.push("getprop ro.product.vendor.device");
-    vendor_device = getprop("ro.product.vendor.device");
+    let mut vendor_device = getprop("ro.product.vendor.device");
 
     // Source 2: getprop ro.product.board
     sources_tried.push("getprop ro.product.board");
-    board = getprop("ro.product.board");
+    let mut board = getprop("ro.product.board");
 
     // Source 3: /vendor/build.prop ro.product.vendor.device (fallback)
     if vendor_device.is_empty() {
@@ -554,11 +633,17 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeScanDevicePar
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let result = scan_device_partitions();
-    match env.new_string(result) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let result = scan_device_partitions();
+        match env.new_string(result) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeScanDevicePartitions", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 /// Scan device for ACTUAL partition names present on this device (no root required).
@@ -690,23 +775,29 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeVerifyPayload
     _class: JClass,
     path: JString,
 ) -> jstring {
-    let path_str: String = match env.get_string(&path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid path string"),
-    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let path_str: String = match env.get_string(&path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid path string"),
+        };
 
-    let result = payload::verify_payload(&path_str);
-    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
-        format!(
-            "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
-            e
-        )
-    });
+        let result = payload::verify_payload(&path_str);
+        let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(
+                "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
+                e
+            )
+        });
 
-    match env.new_string(json) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match env.new_string(json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeVerifyPayload", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -731,69 +822,75 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCompress(
     algorithm: JString,
     level: jint,
 ) -> jstring {
-    let input_str: String = match env.get_string(&input_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid input path"),
-    };
-    let output_str: String = match env.get_string(&output_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid output path"),
-    };
-    let alg_str: String = match env.get_string(&algorithm) {
-        Ok(s) => s.into(),
-        Err(_) => "gzip".to_string(),
-    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let input_str: String = match env.get_string(&input_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid input path"),
+        };
+        let output_str: String = match env.get_string(&output_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid output path"),
+        };
+        let alg_str: String = match env.get_string(&algorithm) {
+            Ok(s) => s.into(),
+            Err(_) => "gzip".to_string(),
+        };
 
-    let level_opt = if level > 0 { Some(level) } else { None };
+        let level_opt = if level > 0 { Some(level) } else { None };
 
-    let (compressed, hash_hex) = match compression::hash_and_compress_file(
-        &input_str,
-        &alg_str,
-        level_opt,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_json(&env, &format!("Compress failed: {}", e));
+        let (compressed, hash_hex) = match compression::hash_and_compress_file(
+            &input_str,
+            &alg_str,
+            level_opt,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return make_error_json(&env, &format!("Compress failed: {}", e));
+            }
+        };
+
+        // Write compressed output
+        if let Some(parent) = std::path::Path::new(&output_str).parent() {
+            std::fs::create_dir_all(parent).ok();
         }
-    };
-
-    // Write compressed output
-    if let Some(parent) = std::path::Path::new(&output_str).parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    match std::fs::write(&output_str, &compressed) {
-        Ok(_) => {}
-        Err(e) => {
-            return make_error_json(&env, &format!("Write failed: {}", e));
+        match std::fs::write(&output_str, &compressed) {
+            Ok(_) => {}
+            Err(e) => {
+                return make_error_json(&env, &format!("Write failed: {}", e));
+            }
         }
-    }
 
-    let input_size = std::fs::metadata(&input_str)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let output_size = compressed.len() as u64;
-    let ratio = if input_size > 0 {
-        output_size as f64 / input_size as f64
-    } else {
-        1.0
-    };
+        let input_size = std::fs::metadata(&input_str)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let output_size = compressed.len() as u64;
+        let ratio = if input_size > 0 {
+            output_size as f64 / input_size as f64
+        } else {
+            1.0
+        };
 
-    let result = serde_json::json!({
-        "success": true,
-        "input_path": input_str,
-        "output_path": output_str,
-        "algorithm": alg_str,
-        "input_size": input_size,
-        "output_size": output_size,
-        "ratio": ratio,
-        "sha256": hash_hex,
-        "native_version": env!("CARGO_PKG_VERSION"),
-    });
+        let result = serde_json::json!({
+            "success": true,
+            "input_path": input_str,
+            "output_path": output_str,
+            "algorithm": alg_str,
+            "input_size": input_size,
+            "output_size": output_size,
+            "ratio": ratio,
+            "sha256": hash_hex,
+            "native_version": env!("CARGO_PKG_VERSION"),
+        });
 
-    match env.new_string(result.to_string()) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match env.new_string(result.to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeCompress", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -814,60 +911,66 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeDecompress(
     output_path: JString,
     algorithm: JString,
 ) -> jstring {
-    let input_str: String = match env.get_string(&input_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid input path"),
-    };
-    let output_str: String = match env.get_string(&output_path) {
-        Ok(s) => s.into(),
-        Err(_) => return make_error_json(&env, "Invalid output path"),
-    };
-    let alg_str: String = match env.get_string(&algorithm) {
-        Ok(s) => s.into(),
-        Err(_) => "auto".to_string(),
-    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let input_str: String = match env.get_string(&input_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid input path"),
+        };
+        let output_str: String = match env.get_string(&output_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid output path"),
+        };
+        let alg_str: String = match env.get_string(&algorithm) {
+            Ok(s) => s.into(),
+            Err(_) => "auto".to_string(),
+        };
 
-    // Read input
-    let compressed = match std::fs::read(&input_str) {
-        Ok(d) => d,
-        Err(e) => {
-            return make_error_json(&env, &format!("Read failed: {}", e));
+        // Read input
+        let compressed = match std::fs::read(&input_str) {
+            Ok(d) => d,
+            Err(e) => {
+                return make_error_json(&env, &format!("Read failed: {}", e));
+            }
+        };
+
+        // Decompress
+        let decompressed = match compression::decompress(&compressed, &alg_str) {
+            Ok(d) => d,
+            Err(e) => {
+                return make_error_json(&env, &format!("Decompress failed: {}", e));
+            }
+        };
+
+        // Write output
+        if let Some(parent) = std::path::Path::new(&output_str).parent() {
+            std::fs::create_dir_all(parent).ok();
         }
-    };
-
-    // Decompress
-    let decompressed = match compression::decompress(&compressed, &alg_str) {
-        Ok(d) => d,
-        Err(e) => {
-            return make_error_json(&env, &format!("Decompress failed: {}", e));
+        match std::fs::write(&output_str, &decompressed) {
+            Ok(_) => {}
+            Err(e) => {
+                return make_error_json(&env, &format!("Write failed: {}", e));
+            }
         }
-    };
 
-    // Write output
-    if let Some(parent) = std::path::Path::new(&output_str).parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    match std::fs::write(&output_str, &decompressed) {
-        Ok(_) => {}
-        Err(e) => {
-            return make_error_json(&env, &format!("Write failed: {}", e));
+        let result = serde_json::json!({
+            "success": true,
+            "input_path": input_str,
+            "output_path": output_str,
+            "algorithm": alg_str,
+            "input_size": compressed.len(),
+            "output_size": decompressed.len(),
+            "native_version": env!("CARGO_PKG_VERSION"),
+        });
+
+        match env.new_string(result.to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
         }
-    }
-
-    let result = serde_json::json!({
-        "success": true,
-        "input_path": input_str,
-        "output_path": output_str,
-        "algorithm": alg_str,
-        "input_size": compressed.len(),
-        "output_size": decompressed.len(),
-        "native_version": env!("CARGO_PKG_VERSION"),
-    });
-
-    match env.new_string(result.to_string()) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeDecompress", &format!("{:?}", panic_info));
+        null_jstring()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -882,7 +985,7 @@ fn make_error_json(env: &JNIEnv, error: &str) -> jstring {
     });
     match env.new_string(result.to_string()) {
         Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
+        Err(_) => null_jstring(),
     }
 }
 
@@ -892,19 +995,34 @@ fn make_error_json(env: &JNIEnv, error: &str) -> jstring {
 
 /// Called when System.loadLibrary("otaku_native") loads the .so.
 /// Initialize Android logger so `log::info!()` etc. go to logcat.
+//
+// Panics in JNI_OnLoad are fatal — if logger init fails, returning -1
+// (JNI_ERR) tells the JVM to abort loading the .so cleanly instead of
+// crashing with UB. catch_unwind ensures even a panic during init
+// surfaces as a controlled -1 return.
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(
     _vm: jni::JavaVM,
     _reserved: *mut std::ffi::c_void,
 ) -> jint {
-    // Initialize android_logger to route log crate to Android logcat
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
-            .with_tag("otaku-native"),
-    );
-    log::info!("otaku-native {} loaded", env!("CARGO_PKG_VERSION"));
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // Initialize android_logger to route log crate to Android logcat
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag("otaku-native"),
+        );
+        log::info!("otaku-native {} loaded", env!("CARGO_PKG_VERSION"));
 
-    // Return JNI version 1_6
-    jni::sys::JNI_VERSION_1_6 as jint
+        // Return JNI version 1_6
+        jni::sys::JNI_VERSION_1_6 as jint
+    }));
+    result.unwrap_or_else(|panic_info| {
+        // Can't call log_panic here — logger may not be initialized yet.
+        // eprintln! goes nowhere on Android (no stderr), but at least we
+        // don't crash the JVM. Return -1 (JNI_ERR) so System.loadLibrary
+        // fails with UnsatisfiedLinkError instead of UB.
+        let _ = panic_info; // best-effort — no way to surface to logcat
+        -1 as jint
+    })
 }

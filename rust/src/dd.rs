@@ -33,6 +33,13 @@ use crate::compression::{compress_id, hash_and_compress_file_with_progress, is_a
 /// `partition_percent` is 0-100 for the current partition being compressed.
 /// The overall build percentage is calculated as:
 ///   completed_partitions * 100 / total_partitions + partition_percent / total_partitions
+//
+// 9 args is intentional — each value is used exactly once and grouping them
+// into a ProgressInfo struct would just add boilerplate (struct definition +
+// field assignments at every call site) without improving readability.
+// JNI-side progress polling is performance-sensitive (called per-chunk), so
+// passing values directly avoids a struct allocation.
+#[allow(clippy::too_many_arguments)]
 fn write_progress_with_percent(
     output_path: &str,
     current: usize,
@@ -46,11 +53,9 @@ fn write_progress_with_percent(
 ) {
     let progress_path = format!("{}.progress", output_path);
     // Overall percent = (completed partitions * 100 + current partition percent) / total
-    let overall_percent = if total > 0 {
-        ((current.saturating_sub(1)) * 100 + partition_percent as usize) / total
-    } else {
-        0
-    };
+    // Use checked_div to handle total=0 without an explicit if-else.
+    let numerator = (current.saturating_sub(1)) * 100 + partition_percent as usize;
+    let overall_percent = numerator.checked_div(total).unwrap_or(0);
     let content = serde_json::json!({
         "current": current,
         "total": total,
@@ -77,7 +82,7 @@ fn delete_progress_file(output_path: &str) {
 // ---------------------------------------------------------------------------
 
 /// DDBU header magic
-pub const DDBUNDLE_MAGIC: [u8; 4] = [b'D', b'D', b'B', b'U'];
+pub const DDBUNDLE_MAGIC: [u8; 4] = *b"DDBU";
 pub const DDBUNDLE_VERSION: u16 = 1;
 pub const HEADER_SIZE: usize = 4096;
 pub const ALIGN: usize = 4096;
@@ -2028,6 +2033,11 @@ exit 0
 // ---------------------------------------------------------------------------
 
 /// Build the flash_info.txt human-readable metadata.
+//
+// 9 args matches the caller's variable list 1:1. Grouping into a struct
+// would force the caller to construct a FlashInfoArgs struct that mirrors
+// the run_dd_build parameter list — pure boilerplate.
+#[allow(clippy::too_many_arguments)]
 fn build_flash_info(
     compress_name: &str,
     bundle_size: u64,
@@ -2111,9 +2121,18 @@ fn build_flash_info(
 /// * `output_path` - Absolute path for output .zip file
 /// * `device` - Device codename(s), comma-separated (empty = no device check)
 /// * `skip_verify` - Skip post-flash SHA-256 verification
+/// * `rom_name` - Cosmetic: ROM name shown in flash_info.txt + flasher banner
+/// * `maker` - Cosmetic: ROM maker shown in flash_info.txt + flasher banner
 ///
 /// # Returns
 /// DdBuildResult with success/error, paths, sizes, and log output.
+//
+// 8 args matches the JNI bridge signature 1:1. Each arg is used in a
+// distinct phase (validation, compression, script building, flash_info).
+// Grouping into a DdBuildArgs struct would just shift the boilerplate to
+// lib.rs (which would still receive 8 JNI args + have to construct the
+// struct). Allow clippy::too_many_arguments.
+#[allow(clippy::too_many_arguments)]
 pub fn run_dd_build(
     images: &[(String, String)], // (partition_name, image_path)
     compression: &str,
@@ -2271,10 +2290,14 @@ pub fn run_dd_build(
         let mut partitions_meta: Vec<PartitionMeta> = Vec::new();
         let level_opt = if level > 0 { Some(level) } else { None };
 
-        // Open temp file in append mode for incremental writes
+        // Open temp file in append mode for incremental writes.
+        // Note: `.append(true)` implies write access — `.write(true)` is
+        // redundant and clippy flags it. Append mode is required because
+        // we write each partition's compressed data + alignment padding
+        // incrementally, then seek back to start to overwrite the header
+        // placeholder in a separate open() call below.
         {
             let mut tmp_file = std::fs::OpenOptions::new()
-                .write(true)
                 .append(true)
                 .open(&bundle_tmp_path)
                 .map_err(|e| format!("Cannot open temp file for writing: {}", e))?;
@@ -2314,11 +2337,11 @@ pub fn run_dd_build(
                     &compress_name,
                     level_opt,
                     Some(&mut |bytes_read: u64, file_size: u64| {
-                        let pct = if file_size > 0 {
-                            (bytes_read * 100 / file_size) as i32
-                        } else {
-                            100
-                        };
+                        // checked_div handles file_size=0 (returns None → unwrap_or(100))
+                        let pct = (bytes_read * 100)
+                            .checked_div(file_size)
+                            .map(|v| v as i32)
+                            .unwrap_or(100);
                         write_progress_with_percent(
                             &output_path_clone,
                             i + 1,
@@ -2599,8 +2622,9 @@ mod tests {
         // Header size (u16 LE)
         assert_eq!(u16::from_le_bytes([hdr[10], hdr[11]],), HEADER_SIZE as u16);
         // Rest should be zero-padded
-        for i in 12..HEADER_SIZE {
-            assert_eq!(hdr[i], 0u8);
+        // (Iterate by value — clippy::needless_range_loop)
+        for &byte in hdr.iter().skip(12) {
+            assert_eq!(byte, 0u8);
         }
     }
 
