@@ -863,6 +863,57 @@ pub fn hash_and_compress_file_with_progress(
 }
 
 // ---------------------------------------------------------------------------
+//  Sha256Writer — wraps a Write to compute SHA-256 of bytes written through it
+// ---------------------------------------------------------------------------
+
+/// A `Write` wrapper that computes SHA-256 of everything written through it,
+/// while passing the bytes through to the underlying writer.
+///
+/// Used by `hash_and_compress_file_to_writer_with_progress` to compute the
+/// SHA-256 of the *compressed* data as it is written to disk — without
+/// holding the compressed data in memory. This is essential for OOM safety:
+/// computing the hash of a 351MB compressed vendor partition by first
+/// accumulating it in a Vec would risk OOM on Android's 256-512MB heap.
+pub struct Sha256Writer<W> {
+    inner: W,
+    hasher: sha2::Sha256,
+}
+
+impl<W> Sha256Writer<W> {
+    pub fn new(inner: W) -> Self {
+        use sha2::Digest;
+        Self {
+            inner,
+            hasher: sha2::Sha256::new(),
+        }
+    }
+
+    /// Consume the Sha256Writer and return the SHA-256 hex digest of all
+    /// data written through it, plus the inner writer.
+    pub fn finalize(self) -> (String, W) {
+        use sha2::Digest;
+        let hex: String = self.hasher.finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        (hex, self.inner)
+    }
+}
+
+impl<W: Write> Write for Sha256Writer<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  CountingWriter — wraps a Write to count bytes written
 // ---------------------------------------------------------------------------
 
@@ -1096,6 +1147,257 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
 }
 
 // ---------------------------------------------------------------------------
+//  Hash and compress a file, streaming to a writer WITH progress (OOM-safe)
+// ---------------------------------------------------------------------------
+
+/// Result of streaming compression to a writer with progress reporting.
+///
+/// Contains all the metadata needed by dd.rs without ever holding the
+/// compressed data in memory:
+/// - `comp_size`: total compressed bytes written to the writer
+/// - `unc_hash_hex`: SHA-256 hex of the uncompressed input file
+/// - `comp_hash_hex`: SHA-256 hex of the compressed output (computed
+///   on-the-fly by `Sha256Writer`)
+pub struct StreamCompressResult {
+    pub comp_size: u64,
+    pub unc_hash_hex: String,
+    pub comp_hash_hex: String,
+}
+
+/// Hash and compress a file, streaming compressed output directly to a writer,
+/// with real-time per-chunk progress reporting.
+///
+/// This is the OOM-safe variant of `hash_and_compress_file_with_progress`.
+/// Instead of accumulating the entire compressed output in a `Vec<u8>` (which
+/// can be 351MB for a vendor partition), it writes compressed chunks to the
+/// provided writer as they are produced by the compressor.
+///
+/// # Memory usage
+/// Peak RAM: ~8MB (4MB read buffer + ~4MB compressor internal buffer).
+/// Compare: `hash_and_compress_file_with_progress` holds the entire compressed
+/// output in RAM, which can be 351MB+ for large partitions → OOM on Android.
+///
+/// # Progress callback
+/// `on_progress` is called after each 4MB chunk is read from the input file
+/// and fed to the compressor. The callback receives `(bytes_read, file_size)`.
+/// The caller is responsible for throttling (e.g., only fire when percent
+/// changes by >= 1).
+///
+/// # Returns
+/// `StreamCompressResult` with compressed size, uncompressed hash, and
+/// compressed hash. The compressed data itself is NOT returned; it was
+/// already written to the writer.
+pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
+    file_path: &str,
+    algorithm: &str,
+    level: Option<i32>,
+    writer: W,
+    mut on_progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<(StreamCompressResult, W), String> {
+    use sha2::{Digest, Sha256};
+    use std::fs::File;
+
+    let file_size = std::fs::metadata(file_path)
+        .map_err(|e| format!("Cannot stat {}: {}", file_path, e))?
+        .len();
+
+    // ALG_NONE size guard — same rationale as hash_and_compress_file.
+    const ALG_NONE_MAX_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
+    if is_alg(algorithm, ALG_NONE) && file_size > ALG_NONE_MAX_SIZE {
+        return Err(format!(
+            "ALG_NONE (no compression) refused for {} — file size {} bytes exceeds {} byte limit. \
+             ALG_NONE loads the entire file into memory, which would OOM Android's 256-512MB heap. \
+             Use gzip or xz instead (they stream chunks and never hold the full file in memory).",
+            file_path, file_size, ALG_NONE_MAX_SIZE
+        ));
+    }
+
+    let mut file =
+        File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
+    let mut hasher = Sha256::new();
+    let chunk_size = 4 * 1024 * 1024; // 4 MB chunks
+    let mut buf = vec![0u8; chunk_size];
+    let mut bytes_read: u64 = 0;
+
+    // Wrap the writer in Sha256Writer (computes compressed data hash)
+    // then CountingWriter (tracks compressed size).
+    // Order: Sha256Writer → CountingWriter → underlying writer
+    // This way, compressed bytes pass through both wrappers:
+    //   - CountingWriter counts bytes for comp_size
+    //   - Sha256Writer hashes bytes for comp_hash_hex
+    let mut counting = CountingWriter::new(Sha256Writer::new(writer));
+
+    // Throttled progress callback
+    let mut last_reported_percent: i32 = -1;
+    let mut report_progress = |read: u64, total: u64| {
+        if let Some(ref mut cb) = on_progress {
+            let percent = if total > 0 {
+                (read as f64 / total as f64 * 100.0) as i32
+            } else {
+                100
+            };
+            if percent != last_reported_percent {
+                last_reported_percent = percent;
+                cb(read, total);
+            }
+        }
+    };
+
+    if is_alg(algorithm, ALG_NONE) {
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            counting.write_all(&buf[..n])
+                .map_err(|e| format!("Write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        counting.flush().map_err(|e| format!("Flush error: {}", e))?;
+        let comp_size = counting.bytes_written();
+        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
+        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((
+            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
+            _sha_writer,
+        ));
+    }
+
+    let resolved_level = resolve_level(algorithm, level);
+
+    if is_alg(algorithm, ALG_GZIP) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let level_clamped = resolved_level.clamp(1, 9) as u32;
+        let mut encoder = GzEncoder::new(&mut counting, Compression::new(level_clamped));
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("gzip compress write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        encoder
+            .finish()
+            .map_err(|e| format!("gzip compress finish error: {}", e))?;
+        counting.flush().map_err(|e| format!("gzip flush error: {}", e))?;
+        let comp_size = counting.bytes_written();
+        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
+        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((
+            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
+            _sha_writer,
+        ));
+    }
+
+    if is_alg(algorithm, ALG_BZIP2) {
+        use bzip2::write::BzEncoder;
+        use bzip2::Compression;
+
+        let level_clamped = resolved_level.clamp(1, 9) as u32;
+        let mut encoder = BzEncoder::new(&mut counting, Compression::new(level_clamped));
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("bzip2 compress write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        encoder
+            .finish()
+            .map_err(|e| format!("bzip2 compress finish error: {}", e))?;
+        counting.flush().map_err(|e| format!("bzip2 flush error: {}", e))?;
+        let comp_size = counting.bytes_written();
+        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
+        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((
+            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
+            _sha_writer,
+        ));
+    }
+
+    if is_alg(algorithm, ALG_XZ) {
+        let level_clamped = resolved_level.clamp(0, 9) as u32;
+        let mut encoder = xz2::write::XzEncoder::new(&mut counting, level_clamped);
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("xz compress write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        encoder
+            .finish()
+            .map_err(|e| format!("xz compress finish error: {}", e))?;
+        counting.flush().map_err(|e| format!("xz flush error: {}", e))?;
+        let comp_size = counting.bytes_written();
+        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
+        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((
+            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
+            _sha_writer,
+        ));
+    }
+
+    if is_alg(algorithm, ALG_BROTLI) {
+        let quality = resolved_level.clamp(0, 11) as u32;
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut counting, 4096, quality, 22);
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("brotli compress write error: {}", e))?;
+                bytes_read += n as u64;
+                report_progress(bytes_read, file_size);
+            }
+        } // encoder is flushed on drop
+        counting.flush().map_err(|e| format!("brotli flush error: {}", e))?;
+        let comp_size = counting.bytes_written();
+        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
+        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((
+            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
+            _sha_writer,
+        ));
+    }
+
+    Err(format!("Unknown compression algorithm: {:?}", algorithm))
+}
+
+// ---------------------------------------------------------------------------
 //  Operation type mapping
 // ---------------------------------------------------------------------------
 
@@ -1309,12 +1611,13 @@ mod tests {
             "ALG_NONE refusal error message missing"
         );
         // The guard must be present in hash_and_compress_file,
-        // hash_and_compress_file_with_progress, and
-        // hash_and_compress_file_to_writer. Count occurrences:
+        // hash_and_compress_file_with_progress,
+        // hash_and_compress_file_to_writer, and
+        // hash_and_compress_file_to_writer_with_progress. Count occurrences:
         let guard_count = source.matches("ALG_NONE_MAX_SIZE").count();
         assert!(
-            guard_count >= 3,
-            "ALG_NONE size guard must appear in all three compress functions (found {} occurrences, need >= 3)",
+            guard_count >= 4,
+            "ALG_NONE size guard must appear in all four compress functions (found {} occurrences, need >= 4)",
             guard_count
         );
     }

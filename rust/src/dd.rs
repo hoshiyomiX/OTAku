@@ -22,7 +22,9 @@ use std::fs::File;
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use crate::compression::{compress_id, hash_and_compress_file_with_progress, is_alg, ALG_NONE};
+use crate::compression::{
+    compress_id, hash_and_compress_file_to_writer_with_progress, is_alg, ALG_NONE,
+};
 
 // ---------------------------------------------------------------------------
 //  Progress sidecar file
@@ -2230,22 +2232,41 @@ pub fn run_dd_build(
         // Writing compressed data incrementally (partition by partition) instead
         // of accumulating in memory allows Kotlin to monitor the growing file size
         // for live progress display.
-        let temp_dir = std::env::temp_dir();
-        let bundle_tmp_path = temp_dir.join("otaku_build_tmp.bin");
+        //
+        // CRITICAL: Use the output file's parent directory for the temp file,
+        // NOT std::env::temp_dir(). On Android, temp_dir() returns /data/local/tmp
+        // which may be cleaned by the OS during long builds (2+ minutes for large
+        // partitions). This caused "Cannot open temp file for header: No such file
+        // or directory" when the file vanished between close and re-open.
+        // The output directory (e.g. /storage/emulated/0/OTAku/) is user-accessible
+        // storage that persists reliably throughout the build.
+        let output_parent = Path::new(output_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let bundle_tmp_path = output_parent.join("otaku_build_tmp.bin");
         let bundle_tmp_path_str = bundle_tmp_path.to_string_lossy().to_string();
 
         // Clean up stale temp file from previous builds
         let _ = std::fs::remove_file(&bundle_tmp_path);
 
-        // Write placeholder header first (will overwrite with real header later)
-        {
-            let mut tmp = File::create(&bundle_tmp_path)
-                .map_err(|e| format!("Cannot create temp file: {}", e))?;
-            tmp.write_all(&vec![0u8; HEADER_SIZE])
-                .map_err(|e| format!("Cannot write header placeholder: {}", e))?;
-            tmp.flush()
-                .map_err(|e| format!("Cannot flush header: {}", e))?;
-        }
+        // Open temp file with read+write access and keep it open for the
+        // entire build. This avoids the close+reopen pattern that caused
+        // "Cannot open temp file for header: No such file or directory"
+        // when Android cleaned up the temp directory between operations.
+        //
+        // Using a single file handle also eliminates the OOM risk from
+        // `hash_and_compress_file_with_progress` which returned the entire
+        // compressed output as Vec<u8> (351MB for vendor). Now we stream
+        // compressed chunks directly to the file via
+        // `hash_and_compress_file_to_writer_with_progress`.
+        let mut tmp_file = File::create(&bundle_tmp_path)
+            .map_err(|e| format!("Cannot create temp file: {}", e))?;
+
+        // Write placeholder header (will overwrite later after we know all offsets)
+        tmp_file.write_all(&vec![0u8; HEADER_SIZE])
+            .map_err(|e| format!("Cannot write header placeholder: {}", e))?;
+        tmp_file.flush()
+            .map_err(|e| format!("Cannot flush header placeholder: {}", e))?;
 
         // ── Header info ──
         let partition_names: Vec<&str> = images.iter().map(|(n, _)| n.as_str()).collect();
@@ -2272,7 +2293,7 @@ pub fn run_dd_build(
         ));
         lines.push(String::new());
 
-        // ── Step 1: Build otaku.bin (incrementally written to temp file) ──
+        // ── Step 1: Build otaku.bin (streaming to temp file — OOM-safe) ──
         lines.push("[1/3] Building otaku.bin".to_string());
         lines.push(format!(
             "  Compressing {} partition(s) with {}{}",
@@ -2290,145 +2311,149 @@ pub fn run_dd_build(
         let mut partitions_meta: Vec<PartitionMeta> = Vec::new();
         let level_opt = if level > 0 { Some(level) } else { None };
 
-        // Open temp file in append mode for incremental writes.
-        // Note: `.append(true)` implies write access — `.write(true)` is
-        // redundant and clippy flags it. Append mode is required because
-        // we write each partition's compressed data + alignment padding
-        // incrementally, then seek back to start to overwrite the header
-        // placeholder in a separate open() call below.
-        {
-            let mut tmp_file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&bundle_tmp_path)
-                .map_err(|e| format!("Cannot open temp file for writing: {}", e))?;
+        // Stream compressed data directly to the temp file.
+        // Each partition is compressed chunk-by-chunk and written to the
+        // file as compressed output is produced — the full compressed data
+        // is NEVER held in a Vec<u8>. This eliminates OOM risk for large
+        // partitions (vendor 1GB → 351MB compressed would previously be
+        // held entirely in RAM).
+        //
+        // After all partitions, we seek back to position 0 and overwrite
+        // the header placeholder — all with the same file handle, no
+        // close+reopen that could fail on Android's volatile temp dirs.
+        for (i, (name, path)) in images.iter().enumerate() {
+            log::info!(
+                "[{}/{}] Compressing {} ({})",
+                i + 1,
+                num_parts,
+                name,
+                path
+            );
 
-            for (i, (name, path)) in images.iter().enumerate() {
-                log::info!(
-                    "[{}/{}] Compressing {} ({})",
-                    i + 1,
-                    num_parts,
-                    name,
-                    path
-                );
+            // Write progress: starting this partition (0%)
+            write_progress_with_percent(
+                output_path, i + 1, num_parts, name, "compressing",
+                tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64),
+                Some(&bundle_tmp_path_str), total_estimated,
+                0, // partition_percent = 0%
+            );
 
-                // Write progress: starting this partition (0%)
-                write_progress_with_percent(
-                    output_path, i + 1, num_parts, name, "compressing",
-                    tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64),
-                    Some(&bundle_tmp_path_str), total_estimated,
-                    0, // partition_percent = 0%
-                );
+            // Get the uncompressed file size for progress calculation
+            let unc_size = std::fs::metadata(path)
+                .map_err(|e| format!("Cannot stat {}: {}", path, e))?
+                .len();
 
-                // Get the uncompressed file size for progress calculation
-                let unc_size = std::fs::metadata(path)
-                    .map_err(|e| format!("Cannot stat {}: {}", path, e))?
-                    .len();
+            // Record data_offset BEFORE compression (current file position - header)
+            let data_offset = tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64)
+                - HEADER_SIZE as u64;
 
-                // Hash and compress with real-time per-chunk progress reporting.
-                // The progress callback fires after each 4MB chunk is read and fed
-                // to the compressor, updating the sidecar file with the partition
-                // compression percentage. This is what makes live progress work —
-                // Kotlin polls the sidecar every 500ms and sees the percentage grow.
-                let output_path_clone = output_path.to_string();
-                let bundle_tmp_path_str_clone = bundle_tmp_path_str.clone();
-                let name_clone = name.clone();
-                let (compressed, hash_hex) = hash_and_compress_file_with_progress(
-                    path,
-                    &compress_name,
-                    level_opt,
-                    Some(&mut |bytes_read: u64, file_size: u64| {
-                        // checked_div handles file_size=0 (returns None → unwrap_or(100))
-                        let pct = (bytes_read * 100)
-                            .checked_div(file_size)
-                            .map(|v| v as i32)
-                            .unwrap_or(100);
-                        write_progress_with_percent(
-                            &output_path_clone,
-                            i + 1,
-                            num_parts,
-                            &name_clone,
-                            "compressing",
-                            tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64),
-                            Some(&bundle_tmp_path_str_clone),
-                            total_estimated,
-                            pct,
-                        );
-                    }),
-                )?;
+            // Stream compress: reads input in 4MB chunks, compresses, and
+            // writes compressed output directly to the temp file.
+            // The Sha256Writer inside computes comp_hash_hex on-the-fly.
+            // The CountingWriter inside tracks comp_size.
+            // Peak RAM: ~8MB (read buf + compressor internal) vs 351MB before.
+            let output_path_clone = output_path.to_string();
+            let bundle_tmp_path_str_clone = bundle_tmp_path_str.clone();
+            let name_clone = name.clone();
 
-                let comp_size = compressed.len() as u64;
-                let data_offset = tmp_file.metadata().map(|m| m.len()).unwrap_or(0) - HEADER_SIZE as u64;
+            // Seek to current end of file for this partition's data
+            let current_end = tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64);
+            tmp_file.seek(std::io::SeekFrom::Start(current_end))
+                .map_err(|e| format!("Cannot seek to end for {}: {}", name, e))?;
 
-                // Compute SHA-256 of the COMPRESSED data for pre-flash integrity
-                // verification. This catches bundle corruption (e.g., from MTP
-                // transfer errors or tmpfs issues) BEFORE we touch any block
-                // device. The uncompressed hash (hash_hex) is used post-flash.
-                let comp_hash_hex: String = {
-                    use sha2::{Digest, Sha256};
-                    let mut h = Sha256::new();
-                    h.update(&compressed);
-                    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
-                };
+            // Stream compress: pass file by value, get it back on return.
+            // This avoids holding both a reference and the file itself,
+            // which would violate Rust's borrow rules.
+            let (result, returned_file) = hash_and_compress_file_to_writer_with_progress(
+                path,
+                &compress_name,
+                level_opt,
+                tmp_file,  // move file into the function
+                Some(&mut |bytes_read: u64, file_size: u64| {
+                    let pct = (bytes_read * 100)
+                        .checked_div(file_size)
+                        .map(|v| v as i32)
+                        .unwrap_or(100);
+                    // Get current file size for progress via path (not file handle,
+                    // which has been moved into the compression function).
+                    let current_size = std::fs::metadata(&bundle_tmp_path)
+                        .map(|m| m.len())
+                        .unwrap_or(HEADER_SIZE as u64);
+                    write_progress_with_percent(
+                        &output_path_clone,
+                        i + 1,
+                        num_parts,
+                        &name_clone,
+                        "compressing",
+                        current_size,
+                        Some(&bundle_tmp_path_str_clone),
+                        total_estimated,
+                        pct,
+                    );
+                }),
+            )?;
 
-                partitions_meta.push(PartitionMeta {
-                    name: name.clone(),
-                    unc_size,
-                    hash_hex,
-                    comp_size,
-                    data_offset,
-                    comp_hash_hex,
-                });
+            // Re-acquire the file handle from the compression function return
+            tmp_file = returned_file;
 
-                // Write compressed data directly to temp file (incremental!)
-                tmp_file.write_all(&compressed)
-                    .map_err(|e| format!("Cannot write compressed data for {}: {}", name, e))?;
+            let comp_size = result.comp_size;
+            let hash_hex = result.unc_hash_hex;
+            let comp_hash_hex = result.comp_hash_hex;
 
-                // Align to 4096 boundary
-                let current_pos = tmp_file.metadata().map(|m| m.len()).unwrap_or(0);
-                let aligned = align_up(current_pos as usize, ALIGN);
-                if aligned > current_pos as usize {
-                    let padding = aligned - current_pos as usize;
-                    tmp_file.write_all(&vec![0u8; padding])
-                        .map_err(|e| format!("Cannot write alignment padding: {}", e))?;
-                }
+            partitions_meta.push(PartitionMeta {
+                name: name.clone(),
+                unc_size,
+                hash_hex,
+                comp_size,
+                data_offset,
+                comp_hash_hex,
+            });
 
-                tmp_file.flush()
-                    .map_err(|e| format!("Cannot flush temp file after {}: {}", name, e))?;
-
-                // Write progress: partition done (100% for this partition)
-                write_progress_with_percent(
-                    output_path, i + 1, num_parts, name, "compressed",
-                    tmp_file.metadata().map(|m| m.len()).unwrap_or(0),
-                    Some(&bundle_tmp_path_str), total_estimated,
-                    100, // partition_percent = 100%
-                );
-
-                let ratio = if unc_size > 0 {
-                    comp_size as f64 / unc_size as f64 * 100.0
-                } else {
-                    100.0
-                };
-                lines.push(format!(
-                    "    {}: {} -> {} bytes ({:.1}%)",
-                    name, unc_size, comp_size, ratio
-                ));
+            // Align to 4096 boundary
+            let current_pos = tmp_file.metadata().map(|m| m.len()).unwrap_or(0);
+            let aligned = align_up(current_pos as usize, ALIGN);
+            if aligned > current_pos as usize {
+                let padding = aligned - current_pos as usize;
+                tmp_file.seek(std::io::SeekFrom::Start(current_pos))
+                    .map_err(|e| format!("Cannot seek for alignment: {}", e))?;
+                tmp_file.write_all(&vec![0u8; padding])
+                    .map_err(|e| format!("Cannot write alignment padding: {}", e))?;
             }
-        } // tmp_file dropped here
 
-        // Now overwrite the header placeholder with the real header
-        let header = build_header(compress_id_val, num_parts as u16);
-        {
-            let mut tmp_file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&bundle_tmp_path)
-                .map_err(|e| format!("Cannot open temp file for header: {}", e))?;
-            tmp_file.seek(std::io::SeekFrom::Start(0))
-                .map_err(|e| format!("Cannot seek to start: {}", e))?;
-            tmp_file.write_all(&header)
-                .map_err(|e| format!("Cannot write header: {}", e))?;
             tmp_file.flush()
-                .map_err(|e| format!("Cannot flush header: {}", e))?;
+                .map_err(|e| format!("Cannot flush temp file after {}: {}", name, e))?;
+
+            // Write progress: partition done (100% for this partition)
+            write_progress_with_percent(
+                output_path, i + 1, num_parts, name, "compressed",
+                tmp_file.metadata().map(|m| m.len()).unwrap_or(0),
+                Some(&bundle_tmp_path_str), total_estimated,
+                100, // partition_percent = 100%
+            );
+
+            let ratio = if unc_size > 0 {
+                comp_size as f64 / unc_size as f64 * 100.0
+            } else {
+                100.0
+            };
+            lines.push(format!(
+                "    {}: {} -> {} bytes ({:.1}%)",
+                name, unc_size, comp_size, ratio
+            ));
         }
+
+        // Overwrite the header placeholder with the real header.
+        // Same file handle — no close+reopen, no risk of "No such file or directory".
+        let header = build_header(compress_id_val, num_parts as u16);
+        tmp_file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| format!("Cannot seek to start for header: {}", e))?;
+        tmp_file.write_all(&header)
+            .map_err(|e| format!("Cannot write header: {}", e))?;
+        tmp_file.flush()
+            .map_err(|e| format!("Cannot flush header: {}", e))?;
+
+        // Close the temp file — all writes are complete
+        drop(tmp_file);
 
         let bundle_size = std::fs::metadata(&bundle_tmp_path)
             .map(|m| m.len())
