@@ -127,7 +127,7 @@
     <color name="card_border">#E0E0E0</color>
 
     <!-- Launcher icon background -->
-    <color name="ic_launcher_background">#006B5A</color>
+    <color name="ic_launcher_background">#000000</color>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Suisei Blue fallback palette                                  -->
