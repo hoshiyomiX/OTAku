@@ -4,55 +4,56 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- OTAku icon foreground: partition bar + OTA (left-aligned) + ku (left-aligned) -->
+    <!-- OTAku icon foreground v4: bigger content, less padding, centered H+V -->
+    <!-- Partition bar is thicker and text is larger for readability -->
     
-    <!-- Vertical partition bar "|" spanning full height of OTA + ku -->
+    <!-- Vertical partition bar "|" spanning full height of OTA + ku — thicker -->
     <path
         android:fillColor="#FF0000"
-        android:pathData="M16,24 L20,24 L20,76 L16,76 Z"/>
+        android:pathData="M14,18 L18,18 L18,78 L14,78 Z"/>
     
-    <!-- "O" letter - left-aligned -->
+    <!-- "O" letter — bigger, left-aligned -->
     <path
         android:fillColor="#FF0000"
         android:pathData="
-        M26,24
-        C26,18 38,18 38,24
-        L38,38
-        C38,44 26,44 26,38
+        M23,18
+        C23,12 39,12 39,18
+        L39,35
+        C39,41 23,41 23,35
         Z
-        M30,24
-        L30,38
-        C30,41 34,41 34,38
-        L34,24
-        C34,21 30,21 30,24
+        M28,18
+        L28,35
+        C28,38 34,38 34,35
+        L34,18
+        C34,15 28,15 28,18
         Z"/>
     
-    <!-- "T" letter - left-aligned -->
+    <!-- "T" letter — bigger, left-aligned -->
     <path
         android:fillColor="#FF0000"
         android:pathData="
-        M41,18 L41,22 L47,22 L47,44 L51,44 L51,22 L57,22 L57,18 Z"/>
+        M42,12 L42,16 L49,16 L49,41 L54,41 L54,16 L61,16 L61,12 Z"/>
     
-    <!-- "A" letter - left-aligned -->
+    <!-- "A" letter — bigger, left-aligned -->
     <path
         android:fillColor="#FF0000"
         android:pathData="
-        M60,44 L64,44 L64,36 L68,36 L68,44 L72,44 L72,18 L68,18 L64,25 L64,18 L60,18 Z
-        M64,32 L68,25 L68,32 Z"/>
+        M64,41 L69,41 L69,31 L74,31 L74,41 L79,41 L79,12 L74,12 L69,21 L69,12 L64,12 Z
+        M69,27 L74,21 L74,27 Z"/>
     
-    <!-- "k" letter - left-aligned with OTA -->
+    <!-- "k" letter — bigger, left-aligned with OTA -->
     <path
         android:fillColor="#FF0000"
         android:pathData="
-        M26,50 L26,76 L30,76 L30,64 L36,76 L41,76 L35,62 L41,50 L36,50 L30,61 L30,50 Z"/>
+        M23,46 L23,78 L28,78 L28,63 L36,78 L43,78 L35,61 L43,46 L36,46 L28,59 L28,46 Z"/>
     
-    <!-- "u" letter - left-aligned with OTA -->
+    <!-- "u" letter — bigger, left-aligned with OTA -->
     <path
         android:fillColor="#FF0000"
         android:pathData="
-        M44,50 L44,68
-        C44,78 62,78 62,68
-        L62,50 L58,50 L58,68
-        C58,73 48,73 48,68
-        L48,50 Z"/>
+        M46,46 L46,67
+        C46,80 69,80 69,67
+        L69,46 L64,46 L64,67
+        C64,74 51,74 51,67
+        L51,46 Z"/>
 </vector>
