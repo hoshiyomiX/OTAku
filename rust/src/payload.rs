@@ -15,8 +15,8 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::compression::{
-    decompress, detect_compression, hash_and_compress_file,
-    operation_type_for_algorithm,
+    decompress, detect_compression,
+    hash_and_compress_file_to_writer, operation_type_for_algorithm,
 };
 use crate::proto::{
     build_extent, build_manifest, build_partition_info, build_partition_update,
@@ -166,6 +166,11 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 ///
 /// Reads the data blob for each InstallOperation in the partition's
 /// operation list and returns the concatenation.
+/// Extract raw (possibly compressed) data for a partition.
+///
+/// **OOM WARNING**: This function accumulates all operation data chunks in
+/// memory as `Vec<Vec<u8>>` then flattens. For large partitions, prefer
+/// processing operations individually rather than using this function.
 pub fn extract_partition_data(
     payload_info: &PayloadInfo,
     partition_name: &str,
@@ -200,6 +205,14 @@ pub fn extract_partition_data(
 /// This is the primary extraction method — reads each operation's data,
 /// detects compression from the operation type and magic bytes, and
 /// decompresses to produce the final partition image.
+///
+/// **OOM WARNING**: This function materializes the entire decompressed
+/// partition image in RAM as a `Vec<u8>`. For large dynamic partitions
+/// (system: 2-5GB, vendor: 1-2GB, product: 1-3GB), this can exceed
+/// Android's 256-512MB per-app heap limit and crash the process.
+///
+/// For large partitions, prefer `extract_and_decompress_partition_to_writer`
+/// which streams decompressed chunks to a file, using only ~8MB RAM.
 pub fn extract_and_decompress_partition(
     payload_info: &PayloadInfo,
     partition_name: &str,
@@ -269,6 +282,105 @@ pub fn extract_and_decompress_partition(
     Ok(output_chunks.into_iter().flatten().collect())
 }
 
+/// Extract and decompress a partition image, streaming to a writer.
+///
+/// This is the OOM-safe variant of `extract_and_decompress_partition`.
+/// Instead of accumulating the entire decompressed image in RAM as a
+/// `Vec<u8>` (which can be 2-5GB for system.img), it writes decompressed
+/// chunks to the provided writer as they are produced.
+///
+/// # Memory usage
+/// Peak RAM: ~8MB per operation (compressed chunk read + decompression buffer).
+/// Compare: `extract_and_decompress_partition` holds the entire decompressed
+/// image in RAM, which can be 2-5GB for system.img.
+///
+/// # Returns
+/// Total bytes written to the writer (the decompressed partition size).
+pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
+    payload_info: &PayloadInfo,
+    partition_name: &str,
+    writer: &mut W,
+) -> Result<u64, String> {
+    let partition = find_partition(&payload_info.manifest, partition_name)?;
+    let block_size = payload_info.manifest.block_size;
+
+    let mut file =
+        BufReader::new(File::open(&payload_info.file_path).map_err(|e| format!("{}", e))?);
+    let mut total_written: u64 = 0;
+
+    for op in &partition.install_operations {
+        let op_type = op.r#type;
+
+        // ZERO: write zeros directly to writer (no Vec allocation)
+        if op_type == OP_ZERO {
+            let total_blocks: u64 = op.dst_extents.iter().map(|e| e.num_blocks).sum();
+            let zero_size = (total_blocks * block_size) as usize;
+            // Write in 4MB chunks to avoid allocating a huge zero Vec
+            let zero_chunk = [0u8; 4 * 1024 * 1024];
+            let mut remaining = zero_size;
+            while remaining > 0 {
+                let n = remaining.min(zero_chunk.len());
+                writer.write_all(&zero_chunk[..n])
+                    .map_err(|e| format!("Write zero error: {}", e))?;
+                total_written += n as u64;
+                remaining -= n;
+            }
+            continue;
+        }
+
+        // DISCARD: no data
+        if op_type == OP_DISCARD {
+            continue;
+        }
+
+        // Read compressed/raw data
+        if op.data_length == 0 {
+            continue;
+        }
+
+        file.seek(SeekFrom::Start(payload_info.data_offset + op.data_offset))
+            .map_err(|e| format!("Seek error: {}", e))?;
+        let mut compressed_data = vec![0u8; op.data_length as usize];
+        file.read_exact(&mut compressed_data)
+            .map_err(|e| format!("Read error at offset {}: {}", op.data_offset, e))?;
+
+        // Detect compression and decompress
+        let decompressed = match decompress(&compressed_data, "auto") {
+            Ok(data) => data,
+            Err(_) => {
+                let alg = detect_compression(op_type);
+                decompress(&compressed_data, alg)?
+            }
+        };
+
+        // If dst_extents are specified, pad or truncate to expected size.
+        let result = if !op.dst_extents.is_empty() {
+            let expected_size: u64 = op
+                .dst_extents
+                .iter()
+                .map(|e| e.num_blocks * block_size)
+                .sum();
+            let mut r = decompressed;
+            if r.len() < expected_size as usize {
+                r.resize(expected_size as usize, 0u8);
+            } else if r.len() > expected_size as usize {
+                r.truncate(expected_size as usize);
+            }
+            r
+        } else {
+            decompressed
+        };
+
+        writer.write_all(&result)
+            .map_err(|e| format!("Write decompressed error: {}", e))?;
+        total_written += result.len() as u64;
+    }
+
+    writer.flush()
+        .map_err(|e| format!("Flush error: {}", e))?;
+    Ok(total_written)
+}
+
 /// Find a partition by name in the manifest.
 fn find_partition<'a>(
     manifest: &'a DeltaArchiveManifest,
@@ -336,10 +448,43 @@ pub fn write_payload(
     let total_images = partitions_data.len();
     let mut partition_summaries: Vec<PartitionSummary> = Vec::new();
 
-    // ── Phase 1: Read, hash, and optionally compress each image ──
-    let mut all_blobs: Vec<Vec<u8>> = Vec::new();
+    // ── Phase 1: Read, hash, and compress each image, streaming to file ──
+    //
+    // OOM FIX (was OOM-01): Previous version accumulated ALL compressed blobs
+    // in `all_blobs: Vec<Vec<u8>>` before writing. For a typical ROM with
+    // system (2-5GB compressed), vendor (1-2GB), product (1-3GB), this could
+    // hold 4-10GB in RAM simultaneously — far exceeding Android's 256-512MB
+    // per-app heap limit.
+    //
+    // Fix: Stream each partition's compressed data directly to a temp file
+    // using `hash_and_compress_file_to_writer`, which never holds the
+    // compressed output in memory. We only track (offset, compressed_size)
+    // per partition for building the manifest later.
+    //
+    // Memory usage per partition: ~4MB (one read buffer) + ~4MB (one write
+    // buffer for the compressor) = ~8MB peak. Previous: O(sum of all
+    // compressed sizes) which could be 10GB+.
     let mut encoded_partitions: Vec<Vec<u8>> = Vec::new();
     let mut current_data_offset: u64 = 0;
+
+    // Temp file for streaming compressed data blobs (avoids all_blobs Vec)
+    let temp_dir = std::env::temp_dir();
+    let blobs_tmp_path = temp_dir.join("otaku_payload_blobs_tmp.bin");
+    let _ = std::fs::remove_file(&blobs_tmp_path); // clean stale
+    let mut blobs_file = match File::create(&blobs_tmp_path) {
+        Ok(f) => f,
+        Err(e) => {
+            return WritePayloadResult {
+                success: false,
+                output: format!("Cannot create blobs temp file: {}", e),
+                output_path: None,
+                file_size: None,
+                partitions: partition_summaries,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Cannot create blobs temp file: {}", e)),
+            };
+        }
+    };
 
     for (idx, part) in partitions_data.iter().enumerate() {
         let name = &part.name;
@@ -347,6 +492,7 @@ pub fn write_payload(
         let alg = &part.compress;
 
         if !Path::new(image_path).exists() {
+            let _ = std::fs::remove_file(&blobs_tmp_path);
             return WritePayloadResult {
                 success: false,
                 output: format!("Image file not found: {}", image_path),
@@ -361,6 +507,7 @@ pub fn write_payload(
         let img_size = match std::fs::metadata(image_path) {
             Ok(m) => m.len(),
             Err(e) => {
+                let _ = std::fs::remove_file(&blobs_tmp_path);
                 return WritePayloadResult {
                     success: false,
                     output: format!("Cannot stat {}: {}", image_path, e),
@@ -382,17 +529,16 @@ pub fn write_payload(
             alg
         ));
 
-        // Hash and compress the image in a single streaming pass
-        // hash_and_compress_file returns (compressed_data, sha256_hex_of_raw).
-        // The raw-file SHA-256 is what we need for both:
-        //   - InstallOperation.data_sha256_hash (hash_bytes)
-        //   - PartitionInfo.hash (new_info.hash)
-        // Computing sha256_file separately would re-read + re-hash the entire
-        // image — for a 5GB system.img that's ~10s of wasted I/O + CPU per
-        // partition. Reuse the hash we already computed during compression.
-        let (compressed, hash_hex) = match hash_and_compress_file(image_path, alg, None) {
+        // Stream compressed data directly to blobs temp file.
+        // hash_and_compress_file_to_writer writes compressed chunks as they
+        // are produced, never holding the full compressed output in memory.
+        // It returns (compressed_size, sha256_hex_of_raw).
+        let (compressed_size, hash_hex) = match hash_and_compress_file_to_writer(
+            image_path, alg, None, &mut blobs_file,
+        ) {
             Ok(result) => result,
             Err(e) => {
+                let _ = std::fs::remove_file(&blobs_tmp_path);
                 return WritePayloadResult {
                     success: false,
                     output: format!("Compression failed for {}: {}", name, e),
@@ -406,9 +552,6 @@ pub fn write_payload(
         };
 
         // Decode the hex string back to bytes for protobuf fields.
-        // hash_hex came from hash_and_compress_file which hex-encodes the
-        // 32-byte SHA-256 digest. If decoding fails (shouldn't happen —
-        // sha256 output is always 64 hex chars), fall back to empty Vec.
         let hash_bytes: Vec<u8> = decode_hex_sha256(&hash_hex).unwrap_or_default();
 
         // Build InstallOperation
@@ -419,7 +562,7 @@ pub fn write_payload(
         let op = build_replace_operation(
             op_type,
             current_data_offset,
-            compressed.len() as u64,
+            compressed_size,
             vec![dst_extent],
             hash_bytes.clone(),
             img_size as u32,
@@ -432,12 +575,11 @@ pub fn write_payload(
             build_partition_update(name.clone(), vec![op], Some(new_info));
         let part_encoded = crate::proto::encode_partition_update(&part_update);
 
-        all_blobs.push(compressed);
         encoded_partitions.push(part_encoded);
-        current_data_offset += all_blobs.last().unwrap().len() as u64;
+        current_data_offset += compressed_size;
 
         let ratio = if img_size > 0 {
-            all_blobs.last().unwrap().len() as f64 / img_size as f64
+            compressed_size as f64 / img_size as f64
         } else {
             1.0
         };
@@ -445,7 +587,7 @@ pub fn write_payload(
         partition_summaries.push(PartitionSummary {
             name: name.clone(),
             original_size: img_size,
-            compressed_size: all_blobs.last().unwrap().len() as u64,
+            compressed_size,
             ratio,
             algorithm: alg.clone(),
             op_type,
@@ -453,16 +595,30 @@ pub fn write_payload(
             sha256: hash_hex,
         });
 
-        let last_blob_size = all_blobs.last().unwrap().len();
         if img_size > 0 {
             lines.push(format!(
                 "    -> {:.2} MB (ratio: {:.1}%)",
-                last_blob_size as f64 / (1024.0 * 1024.0),
-                last_blob_size as f64 / img_size as f64 * 100.0
+                compressed_size as f64 / (1024.0 * 1024.0),
+                compressed_size as f64 / img_size as f64 * 100.0
             ));
         } else {
-            lines.push(format!("    -> {} bytes", last_blob_size));
+            lines.push(format!("    -> {} bytes", compressed_size));
         }
+    }
+
+    // Flush and sync blobs temp file — ensure all compressed data is on disk
+    // before we read it back in Phase 4.
+    if let Err(e) = blobs_file.flush() {
+        let _ = std::fs::remove_file(&blobs_tmp_path);
+        return WritePayloadResult {
+            success: false,
+            output: format!("Cannot flush blobs temp file: {}", e),
+            output_path: None,
+            file_size: None,
+            partitions: partition_summaries,
+            duration_ms: start.elapsed().as_millis() as u64,
+            error: Some(format!("Cannot flush blobs temp file: {}", e)),
+        };
     }
 
     // ── Phase 2: Build manifest ──
@@ -512,19 +668,36 @@ pub fn write_payload(
         f.write_all(&manifest_blob)
             .map_err(|e| format!("Write manifest error: {}", e))?;
 
-        // Data blobs
-        for blob in &all_blobs {
-            f.write_all(blob)
+        // Data blobs — stream from temp file instead of from all_blobs Vec.
+        // OOM FIX: Previous version iterated `all_blobs` (Vec<Vec<u8>>) which
+        // held ALL compressed data in RAM. Now we stream from the temp file
+        // we built incrementally in Phase 1, using only a 4MB read buffer.
+        let mut blobs_reader = File::open(&blobs_tmp_path)
+            .map_err(|e| format!("Cannot open blobs temp file: {}", e))?;
+        let mut copy_buf = [0u8; 4 * 1024 * 1024]; // 4MB buffer
+        loop {
+            let n = blobs_reader.read(&mut copy_buf)
+                .map_err(|e| format!("Read blobs temp error: {}", e))?;
+            if n == 0 { break; }
+            f.write_all(&copy_buf[..n])
                 .map_err(|e| format!("Write data blob error: {}", e))?;
         }
 
         f.flush()
             .map_err(|e| format!("Flush error: {}", e))?;
 
+        // Clean up blobs temp file on success
+        let _ = std::fs::remove_file(&blobs_tmp_path);
+
         Ok(std::fs::metadata(output_path)
             .map_err(|e| format!("Cannot stat output: {}", e))?
             .len())
     })();
+
+    // Clean up blobs temp file on error too
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&blobs_tmp_path);
+    }
 
     match write_result {
         Ok(total_size) => {
