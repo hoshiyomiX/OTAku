@@ -217,28 +217,57 @@ jobs:
 
           exit $EXIT_CODE
 
-      # ── Step 3: Brace balance check on Rust source ──
-      # Catches a class of bugs where format!() substitution breaks
-      # because {{ or }} is missing/unbalanced. This is hard to verify
-      # without compiling — we run cargo test above, but brace imbalance
-      # would surface as compile error. This is a redundant safety net.
+      # ── Step 3: Brace balance check on Rust source (code only) ──
+      # Catches a class of bugs where { or } is missing in code. Uses a
+      # state machine that properly skips string literals, raw strings,
+      # and comments — simple content.count() fails because shell scripts
+      # inside raw strings contain unbalanced {{ / }} pairs.
+      # Note: cargo test (Step 1) already verifies compilability — this is
+      # a redundant safety net that catches stray braces early.
       - name: Verify Rust brace balance
         run: |
           python3 << 'PYEOF'
+          import sys
           content = open("rust/src/dd.rs").read()
-          bo = content.count("{")
-          bc = content.count("}")
-          diff = bo - bc
-          if diff != 0:
-              print(f"FAIL: brace imbalance — {{ = {bo}, }} = {bc}, diff = {diff}")
-              exit(1)
-          print(f"PASS: brace balance {bo}/{bc}")
-
-          # Also check raw string literals are balanced
-          ro = content.count('r#"')
-          rc = content.count('"#')
-          # Note: '"#' can appear inside raw strings, so this is approximate
-          print(f"Info: raw string open r#\" = {ro}, close \"# = {rc}")
+          i = 0; depth = 0
+          in_line_cmt = in_block_cmt = in_str = in_raw = False
+          raw_hashes = 0
+          while i < len(content):
+              ch = content[i]
+              if in_line_cmt:
+                  if ch == '\n': in_line_cmt = False
+                  i += 1; continue
+              if in_block_cmt:
+                  if ch == '*' and i+1 < len(content) and content[i+1] == '/':
+                      in_block_cmt = False; i += 2; continue
+                  i += 1; continue
+              if in_raw:
+                  if ch == '"' and i+raw_hashes < len(content):
+                      ok = all(content[i+1+h] == '#' for h in range(raw_hashes))
+                      if ok: in_raw = False; i += 1+raw_hashes; continue
+                  i += 1; continue
+              if in_str:
+                  if ch == '\\': i += 2; continue
+                  if ch == '"': in_str = False
+                  i += 1; continue
+              if ch == '/' and i+1 < len(content):
+                  if content[i+1] == '/': in_line_cmt = True; i += 2; continue
+                  if content[i+1] == '*': in_block_cmt = True; i += 2; continue
+              if ch == '"': in_str = True; i += 1; continue
+              if ch == 'r' and i+1 < len(content) and content[i+1] == '#':
+                  h = 0; j = i+1
+                  while j < len(content) and content[j] == '#': h += 1; j += 1
+                  if j < len(content) and content[j] == '"':
+                      in_raw = True; raw_hashes = h; i = j+1; continue
+              if ch == '{': depth += 1
+              elif ch == '}': depth -= 1
+              i += 1
+          if depth != 0:
+              print(f"FAIL: brace imbalance (code only) -- depth={depth}")
+              sys.exit(1)
+          print(f"PASS: brace balance (code only) -- depth returns to 0")
+          tbo = content.count('{'); tbc = content.count('}')
+          print(f"Info: total braces including strings -- open={tbo}, close={tbc}, diff={tbo-tbc}")
           PYEOF
 
       # ── Step 4: Sanity check — verify all format!() args are present ──
