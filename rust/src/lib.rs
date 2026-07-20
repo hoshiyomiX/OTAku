@@ -348,7 +348,9 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
             } else {
                 payload::DEFAULT_BLOCK_SIZE
             },
-            minor_version as u32,
+            // BUG FIX (NEW-6): Guard negative jint — (-1i32) as u32 produces
+            // 4294967295 which is not a valid AOSP minor version.
+            if minor_version < 0 { 0u32 } else { minor_version as u32 },
         );
 
         // Serialize result to JSON

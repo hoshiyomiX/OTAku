@@ -216,6 +216,105 @@ pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
+/// Streaming decompress: write decompressed chunks to a writer as they are produced.
+///
+/// BUG FIX (NEW-3): The in-memory `decompress()` materializes the full decompressed
+/// output as a `Vec<u8>`, which can be 2-5 GB for large partitions — exceeding
+/// Android's 256-512 MB per-app heap limit. This streaming variant writes chunks
+/// to the writer as they are decompressed, using only ~4 MB RAM regardless of
+/// the decompressed size.
+///
+/// Peak RAM: ~4 MB (read buffer) + compressor internal state (~1-4 MB) = ~8 MB.
+/// Compare: `decompress()` holds the entire output, which can be 5 GB.
+///
+/// Returns the total bytes written.
+pub fn decompress_to_writer<W: Write>(
+    data: &[u8],
+    algorithm: &str,
+    writer: &mut W,
+) -> Result<u64, String> {
+    let alg = normalise(algorithm);
+    let effective_alg = if alg == ALG_AUTO {
+        detect_from_data(data).to_string()
+    } else {
+        alg
+    };
+
+    if effective_alg == ALG_NONE {
+        writer.write_all(data).map_err(|e| format!("Write raw error: {}", e))?;
+        return Ok(data.len() as u64);
+    }
+
+    const BUF_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+    let mut buf = [0u8; BUF_SIZE];
+    let mut total: u64 = 0;
+
+    if effective_alg == ALG_GZIP {
+        use flate2::read::GzDecoder;
+        let mut decoder = GzDecoder::new(data);
+        loop {
+            let n = decoder.read(&mut buf).map_err(|e| format!("gzip streaming decompress error: {}", e))?;
+            if n == 0 { break; }
+            writer.write_all(&buf[..n]).map_err(|e| format!("Write decompressed error: {}", e))?;
+            total += n as u64;
+            if total > MAX_DECOMPRESSED_SIZE as u64 {
+                return Err(format!("gzip decompressed output exceeds {} GiB limit — possible zip bomb",
+                    MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
+            }
+        }
+        return Ok(total);
+    }
+
+    if effective_alg == ALG_BZIP2 {
+        use bzip2::read::BzDecoder;
+        let mut decoder = BzDecoder::new(data);
+        loop {
+            let n = decoder.read(&mut buf).map_err(|e| format!("bzip2 streaming decompress error: {}", e))?;
+            if n == 0 { break; }
+            writer.write_all(&buf[..n]).map_err(|e| format!("Write decompressed error: {}", e))?;
+            total += n as u64;
+            if total > MAX_DECOMPRESSED_SIZE as u64 {
+                return Err(format!("bzip2 decompressed output exceeds {} GiB limit — possible zip bomb",
+                    MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
+            }
+        }
+        return Ok(total);
+    }
+
+    if effective_alg == ALG_XZ {
+        let mut decoder = xz2::read::XzDecoder::new(data);
+        loop {
+            let n = decoder.read(&mut buf).map_err(|e| format!("xz streaming decompress error: {}", e))?;
+            if n == 0 { break; }
+            writer.write_all(&buf[..n]).map_err(|e| format!("Write decompressed error: {}", e))?;
+            total += n as u64;
+            if total > MAX_DECOMPRESSED_SIZE as u64 {
+                return Err(format!("xz decompressed output exceeds {} GiB limit — possible zip bomb",
+                    MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
+            }
+        }
+        return Ok(total);
+    }
+
+    if effective_alg == ALG_BROTLI {
+        use brotli::Decompressor;
+        let mut decoder = Decompressor::new(data, BUF_SIZE);
+        loop {
+            let n = decoder.read(&mut buf).map_err(|e| format!("brotli streaming decompress error: {}", e))?;
+            if n == 0 { break; }
+            writer.write_all(&buf[..n]).map_err(|e| format!("Write decompressed error: {}", e))?;
+            total += n as u64;
+            if total > MAX_DECOMPRESSED_SIZE as u64 {
+                return Err(format!("brotli decompressed output exceeds {} GiB limit — possible zip bomb",
+                    MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
+            }
+        }
+        return Ok(total);
+    }
+
+    Err(format!("Unknown compression algorithm for streaming: {:?}", algorithm))
+}
+
 // ---------------------------------------------------------------------------
 //  Gzip implementation (flate2 / miniz_oxide)
 // ---------------------------------------------------------------------------

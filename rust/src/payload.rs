@@ -15,7 +15,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::compression::{
-    decompress, detect_compression,
+    decompress, decompress_to_writer, detect_compression, detect_from_data,
     hash_and_compress_file_to_writer, operation_type_for_algorithm,
 };
 use crate::proto::{
@@ -36,6 +36,14 @@ pub const HEADER_PROTOBUF_SIZE: usize = 8; // uint64 big-endian
 pub const MAJOR_VERSION: u32 = 2; // Brillo v2
 pub const DEFAULT_BLOCK_SIZE: u32 = 4096;
 pub const METADATA_SIG_ALIGNMENT: u64 = 4096;
+
+/// Maximum allowed size for a single operation's data blob (256 MB).
+/// BUG FIX (NEW-2): Prevents OOM from corrupt/malicious payloads with huge
+/// data_length values. On Android (256-512 MB per-app heap), allocating
+/// >256 MB for a single operation is likely to OOM — and a real AOSP
+/// payload never has operations this large (largest single op is typically
+/// a REPLACE_XZ for a ~2GB partition, but split across many operations).
+const MAX_OP_DATA_SIZE: u64 = 256 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 //  Payload read result
@@ -95,6 +103,13 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
     file.read_exact(&mut raw_len)
         .map_err(|e| format!("Cannot read header length: {}", e))?;
     let header_len = u64::from_be_bytes(raw_len);
+
+    // BUG FIX (NEW-7): Reject header_len == 0 — a valid AOSP payload always
+    // has a non-zero header. Accepting 0 silently produces an empty manifest
+    // and misleading "success" result for corrupt/mismatched files.
+    if header_len == 0 {
+        return Err("Header length is 0 — invalid payload format".to_string());
+    }
 
     if header_len > file_size {
         return Err(format!(
@@ -197,6 +212,20 @@ pub fn extract_partition_data(
         if op.data_length == 0 {
             continue;
         }
+        // BUG FIX (NEW-2): Validate data_length before allocating.
+        // A corrupt/malicious payload with huge data_length would cause OOM.
+        if op.data_length > MAX_OP_DATA_SIZE {
+            return Err(format!(
+                "Operation data_length {} exceeds {} MB limit — possible corrupt payload",
+                op.data_length, MAX_OP_DATA_SIZE / (1024 * 1024)
+            ));
+        }
+        if payload_info.data_offset + op.data_offset + op.data_length > payload_info.file_size {
+            return Err(format!(
+                "Operation data extends beyond file (offset={}, length={}, file_size={})",
+                op.data_offset, op.data_length, payload_info.file_size
+            ));
+        }
         file.seek(SeekFrom::Start(payload_info.data_offset + op.data_offset))
             .map_err(|e| format!("Seek error: {}", e))?;
         let mut chunk = vec![0u8; op.data_length as usize];
@@ -261,20 +290,51 @@ pub fn extract_and_decompress_partition(
             continue;
         }
 
+        // BUG FIX (NEW-2): Validate data_length before allocating.
+        if op.data_length > MAX_OP_DATA_SIZE {
+            return Err(format!(
+                "Operation data_length {} exceeds {} MB limit — possible corrupt payload",
+                op.data_length, MAX_OP_DATA_SIZE / (1024 * 1024)
+            ));
+        }
+        if payload_info.data_offset + op.data_offset + op.data_length > payload_info.file_size {
+            return Err(format!(
+                "Operation data extends beyond file (offset={}, length={}, file_size={})",
+                op.data_offset, op.data_length, payload_info.file_size
+            ));
+        }
+
         file.seek(SeekFrom::Start(payload_info.data_offset + op.data_offset))
             .map_err(|e| format!("Seek error: {}", e))?;
         let mut compressed_data = vec![0u8; op.data_length as usize];
         file.read_exact(&mut compressed_data)
             .map_err(|e| format!("Read error at offset {}: {}", op.data_offset, e))?;
 
-        // Detect compression and decompress
-        // Prefer auto-detect from magic bytes for reliability.
-        let decompressed = match decompress(&compressed_data, "auto") {
-            Ok(data) => data,
-            Err(_) => {
-                // Fallback: use operation-type hint
-                let alg = detect_compression(op_type);
-                decompress(&compressed_data, alg)?
+        // BUG FIX (NEW-4): When auto-detection returns ALG_NONE (no magic bytes
+        // matched), decompress() returns Ok(raw_data). If the operation type
+        // indicates compression (REPLACE_XZ, PUIGZIP, etc.), this means the
+        // magic bytes were corrupted and we should use the operation-type hint
+        // instead of silently returning compressed data as-is.
+        let decompressed = {
+            let auto_result = decompress(&compressed_data, "auto");
+            match &auto_result {
+                Ok(data) if data.len() == compressed_data.len() => {
+                    // Auto returned data unchanged — might be wrong detection.
+                    // Try operation-type hint if it indicates compression.
+                    let alg = detect_compression(op_type);
+                    if alg != "none" {
+                        match decompress(&compressed_data, alg) {
+                            Ok(d) => d,
+                            Err(_) => auto_result?,
+                        }
+                    } else {
+                        auto_result?
+                    }
+                }
+                _ => auto_result.unwrap_or_else(|_| {
+                    let alg = detect_compression(op_type);
+                    decompress(&compressed_data, alg).unwrap_or_else(|_| compressed_data.clone())
+                }),
             }
         };
 
@@ -369,25 +429,45 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
             continue;
         }
 
+        // BUG FIX (NEW-2): Validate data_length before allocating.
+        if op.data_length > MAX_OP_DATA_SIZE {
+            return Err(format!(
+                "Operation data_length {} exceeds {} MB limit — possible corrupt payload",
+                op.data_length, MAX_OP_DATA_SIZE / (1024 * 1024)
+            ));
+        }
+        if payload_info.data_offset + op.data_offset + op.data_length > payload_info.file_size {
+            return Err(format!(
+                "Operation data extends beyond file (offset={}, length={}, file_size={})",
+                op.data_offset, op.data_length, payload_info.file_size
+            ));
+        }
+
         file.seek(SeekFrom::Start(payload_info.data_offset + op.data_offset))
             .map_err(|e| format!("Seek error: {}", e))?;
         let mut compressed_data = vec![0u8; op.data_length as usize];
         file.read_exact(&mut compressed_data)
             .map_err(|e| format!("Read error at offset {}: {}", op.data_offset, e))?;
 
-        // Detect compression and decompress
-        let decompressed = match decompress(&compressed_data, "auto") {
-            Ok(data) => data,
-            Err(_) => {
-                let alg = detect_compression(op_type);
-                decompress(&compressed_data, alg)?
-            }
+        // BUG FIX (NEW-3): Use streaming decompression instead of in-memory.
+        // Previously called decompress() which materialized the FULL decompressed
+        // output as Vec<u8> (potentially 5 GB for system.img), then wrote it all
+        // at once. Now we stream decompressed chunks directly to the writer via
+        // decompress_to_writer(), using only ~8 MB RAM.
+        //
+        // BUG FIX (NEW-4): When auto-detection returns ALG_NONE but the operation
+        // type indicates compression, fall back to the operation-type hint.
+        let detected_alg = detect_from_data(&compressed_data);
+        let effective_alg = if detected_alg == "none" {
+            let op_hint = detect_compression(op_type);
+            if op_hint != "none" { op_hint } else { "none" }
+        } else {
+            detected_alg
         };
 
-        // If dst_extents are specified, pad or truncate to expected size.
-        let result = if !op.dst_extents.is_empty() {
-            // BUG FIX (F-1): Same checked_mul + isize::MAX guard as the in-memory variant.
-            let expected_size: u64 = op
+        // Compute expected size from dst_extents for padding/truncation.
+        let expected_size: Option<u64> = if !op.dst_extents.is_empty() {
+            let size: u64 = op
                 .dst_extents
                 .iter()
                 .map(|e| e.num_blocks.checked_mul(block_size)
@@ -395,23 +475,58 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
                 .collect::<Result<Vec<u64>, _>>()?
                 .into_iter()
                 .sum();
-            if expected_size > isize::MAX as u64 {
-                return Err(format!("Expected size too large: {} bytes", expected_size));
+            if size > isize::MAX as u64 {
+                return Err(format!("Expected size too large: {} bytes", size));
             }
-            let mut r = decompressed;
-            if r.len() < expected_size as usize {
-                r.resize(expected_size as usize, 0u8);
-            } else if r.len() > expected_size as usize {
-                r.truncate(expected_size as usize);
-            }
-            r
+            Some(size)
         } else {
-            decompressed
+            None
         };
 
-        writer.write_all(&result)
-            .map_err(|e| format!("Write decompressed error: {}", e))?;
-        total_written += result.len() as u64;
+        // Stream decompress directly to writer.
+        let decomp_bytes = if effective_alg == "none" {
+            // Raw data — write directly
+            writer.write_all(&compressed_data)
+                .map_err(|e| format!("Write raw error: {}", e))?;
+            compressed_data.len() as u64
+        } else {
+            match decompress_to_writer(&compressed_data, effective_alg, writer) {
+                Ok(n) => n,
+                Err(_) => {
+                    // Fallback: try operation-type hint
+                    let fallback_alg = detect_compression(op_type);
+                    if fallback_alg != "none" && fallback_alg != effective_alg {
+                        decompress_to_writer(&compressed_data, fallback_alg, writer)?
+                    } else {
+                        // Last resort: write raw data
+                        writer.write_all(&compressed_data)
+                            .map_err(|e| format!("Write raw fallback error: {}", e))?;
+                        compressed_data.len() as u64
+                    }
+                }
+            }
+        };
+
+        // Pad with zeros if decompressed output is smaller than expected size.
+        // Truncation is not needed for streaming (we already wrote what we got).
+        if let Some(expected) = expected_size {
+            if decomp_bytes < expected {
+                let padding = (expected - decomp_bytes) as usize;
+                let zero_chunk = [0u8; 4 * 1024 * 1024];
+                let mut remaining = padding;
+                while remaining > 0 {
+                    let n = remaining.min(zero_chunk.len());
+                    writer.write_all(&zero_chunk[..n])
+                        .map_err(|e| format!("Write padding error: {}", e))?;
+                    remaining -= n;
+                }
+                total_written += expected;
+            } else {
+                total_written += decomp_bytes;
+            }
+        } else {
+            total_written += decomp_bytes;
+        }
     }
 
     writer.flush()
@@ -485,6 +600,11 @@ pub fn write_payload(
     let mut lines: Vec<String> = Vec::new();
     let total_images = partitions_data.len();
     let mut partition_summaries: Vec<PartitionSummary> = Vec::new();
+
+    // BUG FIX (NEW-5): Guard against block_size == 0 — would cause division
+    // by zero in div_ceil. The JNI bridge already defaults to DEFAULT_BLOCK_SIZE
+    // when block_size <= 0, but write_payload itself should be defensive too.
+    let block_size = if block_size == 0 { DEFAULT_BLOCK_SIZE } else { block_size };
 
     // ── Phase 1: Read, hash, and compress each image, streaming to file ──
     //

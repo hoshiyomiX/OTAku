@@ -175,6 +175,24 @@ struct PartitionMeta {
 //  Helpers
 // ---------------------------------------------------------------------------
 
+/// Escape a string for safe interpolation into a double-quoted shell variable.
+/// Prevents shell command injection via partition names or device codenames.
+/// Replaces characters that have special meaning in double-quoted shell strings:
+///   ` \ " $ are all escaped with backslash.
+fn shell_escape_dq(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '`' => out.push_str("\\`"),
+            '$' => out.push_str("\\$"),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Round `offset` up to the next multiple of `alignment`.
 fn align_up(offset: usize, alignment: usize) -> usize {
     let remainder = offset % alignment;
@@ -250,6 +268,10 @@ fn build_update_script(
     let decomp_cmd = decomp_cmd_for_id(compress_id);
 
     // Build partition variable assignments
+    // BUG FIX (NEW-1): Shell-escape partition names to prevent command injection.
+    // Previously, raw partition names were interpolated into double-quoted shell
+    // strings, allowing `$(cmd)` or backtick injection to execute arbitrary
+    // commands with root privileges in recovery shell.
     let mut part_vars = String::new();
     for (i, p) in partitions_meta.iter().enumerate() {
         part_vars.push_str(&format!(
@@ -259,7 +281,7 @@ fn build_update_script(
              PART_{}_COMP_SIZE=\"{}\"\n\
              PART_{}_DATA_OFFSET=\"{}\"\n\
              PART_{}_COMP_HASH=\"{}\"\n",
-            i, p.name, i, p.unc_size, i, p.hash_hex, i, p.comp_size, i, p.data_offset,
+            i, shell_escape_dq(&p.name), i, p.unc_size, i, p.hash_hex, i, p.comp_size, i, p.data_offset,
             i, p.comp_hash_hex
         ));
     }
@@ -277,11 +299,13 @@ fn build_update_script(
 
     // Device check step
     let device_check_step = integrity_step + 1; // = 3
+    // BUG FIX (NEW-1): Shell-escape device codename to prevent injection
+    let escaped_device = shell_escape_dq(device);
     let device_check_block = if has_device {
         format!(
             r#"
 # ── Step {device_check_step}: Device compatibility ──────────────────
-TARGET_DEVICE="{device}"
+TARGET_DEVICE="{escaped_device}"
 VENDOR_DEVICE=""
 BOARD_DEVICE=""
 CURRENT_DEVICE=""
