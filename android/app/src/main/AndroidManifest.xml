@@ -59,10 +59,11 @@
         android:requestLegacyExternalStorage="true"
         tools:targetApi="34">
 
-        <!-- Main Activity -->
+        <!-- Main Activity — uses splash screen theme at launch, then transitions to Theme.OTAku -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:theme="@style/Theme.OTAku.Splash"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density"
             android:windowSoftInputMode="adjustResize"
             tools:ignore="LockedOrientationActivity">

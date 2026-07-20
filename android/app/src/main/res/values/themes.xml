@@ -5,6 +5,21 @@
         Material Design 3 (Material You) with teal/green color scheme.
     -->
 
+    <!-- Splash screen theme — shows OTAku icon on black background at launch.
+         Uses AndroidX SplashScreen API (compatible back to API 23).
+         The icon (ic_launcher_foreground) is displayed centered with
+         the iconBackground color behind it in a circular mask. -->
+    <style name="Theme.OTAku.Splash" parent="Theme.SplashScreen">
+        <!-- Black background matching the launcher icon -->
+        <item name="windowSplashScreenBackground">#000000</item>
+        <!-- The icon shown during splash — uses the same foreground as the launcher icon -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <!-- Icon background color (circular mask behind the icon) -->
+        <item name="windowSplashScreenIconBackgroundColor">#000000</item>
+        <!-- After splash, transition to the main OTAku theme -->
+        <item name="postSplashScreenTheme">@style/Theme.OTAku</item>
+    </style>
+
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Base application theme (light)                                -->
     <!-- ═══════════════════════════════════════════════════════════════ -->

@@ -1,6 +1,7 @@
 package com.hoshiyomi.otaku
 
 import android.Manifest
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -372,6 +373,11 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Install splash screen — must be called BEFORE super.onCreate().
+        // Shows the OTAku icon (ic_launcher_foreground) on black background
+        // at app launch, then transitions smoothly to the main theme.
+        val splashScreen = installSplashScreen()
+
         // Apply theme BEFORE setContentView.
         // applyDynamicTheme() decides between:
         //   - Theme.OTAku (default teal, with Material You overrides on API 31+)
