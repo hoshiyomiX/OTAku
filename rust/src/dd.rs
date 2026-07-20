@@ -429,6 +429,11 @@ fi
         header_info.push_str(&format!(" | Device: {}", device));
     }
     header_info.push_str(&format!(" | Compress: {}", compress_name));
+    // BUG FIX (O-2): Sanitize header_info to prevent shell injection via newlines.
+    // This string is interpolated into a shell comment in the flasher script.
+    // Without sanitization, a device codename containing \n breaks out of the
+    // comment, allowing arbitrary command execution with root privileges.
+    header_info = header_info.replace('\n', " ").replace('\r', " ");
 
     // Verification block.
     // Two paths based on skip_verify:
@@ -966,14 +971,24 @@ check_decompressor() {{
     return 1
 }}
 
-if ! check_decompressor "{decomp_cmd}"; then
-    ui_print "! ABORT: {decomp_cmd} not found."
-    ui_print "! Available tools:"
-    which gzip bzip2 xz brotli 2>/dev/null || echo "  (none found)"
-    busybox --list 2>/dev/null | head -5
-    ui_print "! Rebuild bundle with a available compressor."
-    ui_print "! Recommended: --compress gzip"
-    exit 1
+if [ "$COMPRESS_ID" = "0" ]; then
+    # ALG_NONE: no decompression needed — use plain cat (no -d flag).
+    # BUG FIX (NEW-F): Previously used "$DECOMP_CMD -d" which expands
+    # to "cat -d" — neither GNU coreutils cat, busybox cat, nor toybox
+    # cat supports -d, causing the flash to fail with "invalid option".
+    DECOMP_CMD="cat"
+    DECOMP_PIPE="cat"
+else
+    if ! check_decompressor "{decomp_cmd}"; then
+        ui_print "! ABORT: {decomp_cmd} not found."
+        ui_print "! Available tools:"
+        which gzip bzip2 xz brotli 2>/dev/null || echo "  (none found)"
+        busybox --list 2>/dev/null | head -5
+        ui_print "! Rebuild bundle with a available compressor."
+        ui_print "! Recommended: --compress gzip"
+        exit 1
+    fi
+    DECOMP_PIPE="$DECOMP_CMD -d"
 fi
 ui_print "  ✓ Decompressor: $DECOMP_CMD"
 
@@ -1718,6 +1733,17 @@ else
     ));
 
     // ── Flash each partition ──
+    // BUG FIX (NEW-G): Generate algorithm-specific fallback decompressors instead
+    // of hardcoding gzip-only fallbacks. Previously, all compression types used
+    // gzip fallbacks, which guaranteed failure for bzip2/xz/brotli partitions.
+    let fallback_decompressors = match compress_id {
+        0 => "",  // ALG_NONE — no decompression, no fallback needed
+        1 => r#""gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc""#,
+        2 => r#""bzip2 -dc" "bzcat" "busybox bzip2 -dc""#,
+        3 => r#""xz -dc" "xzcat" "busybox xz -dc""#,
+        4 => r#""brotli -dc" "busybox brotli -dc""#,
+        _ => "",
+    };
     script.push_str(&format!(
         r#"# ── Step {flash_step_offset}+{num_parts_minus_1}/{total_steps}: Flash each partition ────────────────────
 for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
@@ -1854,7 +1880,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         # the need for the fallback decompressor chain in the common case.
         dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
             head -c "$PCSIZE" 2>/dev/null | \
-            $DECOMP_CMD -d > "$TMP_FIFO" 2>"$GZIP_ERR" &
+            $DECOMP_PIPE > "$TMP_FIFO" 2>"$GZIP_ERR" &
         DECOMP_PID=$!
 
         # No conv= flags — busybox dd ftruncate() on dm-linear is a false-failure
@@ -1876,7 +1902,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             # if the compressed hash was verified OK. Only say ABORT when all fallbacks
             # fail (see bottom of this block).
             ui_print "✗ Error: Decompression failed for $PNAME"
-            ui_print "  Decompressor: $DECOMP_CMD -d (status=$DECOMP_STATUS)"
+            ui_print "  Decompressor: $DECOMP_PIPE (status=$DECOMP_STATUS)"
             ui_print "  Details: $GZIP_ERR_MSG"
             ui_print "  Bundle: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
 
@@ -1886,7 +1912,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             if [ -n "$PCOMP_HASH" ]; then
                 ui_print "  → Hash OK, trying fallback decompressors..."
                 FALLBACK_OK=0
-                for FB_DECOMP in "gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc"; do
+                for FB_DECOMP in {fallback_decompressors}; do
                     ui_print "  → Trying: $FB_DECOMP..."
                     TMP_FIFO2="/tmp/ddpart_${{i}}.fifo2"
                     rm -f "$TMP_FIFO2" "$GZIP_ERR"
@@ -1965,7 +1991,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         rm -f "$GZIP_ERR"
         dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
             head -c "$PCSIZE" 2>/dev/null | \
-            $DECOMP_CMD -d 2>"$GZIP_ERR" | \
+            $DECOMP_PIPE 2>"$GZIP_ERR" | \
             dd of="$PTARGET" bs=1048576 2>/dev/null
         DD_STATUS=$?
 
@@ -2056,6 +2082,7 @@ exit 0
         num_parts_minus_1 = if num_parts > 0 { num_parts - 1 } else { 0 },
         total_steps = total_steps,
         verify_block = verify_block.trim(),
+        fallback_decompressors = fallback_decompressors,
     ));
 
     script
@@ -2572,9 +2599,15 @@ pub fn run_dd_build(
         let update_binary = if !rom_name.is_empty() || !maker.is_empty() {
             let rom_display = if rom_name.is_empty() { "N/A" } else { rom_name };
             let maker_display = if maker.is_empty() { "N/A" } else { maker };
+            // BUG FIX (NEW-K): Shell-escape ROM name and maker to prevent command
+            // injection. Previously, raw values were interpolated into double-quoted
+            // shell strings, allowing $(cmd) or backtick injection to execute
+            // arbitrary commands with root privileges in recovery shell.
+            let rom_escaped = shell_escape_dq(rom_display);
+            let maker_escaped = shell_escape_dq(maker_display);
             let injection = format!(
                 "ui_print \"        by hoshiyomiX\"\nui_print \"  ROM: {} | Maker: {}\"",
-                rom_display, maker_display
+                rom_escaped, maker_escaped
             );
             update_binary.replacen(
                 "ui_print \"        by hoshiyomiX\"",

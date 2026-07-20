@@ -133,6 +133,23 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 
     // ── Manifest protobuf ──
     let manifest_len = header.manifest_len;
+    // BUG FIX (NEW-I): Validate manifest_len against file_size before
+    // allocating. A corrupt payload with manifest_len = u64::MAX would
+    // attempt to allocate ~18 exabytes, causing an OOM crash before
+    // read_exact can fail with UnexpectedEof.
+    if DELTA_MAGIC.len() as u64 + HEADER_PROTOBUF_SIZE as u64 + header_len + manifest_len > file_size {
+        return Err(format!(
+            "Manifest extends beyond file (header_len={}, manifest_len={}, file_size={})",
+            header_len, manifest_len, file_size
+        ));
+    }
+    // BUG FIX (NEW-N): Guard against usize truncation on 32-bit targets.
+    // manifest_len is u64 from protobuf — casting to usize silently truncates
+    // if manifest_len > 4 GiB on 32-bit. While OTAku targets 64-bit Android,
+    // this follows the integer truncation guard principle.
+    if manifest_len > isize::MAX as u64 {
+        return Err(format!("Manifest too large: {} bytes exceeds isize::MAX", manifest_len));
+    }
     let mut manifest_bytes = vec![0u8; manifest_len as usize];
     file.read_exact(&mut manifest_bytes)
         .map_err(|e| format!("Cannot read manifest: {}", e))?;
@@ -267,7 +284,10 @@ pub fn extract_and_decompress_partition(
 
         // ZERO: fill with zeros
         if op_type == OP_ZERO {
-            let total_blocks: u64 = op.dst_extents.iter().map(|e| e.num_blocks).sum();
+            // BUG FIX (O-3): Use checked_add to detect overflow in sum of num_blocks.
+            // A corrupt manifest with many large extents could wrap the u64 sum.
+            let total_blocks: u64 = op.dst_extents.iter().try_fold(0u64, |acc, e| acc.checked_add(e.num_blocks))
+                .ok_or_else(|| "Extent num_blocks sum overflow in ZERO operation".to_string())?;
             // BUG FIX: Validate multiplication doesn't overflow and result
             // fits in usize. A corrupt manifest with huge num_blocks could
             // cause overflow → panic, or produce an enormous allocation → OOM.
@@ -343,6 +363,8 @@ pub fn extract_and_decompress_partition(
         if !op.dst_extents.is_empty() {
             // BUG FIX (F-1): Validate num_blocks * block_size doesn't overflow,
             // matching the ZERO-path fix. Also guard `as usize` against 32-bit truncation.
+            // BUG FIX (O-3): Use try_fold instead of .sum() to detect overflow in
+            // the sum of individual extent sizes.
             let expected_size: u64 = op
                 .dst_extents
                 .iter()
@@ -350,7 +372,8 @@ pub fn extract_and_decompress_partition(
                     .ok_or_else(|| format!("Extent overflow: {} blocks * {} block_size", e.num_blocks, block_size)))
                 .collect::<Result<Vec<u64>, _>>()?
                 .into_iter()
-                .sum();
+                .try_fold(0u64, |acc, v| acc.checked_add(v))
+                .ok_or_else(|| "Extent size sum overflow".to_string())?;
             if expected_size > isize::MAX as u64 {
                 return Err(format!("Expected size too large: {} bytes", expected_size));
             }
@@ -398,7 +421,10 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
 
         // ZERO: write zeros directly to writer (no Vec allocation)
         if op_type == OP_ZERO {
-            let total_blocks: u64 = op.dst_extents.iter().map(|e| e.num_blocks).sum();
+            // BUG FIX (O-3): Use checked_add to detect overflow in sum of num_blocks.
+            // A corrupt manifest with many large extents could wrap the u64 sum.
+            let total_blocks: u64 = op.dst_extents.iter().try_fold(0u64, |acc, e| acc.checked_add(e.num_blocks))
+                .ok_or_else(|| "Extent num_blocks sum overflow in ZERO operation".to_string())?;
             // BUG FIX: Validate multiplication doesn't overflow before casting.
             let zero_bytes = total_blocks.checked_mul(block_size)
                 .ok_or_else(|| format!("ZERO operation overflow: {} blocks * {} block_size", total_blocks, block_size))?;
@@ -474,7 +500,8 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
                     .ok_or_else(|| format!("Extent overflow: {} blocks * {} block_size", e.num_blocks, block_size)))
                 .collect::<Result<Vec<u64>, _>>()?
                 .into_iter()
-                .sum();
+                .try_fold(0u64, |acc, v| acc.checked_add(v))
+                .ok_or_else(|| "Extent size sum overflow".to_string())?;
             if size > isize::MAX as u64 {
                 return Err(format!("Expected size too large: {} bytes", size));
             }
@@ -484,24 +511,79 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
         };
 
         // Stream decompress directly to writer.
+        // BUG FIX (NEW-H): Previously, if decompress_to_writer failed after writing
+        // partial data to the writer (File), the fallback would APPEND after the
+        // corrupt partial output — producing a garbage file. Now we buffer the
+        // initial attempt in a Cursor<Vec<u8>>. On success, write the buffer to
+        // the actual writer. On failure, discard the buffer and retry with fallback.
+        // This trades memory for correctness — acceptable since MAX_OP_DATA_SIZE
+        // caps compressed input at 256MB and each op's decompressed output is
+        // bounded by MAX_DECOMPRESSED_SIZE in compression.rs.
         let decomp_bytes = if effective_alg == "none" {
-            // Raw data — write directly
-            writer.write_all(&compressed_data)
+            // Raw data — truncate to expected_size if needed
+            let raw_len = if let Some(expected) = expected_size {
+                (compressed_data.len() as u64).min(expected) as usize
+            } else {
+                compressed_data.len()
+            };
+            writer.write_all(&compressed_data[..raw_len])
                 .map_err(|e| format!("Write raw error: {}", e))?;
-            compressed_data.len() as u64
+            raw_len as u64
         } else {
-            match decompress_to_writer(&compressed_data, effective_alg, writer) {
-                Ok(n) => n,
+            // First attempt: decompress to an in-memory buffer.
+            let mut buf1 = std::io::Cursor::new(Vec::new());
+            match decompress_to_writer(&compressed_data, effective_alg, &mut buf1) {
+                Ok(n) => {
+                    // BUG FIX (O-1): Truncate buffer to expected_size if decompressed
+                    // output exceeds the dst_extents. This matches the in-memory path's
+                    // truncate behavior. Now possible because Cursor buffers the full
+                    // output before writing.
+                    if let Some(expected) = expected_size {
+                        let buf = buf1.get_mut();
+                        if buf.len() > expected as usize {
+                            buf.truncate(expected as usize);
+                        }
+                    }
+                    writer.write_all(buf1.get_ref())
+                        .map_err(|e| format!("Write decompressed error: {}", e))?;
+                    n
+                }
                 Err(_) => {
-                    // Fallback: try operation-type hint
+                    // First attempt failed — discard partial buffer, try fallback
                     let fallback_alg = detect_compression(op_type);
                     if fallback_alg != "none" && fallback_alg != effective_alg {
-                        decompress_to_writer(&compressed_data, fallback_alg, writer)?
+                        let mut buf2 = std::io::Cursor::new(Vec::new());
+                        match decompress_to_writer(&compressed_data, fallback_alg, &mut buf2) {
+                            Ok(n) => {
+                                // Truncate fallback buffer too
+                                if let Some(expected) = expected_size {
+                                    let buf = buf2.get_mut();
+                                    if buf.len() > expected as usize {
+                                        buf.truncate(expected as usize);
+                                    }
+                                }
+                                writer.write_all(buf2.get_ref())
+                                    .map_err(|e| format!("Write fallback decompressed error: {}", e))?;
+                                n
+                            }
+                            Err(_) => {
+                                // BUG FIX (O-4): Return error instead of writing raw
+                                // compressed data as "last resort" — that silently produces
+                                // a corrupt file that could brick the device if flashed.
+                                return Err(format!(
+                                    "All decompressors failed for operation (type={}): \
+                                     primary={}, fallback={}. Raw data NOT written to prevent corruption.",
+                                    op_type, effective_alg, fallback_alg
+                                ));
+                            }
+                        }
                     } else {
-                        // Last resort: write raw data
-                        writer.write_all(&compressed_data)
-                            .map_err(|e| format!("Write raw fallback error: {}", e))?;
-                        compressed_data.len() as u64
+                        // No valid fallback — return error instead of writing raw data
+                        return Err(format!(
+                            "Decompression failed for operation (type={}): algorithm={}, \
+                             no fallback available. Raw data NOT written to prevent corruption.",
+                            op_type, effective_alg
+                        ));
                     }
                 }
             }
@@ -590,11 +672,13 @@ pub struct WritePayloadResult {
 /// * `partitions_data` - List of partitions with name, image_path, and compression algorithm
 /// * `block_size` - Block size in bytes (default 4096)
 /// * `minor_version` - Payload minor version
+/// * `level` - Compression level (None = use algorithm default)
 pub fn write_payload(
     output_path: &str,
     partitions_data: &[PartitionData],
     block_size: u32,
     minor_version: u32,
+    level: Option<i32>,
 ) -> WritePayloadResult {
     let start = std::time::Instant::now();
     let mut lines: Vec<String> = Vec::new();
@@ -702,7 +786,7 @@ pub fn write_payload(
         // are produced, never holding the full compressed output in memory.
         // It returns (compressed_size, sha256_hex_of_raw).
         let (compressed_size, hash_hex) = match hash_and_compress_file_to_writer(
-            image_path, alg, None, &mut blobs_file,
+            image_path, alg, level, &mut blobs_file,
         ) {
             Ok(result) => result,
             Err(e) => {

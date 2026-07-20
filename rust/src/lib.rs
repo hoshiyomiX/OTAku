@@ -340,6 +340,12 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
             })
             .collect();
 
+        // BUG FIX (NEW-L): Previously, the _level parameter was silently ignored —
+        // all partitions were compressed with None (default level). Users who
+        // selected a custom compression level (e.g., xz level 9) got the default
+        // instead, with no error. Now we pass the level to write_payload.
+        let level_opt = if _level > 0 { Some(_level) } else { None };
+
         let result = payload::write_payload(
             &output_str,
             &partitions_data,
@@ -351,6 +357,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
             // BUG FIX (NEW-6): Guard negative jint — (-1i32) as u32 produces
             // 4294967295 which is not a valid AOSP minor version.
             if minor_version < 0 { 0u32 } else { minor_version as u32 },
+            level_opt,
         );
 
         // Serialize result to JSON

@@ -1555,7 +1555,8 @@ pub fn detect_compression(operation_type: u32) -> &'static str {
     match operation_type {
         0 => ALG_NONE,       // REPLACE
         8 => ALG_XZ,         // REPLACE_XZ
-        12 => ALG_NONE,      // REPLACE_BZ (AOSP uses as no-op)
+        12 => ALG_BZIP2,     // REPLACE_BZ
+        13 => ALG_BROTLI,    // REPLACE_BROT
         14 => ALG_GZIP,      // PUIGZIP
         23 => ALG_BROTLI,    // BROTLI_BSDIFF
         21 | 22 => ALG_NONE, // ZERO / DISCARD
@@ -1566,8 +1567,11 @@ pub fn detect_compression(operation_type: u32) -> &'static str {
 /// Map a compression algorithm name to the recommended InstallOperation type.
 /// Matches Python compression.py operation_type_for_algorithm().
 pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
-    if is_alg(algorithm, ALG_NONE) || is_alg(algorithm, ALG_BZIP2) {
+    if is_alg(algorithm, ALG_NONE) {
         return 0; // REPLACE
+    }
+    if is_alg(algorithm, ALG_BZIP2) {
+        return 12; // REPLACE_BZ
     }
     if is_alg(algorithm, ALG_GZIP) {
         return 14; // PUIGZIP
@@ -1576,7 +1580,7 @@ pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
         return 8; // REPLACE_XZ
     }
     if is_alg(algorithm, ALG_BROTLI) {
-        return 23; // BROTLI_BZ
+        return 13; // REPLACE_BROT
     }
     0
 }
@@ -1693,14 +1697,17 @@ mod tests {
     fn test_operation_type_mapping() {
         assert_eq!(detect_compression(0), ALG_NONE); // REPLACE
         assert_eq!(detect_compression(8), ALG_XZ); // REPLACE_XZ
+        assert_eq!(detect_compression(12), ALG_BZIP2); // REPLACE_BZ
+        assert_eq!(detect_compression(13), ALG_BROTLI); // REPLACE_BROT
         assert_eq!(detect_compression(14), ALG_GZIP); // PUIGZIP
         assert_eq!(detect_compression(23), ALG_BROTLI); // BROTLI_BSDIFF
         assert_eq!(detect_compression(21), ALG_NONE); // ZERO
 
-        assert_eq!(operation_type_for_algorithm("none"), 0);
-        assert_eq!(operation_type_for_algorithm("xz"), 8);
-        assert_eq!(operation_type_for_algorithm("gzip"), 14);
-        assert_eq!(operation_type_for_algorithm("brotli"), 23);
+        assert_eq!(operation_type_for_algorithm("none"), 0);   // REPLACE
+        assert_eq!(operation_type_for_algorithm("bzip2"), 12); // REPLACE_BZ
+        assert_eq!(operation_type_for_algorithm("xz"), 8);     // REPLACE_XZ
+        assert_eq!(operation_type_for_algorithm("gzip"), 14); // PUIGZIP
+        assert_eq!(operation_type_for_algorithm("brotli"), 13); // REPLACE_BROT
     }
 
     #[test]

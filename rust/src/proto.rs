@@ -36,7 +36,7 @@ pub const OP_TYPE_NAMES: &[(u32, &str)] = &[
     (OP_PUIGZIP, "PUIGZIP"),
     (OP_ZERO, "ZERO"),
     (OP_DISCARD, "DISCARD"),
-    (OP_BROTLI_BSDIFF, "BROTLI_BZ"),
+    (OP_BROTLI_BSDIFF, "BROTLI_BSDIFF"),
 ];
 
 /// Get the human-readable name for an InstallOperation type.
