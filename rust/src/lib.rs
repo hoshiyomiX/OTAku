@@ -227,10 +227,33 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
             }
         };
 
-        // Extract and decompress
-        let data = match payload::extract_and_decompress_partition(&info, &partition_str) {
-            Ok(d) => d,
+        // BUG FIX: Use streaming extraction instead of in-memory.
+        // Previously used extract_and_decompress_partition() which holds the
+        // entire decompressed partition (up to 5 GB for system.img) in RAM,
+        // exceeding Android's 256-512 MB per-app heap limit → OOM crash.
+        // Now use extract_and_decompress_partition_to_writer() which streams
+        // decompressed chunks to the output file, using only ~8 MB RAM.
+
+        // Ensure output directory exists (BUG FIX: propagate error instead of .ok())
+        if let Some(parent) = std::path::Path::new(&output_str).parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return make_error_json(&env, &format!("Cannot create output directory: {}", e));
+            }
+        }
+
+        let mut output_file = match std::fs::File::create(&output_str) {
+            Ok(f) => f,
             Err(e) => {
+                return make_error_json(&env, &format!("Cannot create output file: {}", e));
+            }
+        };
+
+        let decompressed_size = match payload::extract_and_decompress_partition_to_writer(
+            &info, &partition_str, &mut output_file,
+        ) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = std::fs::remove_file(&output_str);
                 return make_error_json(
                     &env,
                     &format!("Extract partition '{}' failed: {}", partition_str, e),
@@ -238,19 +261,8 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
             }
         };
 
-        // Write to output file
-        if let Some(parent) = std::path::Path::new(&output_str).parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        match std::fs::write(&output_str, &data) {
-            Ok(_) => {}
-            Err(e) => {
-                return make_error_json(&env, &format!("Write output failed: {}", e));
-            }
-        }
-
         let elapsed = start.elapsed();
-        let file_size = data.len() as u64;
+        let file_size = decompressed_size;
         let result = serde_json::json!({
             "success": true,
             "partition": partition_str,
@@ -849,9 +861,11 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCompress(
             }
         };
 
-        // Write compressed output
+        // Write compressed output (BUG FIX: propagate directory creation error)
         if let Some(parent) = std::path::Path::new(&output_str).parent() {
-            std::fs::create_dir_all(parent).ok();
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return make_error_json(&env, &format!("Cannot create output directory: {}", e));
+            }
         }
         match std::fs::write(&output_str, &compressed) {
             Ok(_) => {}
@@ -925,6 +939,24 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeDecompress(
             Err(_) => "auto".to_string(),
         };
 
+        // BUG FIX: Add file size guard before loading entire file into RAM.
+        // On Android, reading a 2+ GB file into a Vec then decompressing it
+        // (which may expand to 5+ GB) will OOM the 256-512 MB per-app heap.
+        const MAX_INPUT_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
+        let input_metadata = match std::fs::metadata(&input_str) {
+            Ok(m) => m,
+            Err(e) => {
+                return make_error_json(&env, &format!("Cannot stat input: {}", e));
+            }
+        };
+        if input_metadata.len() > MAX_INPUT_SIZE {
+            return make_error_json(&env, &format!(
+                "Input file too large for in-memory decompression: {} bytes (max {} MB). \
+                 Use extract_partition with payload.bin for large files.",
+                input_metadata.len(), MAX_INPUT_SIZE / (1024 * 1024)
+            ));
+        }
+
         // Read input
         let compressed = match std::fs::read(&input_str) {
             Ok(d) => d,
@@ -941,9 +973,11 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeDecompress(
             }
         };
 
-        // Write output
+        // Write output (BUG FIX: propagate directory creation error)
         if let Some(parent) = std::path::Path::new(&output_str).parent() {
-            std::fs::create_dir_all(parent).ok();
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return make_error_json(&env, &format!("Cannot create output directory: {}", e));
+            }
         }
         match std::fs::write(&output_str, &decompressed) {
             Ok(_) => {}

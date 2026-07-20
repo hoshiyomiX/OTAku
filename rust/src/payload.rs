@@ -134,6 +134,15 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
         } else {
             blob_section_size
         };
+        // BUG FIX (F-5): Guard against underflow when metadata_signature_len
+        // is corrupted (larger than file_size). Without this, file_size - aligned_size
+        // would underflow in release mode, producing a bogus offset.
+        if aligned_size > file_size {
+            return Err(format!(
+                "metadata_signature_len ({}) + alignment exceeds file_size ({})",
+                header.metadata_signature_len, file_size
+            ));
+        }
         Some(file_size - aligned_size)
     } else {
         None
@@ -230,7 +239,15 @@ pub fn extract_and_decompress_partition(
         // ZERO: fill with zeros
         if op_type == OP_ZERO {
             let total_blocks: u64 = op.dst_extents.iter().map(|e| e.num_blocks).sum();
-            output_chunks.push(vec![0u8; (total_blocks * block_size) as usize]);
+            // BUG FIX: Validate multiplication doesn't overflow and result
+            // fits in usize. A corrupt manifest with huge num_blocks could
+            // cause overflow → panic, or produce an enormous allocation → OOM.
+            let zero_bytes = total_blocks.checked_mul(block_size)
+                .ok_or_else(|| format!("ZERO operation overflow: {} blocks * {} block_size", total_blocks, block_size))?;
+            if zero_bytes > isize::MAX as u64 {
+                return Err(format!("ZERO operation too large: {} bytes exceeds allocation limit", zero_bytes));
+            }
+            output_chunks.push(vec![0u8; zero_bytes as usize]);
             continue;
         }
 
@@ -264,11 +281,19 @@ pub fn extract_and_decompress_partition(
         // If dst_extents are specified, pad or truncate to expected size.
         let mut result = decompressed;
         if !op.dst_extents.is_empty() {
+            // BUG FIX (F-1): Validate num_blocks * block_size doesn't overflow,
+            // matching the ZERO-path fix. Also guard `as usize` against 32-bit truncation.
             let expected_size: u64 = op
                 .dst_extents
                 .iter()
-                .map(|e| e.num_blocks * block_size)
+                .map(|e| e.num_blocks.checked_mul(block_size)
+                    .ok_or_else(|| format!("Extent overflow: {} blocks * {} block_size", e.num_blocks, block_size)))
+                .collect::<Result<Vec<u64>, _>>()?
+                .into_iter()
                 .sum();
+            if expected_size > isize::MAX as u64 {
+                return Err(format!("Expected size too large: {} bytes", expected_size));
+            }
             if result.len() < expected_size as usize {
                 result.resize(expected_size as usize, 0u8);
             } else if result.len() > expected_size as usize {
@@ -314,7 +339,13 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
         // ZERO: write zeros directly to writer (no Vec allocation)
         if op_type == OP_ZERO {
             let total_blocks: u64 = op.dst_extents.iter().map(|e| e.num_blocks).sum();
-            let zero_size = (total_blocks * block_size) as usize;
+            // BUG FIX: Validate multiplication doesn't overflow before casting.
+            let zero_bytes = total_blocks.checked_mul(block_size)
+                .ok_or_else(|| format!("ZERO operation overflow: {} blocks * {} block_size", total_blocks, block_size))?;
+            if zero_bytes > isize::MAX as u64 {
+                return Err(format!("ZERO operation too large: {} bytes exceeds limit", zero_bytes));
+            }
+            let zero_size = zero_bytes as usize;
             // Write in 4MB chunks to avoid allocating a huge zero Vec
             let zero_chunk = [0u8; 4 * 1024 * 1024];
             let mut remaining = zero_size;
@@ -355,11 +386,18 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
 
         // If dst_extents are specified, pad or truncate to expected size.
         let result = if !op.dst_extents.is_empty() {
+            // BUG FIX (F-1): Same checked_mul + isize::MAX guard as the in-memory variant.
             let expected_size: u64 = op
                 .dst_extents
                 .iter()
-                .map(|e| e.num_blocks * block_size)
+                .map(|e| e.num_blocks.checked_mul(block_size)
+                    .ok_or_else(|| format!("Extent overflow: {} blocks * {} block_size", e.num_blocks, block_size)))
+                .collect::<Result<Vec<u64>, _>>()?
+                .into_iter()
                 .sum();
+            if expected_size > isize::MAX as u64 {
+                return Err(format!("Expected size too large: {} bytes", expected_size));
+            }
             let mut r = decompressed;
             if r.len() < expected_size as usize {
                 r.resize(expected_size as usize, 0u8);
@@ -468,8 +506,18 @@ pub fn write_payload(
     let mut current_data_offset: u64 = 0;
 
     // Temp file for streaming compressed data blobs (avoids all_blobs Vec)
-    let temp_dir = std::env::temp_dir();
-    let blobs_tmp_path = temp_dir.join("otaku_payload_blobs_tmp.bin");
+    //
+    // CRITICAL: Use the output file's parent directory for the temp file,
+    // NOT std::env::temp_dir(). On Android, temp_dir() returns /data/local/tmp
+    // which may be cleaned by the OS during long builds (2+ minutes for large
+    // partitions). This caused "Cannot open temp file for header: No such file
+    // or directory" when the file vanished between close and re-open.
+    // The output directory (e.g. /storage/emulated/0/OTAku/) is user-accessible
+    // storage that persists reliably throughout the build.
+    let output_parent = Path::new(output_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let blobs_tmp_path = output_parent.join("otaku_payload_blobs_tmp.bin");
     let _ = std::fs::remove_file(&blobs_tmp_path); // clean stale
     let mut blobs_file = match File::create(&blobs_tmp_path) {
         Ok(f) => f,
@@ -552,7 +600,44 @@ pub fn write_payload(
         };
 
         // Decode the hex string back to bytes for protobuf fields.
-        let hash_bytes: Vec<u8> = decode_hex_sha256(&hash_hex).unwrap_or_default();
+        // BUG FIX: Previously used unwrap_or_default() which silently produced
+        // an empty hash on decode failure — embedding a zero/missing hash in
+        // the payload manifest, causing silent data corruption.
+        let hash_bytes: Vec<u8> = match decode_hex_sha256(&hash_hex) {
+            Some(bytes) => bytes,
+            None => {
+                let _ = std::fs::remove_file(&blobs_tmp_path);
+                return WritePayloadResult {
+                    success: false,
+                    output: format!("Invalid SHA-256 hex for partition '{}': got '{}' (expected 64 hex chars)", name, hash_hex),
+                    output_path: None,
+                    file_size: None,
+                    partitions: partition_summaries,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("Invalid SHA-256 hex for {}", name)),
+                };
+            }
+        };
+
+        // BUG FIX: Validate img_size fits in u32 before casting.
+        // AOSP protobuf field is uint32, so partitions >4 GiB would silently
+        // truncate, producing a corrupt payload.bin with wrong size metadata.
+        if img_size > u32::MAX as u64 {
+            let _ = std::fs::remove_file(&blobs_tmp_path);
+            return WritePayloadResult {
+                success: false,
+                output: format!(
+                    "Partition '{}' is {} bytes — exceeds u32 max ({}). \
+                     AOSP payload format does not support partitions >4 GiB in dst_length.",
+                    name, img_size, u32::MAX
+                ),
+                output_path: None,
+                file_size: None,
+                partitions: partition_summaries,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Partition {} too large for u32 dst_length", name)),
+            };
+        }
 
         // Build InstallOperation
         let op_type = operation_type_for_algorithm(alg);
@@ -624,10 +709,28 @@ pub fn write_payload(
     // ── Phase 2: Build manifest ──
     lines.push("[*] Building manifest...".to_string());
 
-    let partitions: Vec<PartitionUpdate> = encoded_partitions
+    // BUG FIX: Previously used unwrap_or_default() which silently produced
+    // an empty PartitionUpdate on decode failure — creating a corrupt manifest
+    // with missing partition name and operations.
+    let partitions: Vec<PartitionUpdate> = match encoded_partitions
         .iter()
-        .map(|blob| crate::proto::decode_partition_update(blob).unwrap_or_default())
-        .collect();
+        .map(|blob| crate::proto::decode_partition_update(blob))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::fs::remove_file(&blobs_tmp_path);
+            return WritePayloadResult {
+                success: false,
+                output: format!("Re-decode partition failed: {}", e),
+                output_path: None,
+                file_size: None,
+                partitions: partition_summaries,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Re-decode partition failed: {}", e)),
+            };
+        }
+    };
 
     let manifest = build_manifest(block_size as u64, minor_version, partitions);
     let manifest_blob = encode_manifest(&manifest);
@@ -644,8 +747,22 @@ pub fn write_payload(
     // ── Phase 4: Write payload.bin ──
     lines.push(format!("[*] Writing payload.bin to {}", output_path));
 
+    // BUG FIX: Previously used .ok() which silently ignored directory creation
+    // errors (SELinux, storage not mounted). Now propagates the error so the
+    // user gets a clear "Permission denied" instead of a cryptic "No such file".
     if let Some(parent) = Path::new(output_path).parent() {
-        std::fs::create_dir_all(parent).ok();
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            let _ = std::fs::remove_file(&blobs_tmp_path);
+            return WritePayloadResult {
+                success: false,
+                output: format!("Cannot create output directory: {}", e),
+                output_path: None,
+                file_size: None,
+                partitions: partition_summaries,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Cannot create output directory: {}", e)),
+            };
+        }
     }
 
     let write_result: Result<u64, String> = (|| {

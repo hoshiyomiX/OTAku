@@ -19,7 +19,7 @@
 //! Ported from Python modes/dd.py (849 lines) to Rust with identical semantics.
 
 use std::fs::File;
-use std::io::{Seek, Write};
+use std::io::{Seek, Write, SeekFrom};
 use std::path::Path;
 
 use crate::compression::{
@@ -69,8 +69,15 @@ fn write_progress_with_percent(
         "partition_percent": partition_percent,
         "overall_percent": overall_percent
     });
-    // Best-effort — progress file is non-critical
-    let _ = std::fs::write(&progress_path, content.to_string());
+    // BUG FIX: Write progress file atomically to prevent Kotlin from reading
+    // a partial JSON. Write to a temp file first, then rename — on Linux/ext4,
+    // rename() on the same filesystem is atomic. This eliminates the race where
+    // Kotlin polls mid-write and gets a truncated JSON like {"current":1,"total":
+    let _ = (|| {
+        let tmp_progress_path = format!("{}.progress.tmp", output_path);
+        std::fs::write(&tmp_progress_path, content.to_string()).ok()?;
+        std::fs::rename(&tmp_progress_path, &progress_path).ok()
+    })();
 }
 
 /// Delete the progress sidecar file (called on build completion or error).
@@ -2161,6 +2168,26 @@ pub fn run_dd_build(
         };
     }
 
+    // BUG FIX: Validate partition count against flasher script limit.
+    // The update-binary validates HDR_NUM_PARTS ≤ 20, so a bundle with
+    // more than 20 partitions would be built but rejected by the flasher.
+    // Also validate against u16 max (DDBU header field is u16).
+    const MAX_PARTITIONS: usize = 20;
+    if images.len() > MAX_PARTITIONS {
+        return DdBuildResult {
+            success: false,
+            output: format!(
+                "[!] Error: {} partitions specified — maximum is {} (flasher script limit)",
+                images.len(), MAX_PARTITIONS
+            ),
+            zip_path: None,
+            zip_size: None,
+            bundle_size: None,
+            error: Some(format!("too many partitions: {} > {}", images.len(), MAX_PARTITIONS)),
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
     if output_path.is_empty() {
         return DdBuildResult {
             success: false,
@@ -2245,6 +2272,23 @@ pub fn run_dd_build(
             .unwrap_or_else(|| Path::new("."));
         let bundle_tmp_path = output_parent.join("otaku_build_tmp.bin");
         let bundle_tmp_path_str = bundle_tmp_path.to_string_lossy().to_string();
+
+        // BUG FIX: Pre-check write permission before spending minutes compressing.
+        // On Android 11+ scoped storage, File::create may fail with EACCES if
+        // the app doesn't have MANAGE_EXTERNAL_STORAGE or the path is restricted.
+        // Testing with a small file avoids failing after minutes of compression.
+        if let Err(e) = (|| -> Result<(), String> {
+            let test_path = output_parent.join(".otaku_write_test");
+            std::fs::write(&test_path, b"test").map_err(|e| format!("{}", e))?;
+            std::fs::remove_file(&test_path).map_err(|e| format!("{}", e))?;
+            Ok(())
+        })() {
+            return Err(format!(
+                "Cannot write to output directory '{}': {}. \
+                 Check storage permissions (MANAGE_EXTERNAL_STORAGE).",
+                output_parent.display(), e
+            ));
+        }
 
         // Clean up stale temp file from previous builds
         let _ = std::fs::remove_file(&bundle_tmp_path);
@@ -2333,7 +2377,7 @@ pub fn run_dd_build(
             // Write progress: starting this partition (0%)
             write_progress_with_percent(
                 output_path, i + 1, num_parts, name, "compressing",
-                tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64),
+                tmp_file.stream_position().unwrap_or(HEADER_SIZE as u64),
                 Some(&bundle_tmp_path_str), total_estimated,
                 0, // partition_percent = 0%
             );
@@ -2344,8 +2388,11 @@ pub fn run_dd_build(
                 .len();
 
             // Record data_offset BEFORE compression (current file position - header)
-            let data_offset = tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64)
-                - HEADER_SIZE as u64;
+            // BUG FIX: Use stream_position() instead of metadata().len() — the
+            // file handle's position is authoritative and avoids potential
+            // discrepancies with on-disk metadata on some Android filesystems.
+            let data_offset = tmp_file.stream_position()
+                .unwrap_or(HEADER_SIZE as u64) - HEADER_SIZE as u64;
 
             // Stream compress: reads input in 4MB chunks, compresses, and
             // writes compressed output directly to the temp file.
@@ -2357,8 +2404,10 @@ pub fn run_dd_build(
             let name_clone = name.clone();
 
             // Seek to current end of file for this partition's data
-            let current_end = tmp_file.metadata().map(|m| m.len()).unwrap_or(HEADER_SIZE as u64);
-            tmp_file.seek(std::io::SeekFrom::Start(current_end))
+            // BUG FIX: Use stream_position() for consistency — no need to seek
+            // since we're already at the end from the previous partition.
+            let current_end = tmp_file.stream_position().unwrap_or(HEADER_SIZE as u64);
+            tmp_file.seek(SeekFrom::Start(current_end))
                 .map_err(|e| format!("Cannot seek to end for {}: {}", name, e))?;
 
             // Stream compress: pass file by value, get it back on return.
@@ -2410,7 +2459,8 @@ pub fn run_dd_build(
             });
 
             // Align to 4096 boundary
-            let current_pos = tmp_file.metadata().map(|m| m.len()).unwrap_or(0);
+            // BUG FIX: Use stream_position() instead of metadata().len()
+            let current_pos = tmp_file.stream_position().unwrap_or(0);
             let aligned = align_up(current_pos as usize, ALIGN);
             if aligned > current_pos as usize {
                 let padding = aligned - current_pos as usize;
@@ -2426,7 +2476,7 @@ pub fn run_dd_build(
             // Write progress: partition done (100% for this partition)
             write_progress_with_percent(
                 output_path, i + 1, num_parts, name, "compressed",
-                tmp_file.metadata().map(|m| m.len()).unwrap_or(0),
+                tmp_file.stream_position().unwrap_or(0),
                 Some(&bundle_tmp_path_str), total_estimated,
                 100, // partition_percent = 100%
             );
@@ -2634,6 +2684,14 @@ pub fn run_dd_build(
     match result {
         Ok(r) => r,
         Err(e) => {
+            // BUG FIX: Clean up temp file on error — previously the bundle
+            // temp file (potentially GB) was orphaned in the output directory.
+            let output_parent = Path::new(output_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."));
+            let bundle_tmp_path = output_parent.join("otaku_build_tmp.bin");
+            let _ = std::fs::remove_file(&bundle_tmp_path);
+
             lines.push(format!("[!] Error: {}", e));
             DdBuildResult {
                 success: false,

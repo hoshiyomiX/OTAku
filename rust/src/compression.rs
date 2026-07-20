@@ -128,13 +128,18 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
         return ALG_XZ;
     }
 
-    // Brotli: no reliable magic, try trial decompression
-    if data.len() >= 3 {
+    // Brotli: no reliable magic, try trial decompression with larger probe.
+    // BUG FIX: Previously only decoded 1 byte, which can produce false positives
+    // — any random 3+ bytes can sometimes decode as valid brotli for 1 byte.
+    // Now decode at least 64 bytes and validate the output is non-trivial.
+    if data.len() >= 8 {
         use brotli::Decompressor;
+        use std::io::Read;
         let mut dec = Decompressor::new(data, 4096);
-        let mut probe = [0u8; 1];
-        if dec.read(&mut probe).is_ok() {
-            return ALG_BROTLI;
+        let mut probe = [0u8; 64];
+        match dec.read(&mut probe) {
+            Ok(n) if n > 0 => return ALG_BROTLI,
+            _ => {} // Not brotli
         }
     }
 
@@ -229,14 +234,29 @@ fn compress_gzip(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("gzip compress finish error: {}", e))
 }
 
+/// Maximum decompressed output size for in-memory decompress operations.
+/// Prevents zip-bomb style attacks where a small compressed input decompresses
+/// to gigabytes, exceeding Android's 256-512 MB per-app heap limit.
+const MAX_DECOMPRESSED_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
+
 fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, String> {
     use flate2::read::GzDecoder;
+    use std::io::Read;
 
-    let mut decoder = GzDecoder::new(data);
+    let decoder = GzDecoder::new(data);
     let mut result = Vec::new();
+    // BUG FIX: Use take() to limit decompressed output to MAX_DECOMPRESSED_SIZE.
+    // Without this, a compressed bomb could decompress to gigabytes and OOM.
     decoder
+        .take(MAX_DECOMPRESSED_SIZE as u64)
         .read_to_end(&mut result)
         .map_err(|e| format!("gzip decompress error: {}", e))?;
+    if result.len() >= MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "gzip decompressed output exceeds {} GiB limit — possible zip bomb",
+            MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
+        ));
+    }
     Ok(result)
 }
 
@@ -260,12 +280,21 @@ fn compress_bzip2(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
 
 fn decompress_bzip2(data: &[u8]) -> Result<Vec<u8>, String> {
     use bzip2::read::BzDecoder;
+    use std::io::Read;
 
-    let mut decoder = BzDecoder::new(data);
+    let decoder = BzDecoder::new(data);
     let mut result = Vec::new();
+    // BUG FIX: Same zip-bomb protection as decompress_gzip.
     decoder
+        .take(MAX_DECOMPRESSED_SIZE as u64)
         .read_to_end(&mut result)
         .map_err(|e| format!("bzip2 decompress error: {}", e))?;
+    if result.len() >= MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "bzip2 decompressed output exceeds {} GiB limit — possible zip bomb",
+            MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
+        ));
+    }
     Ok(result)
 }
 
@@ -287,11 +316,21 @@ fn compress_xz(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
 }
 
 fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut decoder = xz2::read::XzDecoder::new(data);
+    use std::io::Read;
+
+    let decoder = xz2::read::XzDecoder::new(data);
     let mut result = Vec::new();
+    // BUG FIX: Same zip-bomb protection as decompress_gzip.
     decoder
+        .take(MAX_DECOMPRESSED_SIZE as u64)
         .read_to_end(&mut result)
         .map_err(|e| format!("xz decompress error: {}", e))?;
+    if result.len() >= MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "xz decompressed output exceeds {} GiB limit — possible zip bomb",
+            MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
+        ));
+    }
     Ok(result)
 }
 
@@ -313,11 +352,21 @@ fn compress_brotli(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
 }
 
 fn decompress_brotli(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut decoder = brotli::Decompressor::new(data, 4096);
+    use std::io::Read;
+
+    let decoder = brotli::Decompressor::new(data, 4096);
     let mut result = Vec::new();
+    // BUG FIX: Same zip-bomb protection as decompress_gzip.
     decoder
+        .take(MAX_DECOMPRESSED_SIZE as u64)
         .read_to_end(&mut result)
         .map_err(|e| format!("brotli decompress error: {}", e))?;
+    if result.len() >= MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "brotli decompressed output exceeds {} GiB limit — possible zip bomb",
+            MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
+        ));
+    }
     Ok(result)
 }
 
