@@ -17,10 +17,12 @@
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
         <!-- Icon background color (circular mask behind the icon) -->
         <item name="windowSplashScreenIconBackgroundColor">#000000</item>
-        <!-- Branding image — OTAku text in red neon style at the bottom.
-             Only shown on Android 12+ (API 31). On older devices, the
-             splash still shows the icon on black background. -->
-        <item name="windowSplashScreenBrandingImage">@drawable/splash_branding</item>
+        <!-- Branding image added in values-v31/themes.xml for API 31+.
+             The windowSplashScreenBrandingImage attribute is a platform
+             attribute (android:windowSplashScreenBrandingImage) only
+             available on Android 12+. It cannot be used in the base
+             values/ directory because AAPT2 cannot resolve it for
+             API levels below 31. -->
         <!-- After splash, transition to the main OTAku theme -->
         <item name="postSplashScreenTheme">@style/Theme.OTAku</item>
     </style>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    API 31+ (Android 12+) splash screen overrides.
+    The windowSplashScreenBrandingImage attribute is a platform attribute
+    (android:windowSplashScreenBrandingImage) only available on API 31+.
+    It cannot be referenced in the base values/themes.xml because AAPT2
+    would fail to resolve it for lower API levels.
+
+    On API 31+, this style overrides Theme.OTAku.Splash from the base
+    values/themes.xml and adds the branding image (OTAku text in red
+    neon style at the bottom of the splash screen).
+-->
+<resources>
+    <style name="Theme.OTAku.Splash" parent="Theme.SplashScreen">
+        <!-- Black background matching the launcher icon -->
+        <item name="windowSplashScreenBackground">#000000</item>
+        <!-- The icon shown during splash -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <!-- Icon background color (circular mask behind the icon) -->
+        <item name="windowSplashScreenIconBackgroundColor">#000000</item>
+        <!-- Branding image — OTAku text at bottom of splash screen.
+             Uses the Android 12+ platform attribute. -->
+        <item name="android:windowSplashScreenBrandingImage">@drawable/splash_branding</item>
+        <!-- After splash, transition to the main OTAku theme -->
+        <item name="postSplashScreenTheme">@style/Theme.OTAku</item>
+    </style>
+</resources>
