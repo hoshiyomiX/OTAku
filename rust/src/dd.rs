@@ -250,13 +250,13 @@ const SCRIPT_VERSION: &str = "Custom Payload Maker";
 /// Build the META-INF/com/google/android/update-binary shell script.
 ///
 /// This is a TWRP/OrangeFox-compatible flasher that:
-/// 1. Extracts otaku.bin from the ZIP
+/// 1. Opens payload (direct ZIP read or fallback extract to /tmp)
 /// 2. Checks decompressor availability
 /// 3. Validates bundle integrity (DDBU magic, version, compress, partition count)
 /// 4. Checks device compatibility (if device specified)
 /// 5. Detects A/B slot
 /// 6. Validates partition block devices (size check, unmount)
-/// 7. Flashes each partition (extract → decompress → dd write → optional verify)
+/// 7. Flashes each partition (direct read → decompress → dd write → optional verify)
 fn build_update_script(
     num_parts: usize,
     compress_id: u16,
@@ -660,7 +660,18 @@ cleanup_abort() {{
 # when a signal handler returns and EXIT fires afterwards.
 trap cleanup_abort EXIT INT TERM HUP
 
-BUNDLE="/tmp/otaku.bin"
+# ── Direct ZIP reading (primary) vs extract-to-/tmp (fallback) ──
+# BUG FIX: Previously, the entire otaku.bin (potentially 4+ GB) was extracted
+# to /tmp (tmpfs, RAM-backed). On devices with limited RAM, this fails with
+# "Failed to extract otaku.bin" when otaku.bin exceeds available /tmp space.
+# New approach: read otaku.bin data directly from the ZIP file using dd with
+# a computed offset (ZIP_DATA_OFFSET). This eliminates the /tmp extraction
+# entirely for the primary path — no tmpfs usage regardless of bundle size.
+# The ZIP stores otaku.bin with CompressionMethod::Stored (no compression),
+# so the bytes inside the ZIP are identical to the standalone file.
+BUNDLE=""           # Set after offset computation or fallback extraction
+ZIP_DATA_OFFSET=0   # Byte offset of otaku.bin data within the ZIP
+BUNDLE_SIZE=0       # Size of otaku.bin data (not the ZIP file size)
 {part_vars}NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
 
@@ -676,55 +687,75 @@ ui_print "======================================"
         compress_id = compress_id,
     ));
 
-    // ── Step 0: Extract otaku.bin ──
+    // ── Step 0: Open payload (direct ZIP reading or fallback extract) ──
+    // BUG FIX: Previously, the entire otaku.bin (potentially 4+ GB) was
+    // extracted to /tmp (tmpfs, RAM-backed). On devices with limited RAM
+    // (e.g. Infinix-X6871 with 8 GB RAM, /tmp ~2-4 GB), this fails with
+    // "Failed to extract otaku.bin" for bundles exceeding /tmp capacity.
+    // Recovery log evidence: "Size: 3798 MB" → "✗ Error: Failed to extract"
+    //
+    // New approach: read otaku.bin data DIRECTLY from the ZIP file using dd
+    // with a computed offset. Since otaku.bin is stored with
+    // CompressionMethod::Stored (no ZIP-level compression), the bytes inside
+    // the ZIP are identical to the standalone file. This eliminates /tmp usage
+    // entirely for the primary path — no tmpfs exhaustion regardless of bundle
+    // size. The old extract-to-/tmp path is retained as a fallback for edge
+    // cases (e.g. ZIP on a FUSE filesystem where dd skip is unreliable).
     script.push_str(&format!(
-        r#"# ── Step {extract_step}/{total_steps}: Extract otaku.bin from ZIP ──────────────────
-ui_print "> Extracting payload..."
+        r#"# ── Step {extract_step}/{total_steps}: Open payload ──────────────────
+ui_print "> Opening payload..."
 
-rm -f "$BUNDLE"
 if [ ! -f "$ZIPFILE" ]; then
     ui_print "✗ Error: ZIP file not found"
     ui_print "  Path: $ZIPFILE"
     exit 1
 fi
 
-# Pre-extract: query ZIP central directory to learn the expected size of
-# otaku.bin. This catches truncation/corruption that would otherwise only
-# surface mid-flash (header magic check or worse, mid-dd write).
-# Output format of `unzip -l`:
-#   Length   Date  Time   C-Ratio  Name
-#   --------  ------  ------  ------  ----
-#   1234567  ...                    otaku.bin
+# ── Primary path: Compute ZIP_DATA_OFFSET from local file header ──
+# The ZIP format stores each file entry as:
+#   [Local file header: 30 bytes fixed + filename + extra field]
+#   [File data]
+# We parse the first local file header to find where otaku.bin data starts.
+# Since otaku.bin is always the first entry in our ZIPs, it starts at byte 0.
+#
+# Local file header layout (little-endian):
+#   Offset 0:  Signature (4B) = 0x04034b50
+#   Offset 26: Filename length (2B)
+#   Offset 28: Extra field length (2B)
+#   Data starts at: 30 + filename_length + extra_field_length
+#
+# With ZIP64 (large_file=true), the extra field contains:
+#   ZIP64 extended info: header_id(2B) + data_size(2B) + orig_size(8B) + comp_size(8B)
+#   = 20 bytes extra (typical for our ZIPs with 9-byte filename "otaku.bin")
+#   Total offset = 30 + 9 + 20 = 59 bytes
+DIRECT_READ_OK=0
+ZIP_LFH_SIG=$(od -A n -t x1 -N 4 "$ZIPFILE" 2>/dev/null | tr -d ' \\n')
+if [ "$ZIP_LFH_SIG" = "504b0304" ]; then
+    FNAME_LEN=$(od -A n -t u2 -j 26 -N 2 "$ZIPFILE" 2>/dev/null | tr -d ' ')
+    EXTRA_LEN=$(od -A n -t u2 -j 28 -N 2 "$ZIPFILE" 2>/dev/null | tr -d ' ')
+    if [ -n "$FNAME_LEN" ] && [ -n "$EXTRA_LEN" ]; then
+        ZIP_DATA_OFFSET=$(( 30 + FNAME_LEN + EXTRA_LEN ))
+        # Verify: read the filename and confirm it's "otaku.bin"
+        FNAME_READ=$(dd if="$ZIPFILE" bs=1 skip=30 count=$FNAME_LEN 2>/dev/null | tr -d '\0')
+        if [ "$FNAME_READ" = "otaku.bin" ]; then
+            DIRECT_READ_OK=1
+        else
+            ui_print "  Note: First ZIP entry is '$FNAME_READ', not 'otaku.bin'"
+        fi
+    fi
+fi
+
+# Query ZIP central directory for expected otaku.bin size (used for validation).
 EXPECTED_BUNDLE_SIZE=0
 ZIP_LIST_OK=0
-
-# Try system unzip first, then busybox, then toybox.
-# `unzip -l` output is parsed by looking for a line whose last token is "otaku.bin".
-# The first numeric token on that line is the uncompressed size in bytes.
-#
-# Bug fix: the previous regex `^[0-9]+ otaku\.bin$` failed on some recoveries
-# because:
-#   1. busybox grep might not handle `\.` in basic regex correctly
-#   2. Some unzip -l outputs have extra trailing whitespace or CR characters
-#   3. The `awk '{{print $1, $NF}}'` output might have inconsistent spacing
-#
-# New approach: use `grep 'otaku[.]bin$'` (portable literal dot — works in
-# both basic and extended regex), then extract the first field. Validate
-# that the result is a positive integer before accepting it.
-#
-# Using `[.]` instead of `\.` is more portable across busybox/grep variants.
-# Trailing `\r` (from Windows-line-ending unzip outputs) is stripped with tr.
 ZIP_LIST_NAME_PATTERN='otaku[.]bin$'
 
-# Helper: try to get otaku.bin size from a given unzip variant
-# Sets EXPECTED_BUNDLE_SIZE and returns 0 on success, 1 on failure
 try_zip_listing() {{
     local unzip_cmd="$1"
     local listing
     listing=$($unzip_cmd -l "$ZIPFILE" 2>/dev/null | tr -d '\r' | awk '{{print $1, $NF}}' | grep "$ZIP_LIST_NAME_PATTERN")
     [ -z "$listing" ] && return 1
     EXPECTED_BUNDLE_SIZE=$(echo "$listing" | awk '{{print $1}}' | tr -d ' ')
-    # Validate: must be a positive integer
     case "$EXPECTED_BUNDLE_SIZE" in
         ''|*[!0-9]*) return 1 ;;
     esac
@@ -733,83 +764,113 @@ try_zip_listing() {{
 }}
 
 if which unzip >/dev/null 2>&1; then
-    if try_zip_listing "unzip"; then
-        ZIP_LIST_OK=1
-    fi
+    try_zip_listing "unzip" && ZIP_LIST_OK=1
 fi
 if [ "$ZIP_LIST_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
-    if try_zip_listing "busybox unzip"; then
-        ZIP_LIST_OK=1
-    fi
+    try_zip_listing "busybox unzip" && ZIP_LIST_OK=1
 fi
 if [ "$ZIP_LIST_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
-    if try_zip_listing "toybox unzip"; then
-        ZIP_LIST_OK=1
-    fi
+    try_zip_listing "toybox unzip" && ZIP_LIST_OK=1
 fi
 
-# Warn if central directory listing failed — not fatal (some old busybox builds
-# don't support `unzip -l`), but the post-extract size check below will be skipped.
-if [ "$ZIP_LIST_OK" = "0" ]; then
-    ui_print "  Note: cannot query ZIP listing — size check will be skipped."
-elif [ -z "$EXPECTED_BUNDLE_SIZE" ] || [ "$EXPECTED_BUNDLE_SIZE" = "0" ]; then
-    ui_print "  Note: otaku.bin not found in ZIP listing — possible corrupt ZIP."
-    ui_print "✗ Error: otaku.bin not found in ZIP"
-    ui_print "  Hint: Ensure ZIP contains 'otaku.bin' in its root"
-    exit 1
-else
-    ui_print "  Size: $(( EXPECTED_BUNDLE_SIZE / 1048576 )) MB"
-fi
+if [ "$DIRECT_READ_OK" = "1" ]; then
+    # ── Primary: Direct ZIP reading ──
+    BUNDLE="$ZIPFILE"
+    ZIP_FILE_SIZE=$(wc -c < "$ZIPFILE" | tr -d ' ')
+    BUNDLE_SIZE=$(( ZIP_FILE_SIZE - ZIP_DATA_OFFSET ))
 
-EXTRACT_OK=0
-if which unzip >/dev/null 2>&1; then
-    unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
-fi
-if [ "$EXTRACT_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
-    busybox unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
-fi
-if [ "$EXTRACT_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
-    toybox unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
-fi
+    ui_print "  Mode: Direct ZIP read (no /tmp extraction needed)"
+    ui_print "  ZIP data offset: $ZIP_DATA_OFFSET bytes"
 
-if [ "$EXTRACT_OK" = "0" ] || [ ! -f "$BUNDLE" ]; then
-    ui_print "✗ Error: Failed to extract otaku.bin"
-    ui_print "  Hint: Check /tmp free space or ZIP integrity"
-    exit 1
-fi
-
-BUNDLE_EXTRACT_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
-
-# Post-extract size verification — catches truncated or partially-extracted
-# otaku.bin (common on tmpfs with low space, or ZIP CRC mismatch).
-# Only check when we have a trusted expected size from the ZIP listing.
-if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
-    if [ "$BUNDLE_EXTRACT_SIZE" != "$EXPECTED_BUNDLE_SIZE" ]; then
-        ui_print "✗ Error: otaku.bin size mismatch"
-        ui_print "  Expected: $EXPECTED_BUNDLE_SIZE bytes"
-        ui_print "  Actual:   $BUNDLE_EXTRACT_SIZE bytes"
-        ui_print "  Hint: tmpfs full or ZIP CRC error"
-        # df -h output format varies: coreutils has header line, busybox doesn't.
-        # Try `df /tmp` (POSIX, no -h flag needed) and extract free space (column 4).
-        # Some Android recoveries don't have df at all — silently skip in that case.
-        if command -v df >/dev/null 2>&1; then
-            TMP_FREE=$(df /tmp 2>/dev/null | tail -1 | awk '{{print $4}}')
-            if [ -n "$TMP_FREE" ]; then
-                ui_print "    Free: $TMP_FREE (1K-blocks)"
-            fi
-            # Also try `df -h /tmp` for human-readable — best-effort, ignore failure.
-            df -h /tmp 2>/dev/null | tail -1 | awk '{{print "    total="$2" used="$3" free="$4}}' 2>/dev/null
-        else
-            ui_print "    (df not available in this recovery)"
+    # Validate bundle size against ZIP listing (if available)
+    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
+        if [ "$BUNDLE_SIZE" != "$EXPECTED_BUNDLE_SIZE" ]; then
+            ui_print "✗ Error: otaku.bin size mismatch (direct read)"
+            ui_print "  Expected: $EXPECTED_BUNDLE_SIZE bytes"
+            ui_print "  Computed: $BUNDLE_SIZE bytes (ZIP size $ZIP_FILE_SIZE - offset $ZIP_DATA_OFFSET)"
+            ui_print "  Hint: ZIP may be corrupt or truncated"
+            exit 1
         fi
-        # Clean up the corrupt file so we don't leave partial state.
-        rm -f "$BUNDLE"
+        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB ✓"
+    else
+        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB (listing unavailable — size not verified)"
+    fi
+    ui_print "  ✓ Direct read ready"
+else
+    # ── Fallback: Extract otaku.bin to /tmp ──
+    # This path is used when:
+    #   - ZIP local file header parsing failed (unusual ZIP structure)
+    #   - First ZIP entry is not otaku.bin
+    #   - od command not available
+    # WARNING: This requires enough /tmp space for the entire otaku.bin!
+    ui_print "  Note: Direct ZIP read unavailable — falling back to /tmp extraction"
+    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
+        ui_print "  Size: $(( EXPECTED_BUNDLE_SIZE / 1048576 )) MB"
+    else
+        ui_print "  Note: cannot query ZIP listing — size check will be skipped."
+    fi
+
+    # Pre-extraction /tmp space check (if df available)
+    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && command -v df >/dev/null 2>&1; then
+        TMP_FREE_KB=$(df /tmp 2>/dev/null | tail -1 | awk '{{print $4}}')
+        NEEDED_KB=$(( (EXPECTED_BUNDLE_SIZE + 1023) / 1024 ))
+        if [ -n "$TMP_FREE_KB" ] && [ "$TMP_FREE_KB" -lt "$NEEDED_KB" ] 2>/dev/null; then
+            ui_print "✗ Error: Not enough /tmp space for extraction"
+            ui_print "  Needed: $(( NEEDED_KB / 1024 )) MB"
+            ui_print "  Available: $(( TMP_FREE_KB / 1024 )) MB"
+            ui_print "  Hint: Use a smaller bundle or free up /tmp space"
+            exit 1
+        fi
+    fi
+
+    BUNDLE="/tmp/otaku.bin"
+    rm -f "$BUNDLE"
+    EXTRACT_OK=0
+    if which unzip >/dev/null 2>&1; then
+        unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
+    fi
+    if [ "$EXTRACT_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
+        busybox unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
+    fi
+    if [ "$EXTRACT_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
+        toybox unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
+    fi
+
+    if [ "$EXTRACT_OK" = "0" ] || [ ! -f "$BUNDLE" ]; then
+        ui_print "✗ Error: Failed to extract otaku.bin"
+        ui_print "  Hint: Check /tmp free space or ZIP integrity"
+        if command -v df >/dev/null 2>&1; then
+            df -h /tmp 2>/dev/null | tail -1 | awk '{{print "    total="$2" used="$3" free="$4}}' 2>/dev/null
+        fi
         exit 1
     fi
-    ui_print "  ✓ Size verified"
-fi
 
-ui_print "  ✓ Extracted ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
+    BUNDLE_EXTRACT_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
+    BUNDLE_SIZE=$BUNDLE_EXTRACT_SIZE
+
+    # Post-extract size verification
+    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
+        if [ "$BUNDLE_EXTRACT_SIZE" != "$EXPECTED_BUNDLE_SIZE" ]; then
+            ui_print "✗ Error: otaku.bin size mismatch"
+            ui_print "  Expected: $EXPECTED_BUNDLE_SIZE bytes"
+            ui_print "  Actual:   $BUNDLE_EXTRACT_SIZE bytes"
+            ui_print "  Hint: tmpfs full or ZIP CRC error"
+            if command -v df >/dev/null 2>&1; then
+                TMP_FREE=$(df /tmp 2>/dev/null | tail -1 | awk '{{print $4}}')
+                if [ -n "$TMP_FREE" ]; then
+                    ui_print "    Free: $TMP_FREE (1K-blocks)"
+                fi
+            else
+                ui_print "    (df not available in this recovery)"
+            fi
+            rm -f "$BUNDLE"
+            exit 1
+        fi
+        ui_print "  ✓ Size verified"
+    fi
+
+    ui_print "  ✓ Extracted ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
+fi
 "#,
         extract_step = extract_step,
         total_steps = total_steps,
@@ -843,7 +904,11 @@ if [ ! -f "$BUNDLE" ]; then
     exit 1
 fi
 
-BUNDLE_VERIFY_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
+# BUNDLE_SIZE is set in Step 0 (either computed from ZIP size - offset,
+# or from wc -c of the extracted file). Use it directly for verification.
+# For direct-read mode, wc -c < $BUNDLE would give the entire ZIP file
+# size (not otaku.bin size), so we MUST use the pre-computed BUNDLE_SIZE.
+BUNDLE_VERIFY_SIZE=$BUNDLE_SIZE
 VERIFY_OK=1
 VERIFY_ERRORS=0
 
@@ -993,23 +1058,36 @@ fi
 ui_print "  ✓ Decompressor: $DECOMP_CMD"
 
 # ── Bundle integrity ──
-BUNDLE_SIZE=$(wc -c < "$BUNDLE")
+# BUNDLE_SIZE is already set from Step 0 (either computed from ZIP or extracted file).
+# For direct-read mode, reading the header requires dd with skip=$ZIP_DATA_OFFSET
+# because $BUNDLE points to the ZIP file (not the extracted otaku.bin).
+# For fallback mode, $BUNDLE = /tmp/otaku.bin and ZIP_DATA_OFFSET = 0, so dd is
+# equivalent to reading the file directly.
+#
+# Helper: read bytes from otaku.bin at a given offset and length.
+# Uses dd with bs=1 for precision (header reads are small — < 20 bytes).
+# For direct-read mode, adds ZIP_DATA_OFFSET to the skip.
+read_bundle_bytes() {{
+    local offset=$1
+    local count=$2
+    dd if="$BUNDLE" bs=1 skip=$(( ZIP_DATA_OFFSET + offset )) count=$count 2>/dev/null
+}}
 
-HDR_MAGIC=$(od -A n -t x1 -N 4 "$BUNDLE" | tr -d ' \\n')
+HDR_MAGIC=$(read_bundle_bytes 0 4 | od -A n -t x1 | tr -d ' \\n')
 if [ "$HDR_MAGIC" != "44444255" ]; then
     ui_print "! ABORT: Invalid bundle magic (expected DDBU, got $(echo $HDR_MAGIC | sed 's/\(..\)/\\x\\1/g'))"
     exit 1
 fi
 
-HDR_VERSION=$(od -A n -t u2 -j 4 -N 2 "$BUNDLE" | tr -d ' ')
+HDR_VERSION=$(read_bundle_bytes 4 2 | od -A n -t u2 | tr -d ' ')
 # HDR_COMPRESS is u16 LE (2 bytes) — read with -t u2 -N 2 to match the
 # header writer (build_header() writes compress_id as u16 LE).
 # Previous code used -t u1 -N 1 which only read the low byte; this worked
 # by accident for compress_id 0-4 (high byte = 0) but would silently
 # truncate if compress_id ever exceeded 255.
-HDR_COMPRESS=$(od -A n -t u2 -j 6 -N 2 "$BUNDLE" | tr -d ' ')
-HDR_NUM_PARTS=$(od -A n -t u2 -j 8 -N 2 "$BUNDLE" | tr -d ' ')
-HDR_HDR_SIZE=$(od -A n -t u2 -j 10 -N 2 "$BUNDLE" | tr -d ' ')
+HDR_COMPRESS=$(read_bundle_bytes 6 2 | od -A n -t u2 | tr -d ' ')
+HDR_NUM_PARTS=$(read_bundle_bytes 8 2 | od -A n -t u2 | tr -d ' ')
+HDR_HDR_SIZE=$(read_bundle_bytes 10 2 | od -A n -t u2 | tr -d ' ')
 
 if [ "$HDR_VERSION" != "1" ]; then
     ui_print "! ABORT: Unsupported bundle version: $HDR_VERSION"
@@ -1783,7 +1861,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # all data was already written successfully.
     # Instead, we write WITHOUT conv= flags and verify data was written
     # by checking blockdev --getsize64 when dd returns non-zero.
-    EXTRACT_SKIP=$(( DATA_OFFSET + POFFSET ))
+    EXTRACT_SKIP=$(( ZIP_DATA_OFFSET + DATA_OFFSET + POFFSET ))
     SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
     READ_COUNT=$(( (PCSIZE + 4095) / 4096 ))
 
@@ -1807,7 +1885,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         if [ -z "$COMP_HASH_ACTUAL" ]; then
             ui_print "! ABORT: Cannot compute compressed data hash for $PNAME"
             ui_print "!  Bundle may be unreadable or sha256sum not available."
-            ui_print "!  Bundle size: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes"
+            ui_print "!  Bundle size: $BUNDLE_SIZE bytes"
             ui_print "!  Extract skip: $EXTRACT_SKIP bytes ($SKIP_BLOCKS blocks)"
             ui_print "!  Read count: $READ_COUNT blocks ($(( READ_COUNT * 4096 )) bytes)"
             ui_print "!  Expected compressed size: $PCSIZE bytes"
@@ -1823,7 +1901,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             ui_print "!    - tmpfs full during extraction"
             ui_print "!    - Storage I/O error"
             ui_print "!  Rebuild the bundle and re-transfer to device."
-            ui_print "!  Bundle size: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes"
+            ui_print "!  Bundle size: $BUNDLE_SIZE bytes"
             exit 1
         fi
         ui_print "  ✓ Hash verified"
@@ -1904,7 +1982,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             ui_print "✗ Error: Decompression failed for $PNAME"
             ui_print "  Decompressor: $DECOMP_PIPE (status=$DECOMP_STATUS)"
             ui_print "  Details: $GZIP_ERR_MSG"
-            ui_print "  Bundle: $(wc -c < "$BUNDLE" 2>/dev/null | tr -d ' ') bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
+            ui_print "  Bundle: $BUNDLE_SIZE bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
 
             # If compressed-data hash was verified above (PCOMP_HASH non-empty),
             # the compressed data IS intact — the issue is with the decompressor
@@ -2073,6 +2151,11 @@ if [ -n "$TARGET_SLOT" ]; then
 fi
 
 # ── Done ────────────────────────────────────────────────────
+# Clean up extracted bundle (only present in fallback mode —
+# direct-read mode has BUNDLE=$ZIPFILE, not /tmp/otaku.bin).
+if [ "$BUNDLE" = "/tmp/otaku.bin" ] && [ -f "$BUNDLE" ]; then
+    rm -f "$BUNDLE"
+fi
 ui_print "======================================"
 ui_print "  Flash complete — $NUM_PARTS partition(s)"
 ui_print "======================================"
@@ -3356,8 +3439,8 @@ mod tests {
         // Without device check
         let script_no_dev = build_update_script(1, 1, "gzip", &meta, "", false);
 
-        // Step 0 = extract — header line format: "[Step 0/7]"
-        assert!(script_no_dev.contains("Step 0/"), "Step 0 (extract) missing");
+        // Step 0 = open payload — header line format: "[Step 0/7]"
+        assert!(script_no_dev.contains("Step 0/"), "Step 0 (open payload) missing");
         // Step 1 = pre-flash verify (NEW) — header format: "[Step 1/7]"
         assert!(script_no_dev.contains("Step 1/"), "Step 1 (pre-flash verify) missing");
         // Step 2 = integrity + decompressor (MERGED) — header format: "[Step 2/7]"
@@ -3476,6 +3559,58 @@ mod tests {
         assert!(
             script.contains("head -c"),
             "head -c (exact byte extraction) missing"
+        );
+    }
+
+    /// Verify direct ZIP reading feature is present in the generated script.
+    /// This guards against accidental removal of the ZIP_DATA_OFFSET computation
+    /// and the read_bundle_bytes helper function.
+    #[test]
+    fn test_direct_zip_reading_present() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 1073741824,
+            hash_hex: "a".repeat(64),
+            comp_size: 536870912,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+
+        // ZIP_DATA_OFFSET variable is computed
+        assert!(
+            script.contains("ZIP_DATA_OFFSET"),
+            "REGRESSION: ZIP_DATA_OFFSET variable not found (direct ZIP reading)"
+        );
+
+        // read_bundle_bytes helper function is defined
+        assert!(
+            script.contains("read_bundle_bytes()"),
+            "REGRESSION: read_bundle_bytes helper not defined (direct ZIP reading)"
+        );
+
+        // Direct read mode indicator
+        assert!(
+            script.contains("Direct ZIP read") || script.contains("DIRECT_READ_OK"),
+            "REGRESSION: direct ZIP read mode not present"
+        );
+
+        // Fallback extraction path still exists
+        assert!(
+            script.contains("Fallback") || script.contains("fallback"),
+            "REGRESSION: fallback extraction path missing"
+        );
+
+        // EXTRACT_SKIP includes ZIP_DATA_OFFSET
+        assert!(
+            script.contains("ZIP_DATA_OFFSET + DATA_OFFSET + POFFSET"),
+            "REGRESSION: EXTRACT_SKIP should include ZIP_DATA_OFFSET"
+        );
+
+        // BUNDLE_SIZE is pre-computed (not from wc -c of $BUNDLE in integrity step)
+        assert!(
+            !script.contains("BUNDLE_SIZE=$(wc -c < \"$BUNDLE\")"),
+            "REGRESSION: BUNDLE_SIZE should be pre-computed from Step 0, not from wc -c"
         );
     }
 
