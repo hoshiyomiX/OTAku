@@ -378,6 +378,16 @@ class MainActivity : AppCompatActivity() {
         // at app launch, then transitions smoothly to the main theme.
         val splashScreen = installSplashScreen()
 
+        // Keep splash visible for at least 2 seconds so the icon is visible
+        // before transitioning to the main activity. Without this, the splash
+        // disappears almost instantly on fast devices.
+        var keepSplash = true
+        splashScreen.setKeepOnScreenCondition { keepSplash }
+        lifecycleScope.launch {
+            delay(2000L) // 2 seconds
+            keepSplash = false
+        }
+
         // Apply theme BEFORE setContentView.
         // applyDynamicTheme() decides between:
         //   - Theme.OTAku (default teal, with Material You overrides on API 31+)
