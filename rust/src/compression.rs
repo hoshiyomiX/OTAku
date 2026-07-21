@@ -50,11 +50,16 @@ pub const COMPRESS_ID_MAP: &[(&str, u16)] = &[
     ("brotli", 4),
 ];
 
-/// Get the compress ID for an algorithm name
+/// Get the compress ID for an algorithm name.
+///
+/// BUG FIX (NEW-E): Uses `normalise()` to resolve aliases before lookup,
+/// so "REPLACE_BROT" → "brotli" → 4 and "REPLACE_BZ" → "bzip2" → 2.
+/// Previously did exact-match, returning 0 (none) for AOSP type names.
 pub fn compress_id(algorithm: &str) -> u16 {
+    let canonical = normalise(algorithm);
     COMPRESS_ID_MAP
         .iter()
-        .find(|(name, _)| *name == algorithm)
+        .find(|(name, _)| *name == canonical)
         .map(|(_, id)| *id)
         .unwrap_or(0)
 }
@@ -64,14 +69,21 @@ pub fn compress_id(algorithm: &str) -> u16 {
 // ---------------------------------------------------------------------------
 
 /// Normalize an algorithm name to canonical form, handling common aliases.
+///
+/// BUG FIX (NEW-E): Added AOSP operation type name aliases so that strings
+/// like "REPLACE_BROT" and "REPLACE_BZ" (which appear in parsed payload JSON)
+/// are correctly mapped to their canonical algorithm names ("brotli", "bzip2").
+/// Previously, these strings fell through to the `other` arm and were returned
+/// as-is, causing `is_alg("REPLACE_BROT", "brotli")` to return false and
+/// `compress_id("REPLACE_BROT")` to return 0 (none) instead of 4 (brotli).
 fn normalise(algorithm: &str) -> String {
     let lower = algorithm.to_lowercase().trim().to_string();
     match lower.as_str() {
         "" | "raw" | "none" => ALG_NONE.to_string(),
-        "bz2" | "bzip2" => ALG_BZIP2.to_string(),
-        "gz" | "gzip" => ALG_GZIP.to_string(),
-        "lzma" | "xz" => ALG_XZ.to_string(),
-        "br" | "brotli" => ALG_BROTLI.to_string(),
+        "bz2" | "bzip2" | "replace_bz" => ALG_BZIP2.to_string(),
+        "gz" | "gzip" | "puigzip" => ALG_GZIP.to_string(),
+        "lzma" | "xz" | "replace_xz" => ALG_XZ.to_string(),
+        "br" | "brotli" | "replace_brot" | "brotli_bsdiff" => ALG_BROTLI.to_string(),
         other => other.to_string(), // return as-is for unknown algorithms
     }
 }
@@ -1603,6 +1615,50 @@ mod tests {
         assert_eq!(normalise("none"), ALG_NONE);
         assert_eq!(normalise("raw"), ALG_NONE);
         assert_eq!(normalise(""), ALG_NONE);
+    }
+
+    /// Bug NEW-E: AOSP operation type names must map to canonical algorithms.
+    #[test]
+    fn test_normalise_aosp_op_type_names() {
+        // REPLACE_BROT → brotli
+        assert_eq!(normalise("REPLACE_BROT"), ALG_BROTLI);
+        assert_eq!(normalise("replace_brot"), ALG_BROTLI);
+        // REPLACE_BZ → bzip2
+        assert_eq!(normalise("REPLACE_BZ"), ALG_BZIP2);
+        assert_eq!(normalise("replace_bz"), ALG_BZIP2);
+        // REPLACE_XZ → xz
+        assert_eq!(normalise("REPLACE_XZ"), ALG_XZ);
+        assert_eq!(normalise("replace_xz"), ALG_XZ);
+        // PUIGZIP → gzip
+        assert_eq!(normalise("PUIGZIP"), ALG_GZIP);
+        // BROTLI_BSDIFF → brotli
+        assert_eq!(normalise("BROTLI_BSDIFF"), ALG_BROTLI);
+    }
+
+    /// Bug NEW-E: compress_id must resolve AOSP type names correctly.
+    #[test]
+    fn test_compress_id_aosp_aliases() {
+        assert_eq!(compress_id("REPLACE_BROT"), 4); // brotli
+        assert_eq!(compress_id("REPLACE_BZ"), 2);   // bzip2
+        assert_eq!(compress_id("REPLACE_XZ"), 3);   // xz
+        assert_eq!(compress_id("PUIGZIP"), 1);       // gzip
+        assert_eq!(compress_id("BROTLI_BSDIFF"), 4); // brotli
+        // Canonical names still work
+        assert_eq!(compress_id("brotli"), 4);
+        assert_eq!(compress_id("bzip2"), 2);
+    }
+
+    /// Bug NEW-E: is_alg must recognize AOSP type names.
+    #[test]
+    fn test_is_alg_aosp_aliases() {
+        assert!(is_alg("REPLACE_BROT", ALG_BROTLI));
+        assert!(is_alg("REPLACE_BZ", ALG_BZIP2));
+        assert!(is_alg("REPLACE_XZ", ALG_XZ));
+        assert!(is_alg("PUIGZIP", ALG_GZIP));
+        assert!(is_alg("BROTLI_BSDIFF", ALG_BROTLI));
+        // Negative cases
+        assert!(!is_alg("REPLACE_BROT", ALG_BZIP2));
+        assert!(!is_alg("REPLACE_BZ", ALG_BROTLI));
     }
 
     #[test]

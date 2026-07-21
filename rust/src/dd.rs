@@ -1834,6 +1834,17 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 
     STEP_NUM=$(( i + {flash_step_offset} ))
 
+    # Bug NEW-A/B fix (flash step): guard empty variables before arithmetic.
+    # The verify step already has these guards, but the flash step was missing
+    # them. Empty POFFSET/PCSIZE/PSIZE in $(( )) causes syntax errors in
+    # POSIX sh (dash) — the Android recovery default shell.
+    if [ -z "$POFFSET" ] || [ -z "$PCSIZE" ] || [ -z "$PSIZE" ]; then
+        ui_print "! ABORT: Missing partition metadata for $PNAME"
+        ui_print "!  POFFSET=${{POFFSET:-(empty)}} PCSIZE=${{PCSIZE:-(empty)}} PSIZE=${{PSIZE:-(empty)}}"
+        ui_print "!  Bundle is corrupt or was built with incompatible OTAku version."
+        exit 1
+    fi
+
     ui_print "> Flashing $PNAME ($(( PSIZE / 1048576 )) MB)..."
     ui_print "  Compressed: $(( PCSIZE / 1048576 )) MB"
 
@@ -3524,6 +3535,39 @@ mod tests {
         let script = build_update_script(1, 1, "gzip", &meta, "", false);
         assert!(script.contains("HASH_SHORT"), "Bug NEW-C: HASH_SHORT variable missing");
         assert!(script.contains("printf"), "Bug NEW-C: printf fix missing");
+    }
+
+    /// Bug NEW-A/B fix (flash step): verify POFFSET/PCSIZE/PSIZE empty-var guards
+    /// exist in the flash loop, not just the verify loop.
+    #[test]
+    fn test_regression_flash_step_empty_var_guard() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1075,
+            hash_hex: "a".repeat(64),
+            comp_size: 334,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        // The flash step guard checks for empty POFFSET, PCSIZE, PSIZE
+        assert!(
+            script.contains("-z \"$POFFSET\"") || script.contains("-z \"$POFFSET\""),
+            "Bug NEW-A/B (flash step): POFFSET empty guard missing"
+        );
+        assert!(
+            script.contains("-z \"$PCSIZE\"") || script.contains("-z \"$PCSIZE\""),
+            "Bug NEW-A/B (flash step): PCSIZE empty guard missing"
+        );
+        assert!(
+            script.contains("-z \"$PSIZE\"") || script.contains("-z \"$PSIZE\""),
+            "Bug NEW-A/B (flash step): PSIZE empty guard missing"
+        );
+        // The abort message should be present
+        assert!(
+            script.contains("Missing partition metadata"),
+            "Bug NEW-A/B (flash step): abort message missing"
+        );
     }
 
     /// Verify the new pre-flash compressed-data hash verification is present.

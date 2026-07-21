@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Splash screen branding image — OTAku text at bottom of splash.
+    Shown below the icon on Android 12+ (via windowSplashScreenBrandingImage)
+    and as a fallback branding strip on older devices via the compat library.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="240dp"
+    android:height="40dp"
+    android:viewportWidth="240"
+    android:viewportHeight="40">
+
+    <!-- "OTAku" text in red neon style matching the launcher icon -->
+    <!-- O -->
+    <path
+        android:fillColor="#FF1744"
+        android:pathData="
+        M8,4 C8,1 28,1 28,4 L28,24 C28,27 8,27 8,24 Z
+        M14,4 L14,24 C14,26 22,26 22,24 L22,4 C22,2 14,2 14,4 Z"/>
+
+    <!-- T -->
+    <path
+        android:fillColor="#FF1744"
+        android:pathData="
+        M32,0 L32,4 L42,4 L42,27 L48,27 L48,4 L58,4 L58,0 Z"/>
+
+    <!-- A -->
+    <path
+        android:fillColor="#FF1744"
+        android:pathData="
+        M62,27 L68,27 L68,18 L76,18 L76,27 L82,27 L82,0 L76,0 L68,10 L68,0 L62,0 Z
+        M68,14 L76,6 L76,14 Z"/>
+
+    <!-- k -->
+    <path
+        android:fillColor="#FF1744"
+        android:pathData="
+        M86,0 L86,27 L92,27 L92,16 L100,27 L108,27 L98,14 L108,0 L100,0 L92,12 L92,0 Z"/>
+
+    <!-- u -->
+    <path
+        android:fillColor="#FF1744"
+        android:pathData="
+        M112,0 L112,20 C112,29 138,29 138,20 L138,27 L132,27 L132,20
+        C132,24 118,24 118,20 L118,0 Z"/>
+
+    <!-- Subtle glow effect — thin lighter outline -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF5252"
+        android:strokeWidth="0.5"
+        android:pathData="
+        M8,4 C8,1 28,1 28,4 L28,24 C28,27 8,27 8,24 Z
+        M32,0 L32,4 L42,4 L42,27 L48,27 L48,4 L58,4 L58,0 Z
+        M86,0 L86,27 L92,27 L92,16 L100,27 L108,27 L98,14 L108,0 L100,0 L92,12 L92,0 Z
+        M112,0 L112,20 C112,29 138,29 138,20 L138,27 L132,27 L132,20
+        C132,24 118,24 118,20 L118,0 Z"/>
+</vector>

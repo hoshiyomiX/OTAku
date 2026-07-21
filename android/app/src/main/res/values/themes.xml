@@ -8,7 +8,8 @@
     <!-- Splash screen theme — shows OTAku icon on black background at launch.
          Uses AndroidX SplashScreen API (compatible back to API 23).
          The icon (ic_launcher_foreground) is displayed centered with
-         the iconBackground color behind it in a circular mask. -->
+         the iconBackground color behind it in a circular mask.
+         Branding image (OTAku text) shown at bottom on API 31+. -->
     <style name="Theme.OTAku.Splash" parent="Theme.SplashScreen">
         <!-- Black background matching the launcher icon -->
         <item name="windowSplashScreenBackground">#000000</item>
@@ -16,6 +17,10 @@
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
         <!-- Icon background color (circular mask behind the icon) -->
         <item name="windowSplashScreenIconBackgroundColor">#000000</item>
+        <!-- Branding image — OTAku text in red neon style at the bottom.
+             Only shown on Android 12+ (API 31). On older devices, the
+             splash still shows the icon on black background. -->
+        <item name="windowSplashScreenBrandingImage">@drawable/splash_branding</item>
         <!-- After splash, transition to the main OTAku theme -->
         <item name="postSplashScreenTheme">@style/Theme.OTAku</item>
     </style>
