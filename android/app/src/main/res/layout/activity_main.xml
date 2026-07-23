@@ -15,6 +15,7 @@
     │   [BUILD OTA NOW] + ProgressBar         │
     │   Log Card (below Build button)         │
     │     Header + Copy/Clear + ScrollView    │
+    │ ↓ 88dp bottom padding (FAB clearance)  │
     └─────────────────────────────────────────┘
 -->
 <androidx.coordinatorlayout.widget.CoordinatorLayout
@@ -48,6 +49,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
+        android:paddingBottom="88dp"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
         <!-- ═══════════════════════════════════════════════════ -->
