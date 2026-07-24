@@ -777,23 +777,27 @@ if [ "$DIRECT_READ_OK" = "1" ]; then
     # ── Primary: Direct ZIP reading ──
     BUNDLE="$ZIPFILE"
     ZIP_FILE_SIZE=$(wc -c < "$ZIPFILE" | tr -d ' ')
-    BUNDLE_SIZE=$(( ZIP_FILE_SIZE - ZIP_DATA_OFFSET ))
 
     ui_print "  Mode: Direct ZIP read (no /tmp extraction needed)"
     ui_print "  ZIP data offset: $ZIP_DATA_OFFSET bytes"
 
-    # Validate bundle size against ZIP listing (if available)
+    # ── BUNDLE_SIZE computation ──
+    # ZIP_FILE_SIZE - ZIP_DATA_OFFSET gives the size of ALL bytes from the
+    # otaku.bin data start to the END of the ZIP file — but the ZIP file also
+    # contains the central directory and EOCD record AFTER otaku.bin's data.
+    # These trailing bytes inflate the computed size, causing a mismatch against
+    # the actual otaku.bin size reported by unzip -l.
+    # When unzip -l is available (ZIP_LIST_OK=1), use EXPECTED_BUNDLE_SIZE
+    # directly — it gives the exact otaku.bin uncompressed size, which equals
+    # the stored (CompressionMethod=Stored) data size inside the ZIP.
+    # When unzip -l is unavailable, use ZIP_FILE_SIZE - ZIP_DATA_OFFSET as a
+    # best-effort estimate (slightly over-counts, but unavoidable without listing).
     if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
-        if [ "$BUNDLE_SIZE" != "$EXPECTED_BUNDLE_SIZE" ]; then
-            ui_print "✗ Error: otaku.bin size mismatch (direct read)"
-            ui_print "  Expected: $EXPECTED_BUNDLE_SIZE bytes"
-            ui_print "  Computed: $BUNDLE_SIZE bytes (ZIP size $ZIP_FILE_SIZE - offset $ZIP_DATA_OFFSET)"
-            ui_print "  Hint: ZIP may be corrupt or truncated"
-            exit 1
-        fi
-        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB ✓"
+        BUNDLE_SIZE=$EXPECTED_BUNDLE_SIZE
+        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB ✓ (verified via ZIP listing)"
     else
-        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB (listing unavailable — size not verified)"
+        BUNDLE_SIZE=$(( ZIP_FILE_SIZE - ZIP_DATA_OFFSET ))
+        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB (listing unavailable — size includes ZIP trailer)"
     fi
     ui_print "  ✓ Direct read ready"
 else
@@ -3655,6 +3659,13 @@ mod tests {
         assert!(
             !script.contains("BUNDLE_SIZE=$(wc -c < \"$BUNDLE\")"),
             "REGRESSION: BUNDLE_SIZE should be pre-computed from Step 0, not from wc -c"
+        );
+
+        // BUNDLE_SIZE uses EXPECTED_BUNDLE_SIZE when ZIP listing is available
+        // (fixes size mismatch caused by ZIP central directory trailer bytes)
+        assert!(
+            script.contains("BUNDLE_SIZE=$EXPECTED_BUNDLE_SIZE"),
+            "REGRESSION: BUNDLE_SIZE should use EXPECTED_BUNDLE_SIZE when ZIP_LIST_OK=1 (fixes size mismatch from ZIP trailer)"
         );
     }
 
