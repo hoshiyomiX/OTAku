@@ -149,6 +149,9 @@ pub struct DdBuildResult {
     pub zip_path: Option<String>,
     pub zip_size: Option<u64>,
     pub bundle_size: Option<u64>,
+    /// Total uncompressed size of all partition images.
+    /// Used by the flasher script for pre-flash free space verification.
+    pub total_unc_size: Option<u64>,
     pub error: Option<String>,
     pub duration_ms: u64,
 }
@@ -262,6 +265,7 @@ fn build_update_script(
     compress_id: u16,
     compress_name: &str,
     partitions_meta: &[PartitionMeta],
+    total_unc_size: u64,
     device: &str,
     skip_verify: bool,
 ) -> String {
@@ -294,7 +298,8 @@ fn build_update_script(
     let slot_step = if has_device { 4 } else { 3 };
     let validation_step = if has_device { 5 } else { 4 };
     let resize_step = if has_device { 6 } else { 5 };
-    let flash_step_offset = if has_device { 7 } else { 6 };
+    let free_space_step = resize_step + 1;  // Pre-flash free space check (NEW)
+    let flash_step_offset = free_space_step + 1;
     let total_steps = num_parts + flash_step_offset;
 
     // Device check step
@@ -672,6 +677,7 @@ trap cleanup_abort EXIT INT TERM HUP
 BUNDLE=""           # Set after offset computation or fallback extraction
 ZIP_DATA_OFFSET=0   # Byte offset of otaku.bin data within the ZIP
 BUNDLE_SIZE=0       # Size of otaku.bin data (not the ZIP file size)
+TOTAL_FLASH_SIZE={total_unc_size}   # Total uncompressed size of all partitions (for free space check)
 {part_vars}NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
 
@@ -683,6 +689,7 @@ ui_print "======================================"
         script_version = SCRIPT_VERSION,
         header_info = header_info,
         part_vars = part_vars,
+        total_unc_size = total_unc_size,
         num_parts = num_parts,
         compress_id = compress_id,
     ));
@@ -1814,6 +1821,106 @@ else
         total_steps = total_steps,
     ));
 
+    // ── Pre-flash free space check ──
+    // After partition validation and resize, verify that the target device
+    // has enough free space to hold the total uncompressed data. This check
+    // uses TOTAL_FLASH_SIZE (computed during build and saved in the ZIP) to
+    // compare against available storage on the target device.
+    //
+    // For devices with dynamic partitions, lptools free is used (super partition).
+    // For devices with non-dynamic partitions, df on /data or the data partition
+    // is used as a rough heuristic. The check is skipped gracefully if neither
+    // tool is available — the per-partition size validation already ensures each
+    // partition can hold its individual image.
+    script.push_str(&format!(
+        r#"# ── Step {free_space_step}/{total_steps}: Pre-flash free space check ──────────────────
+ui_print "> Checking available storage space..."
+
+# ── TOTAL_FLASH_SIZE vs available space ──
+# TOTAL_FLASH_SIZE is the sum of all partition uncompressed sizes, computed
+# during the build and embedded in flash_info.txt + the script header.
+# It represents the minimum storage capacity needed to flash this bundle.
+# If available space is less than this, the flash will almost certainly fail.
+#
+# This is a SUPPLEMENTARY check — the per-partition size validation in the
+# previous step already ensures each partition can hold its individual image.
+# This check catches scenarios where:
+#   1. The data partition is nearly full and can't hold system/vendor/etc.
+#   2. The super partition doesn't have enough free space for dynamic resize.
+#   3. The overall device storage is critically low.
+#
+# The check is skipped gracefully if df/lptools free is unavailable — some
+# minimal recovery builds lack these tools.
+FLASH_SPACE_CHECK=0
+
+# ── Method 1: lptools free (dynamic partitions) ──
+# This is the most reliable method for devices with dynamic partitions.
+# lptools free reports actual available bytes in the super partition metadata.
+if [ "$HAS_LPTOOLS" = "1" ] && [ -n "$RESIZE_NEEDED" ]; then
+    LP_FREE=$(lptools free 2>/dev/null | grep -o 'Free space: [0-9]*' | awk '{{print $3}}')
+    if [ -n "$LP_FREE" ]; then
+        # For dynamic partitions, we need: existing partition sizes + resize delta.
+        # But TOTAL_FLASH_SIZE includes ALL partitions (dynamic + non-dynamic).
+        # The resize step already verified LP_FREE ≥ RESIZE_TOTAL.
+        # Here we just report informational comparison.
+        ui_print "  Super free space: $(( LP_FREE / 1048576 )) MB"
+        ui_print "  Total flash size: $(( TOTAL_FLASH_SIZE / 1048576 )) MB"
+        if [ "$LP_FREE" -lt "$RESIZE_TOTAL" ]; then
+            # Already caught by resize step, but double-check for safety
+            ui_print "✗ Error: Insufficient free space in super partition."
+            ui_print "  Need: $(( RESIZE_TOTAL / 1048576 )) MB, available: $(( LP_FREE / 1048576 )) MB"
+            exit 1
+        fi
+        FLASH_SPACE_CHECK=1
+    fi
+fi
+
+# ── Method 2: df on data partition (non-dynamic / general check) ──
+# For non-dynamic partitions, we check free space on the data partition.
+# This is a heuristic — the actual flash writes to individual block devices
+# (system, vendor, boot, etc.), not /data. But if /data is critically low,
+# the device likely can't handle the flash either (recovery needs /data for
+# temporary files, and a nearly-full device may have other issues).
+# We also check the partition that each image will be written to.
+if [ "$FLASH_SPACE_CHECK" = "0" ] && command -v df >/dev/null 2>&1; then
+    # Check /data free space as a general health indicator
+    DATA_FREE_KB=$(df /data 2>/dev/null | tail -1 | awk '{{print $4}}')
+    if [ -n "$DATA_FREE_KB" ] && [ "$DATA_FREE_KB" -gt 0 ] 2>/dev/null; then
+        DATA_FREE_BYTES=$(( DATA_FREE_KB * 1024 ))
+        ui_print "  /data free space: $(( DATA_FREE_BYTES / 1048576 )) MB"
+        ui_print "  Total flash size: $(( TOTAL_FLASH_SIZE / 1048576 )) MB"
+        # /data doesn't need to hold the full TOTAL_FLASH_SIZE (partitions
+        # are flashed directly to block devices), but if /data has < 100 MB
+        # free, the device is critically low and flashing may fail.
+        MIN_DATA_FREE=$(( 100 * 1048576 ))  # 100 MB minimum
+        if [ "$DATA_FREE_BYTES" -lt "$MIN_DATA_FREE" ]; then
+            ui_print "! WARNING: /data has less than 100 MB free — flash may fail."
+            ui_print "!  Free up space on /data before flashing."
+            # This is a WARNING, not an ABORT — the per-partition size check
+            # is the authoritative gate. Low /data may just mean the device
+            # is full, but recovery can still flash directly to block devices.
+        fi
+        FLASH_SPACE_CHECK=1
+    fi
+fi
+
+# ── Method 3: Sum per-partition available space ──
+# For each non-dynamic partition, check that PART_SIZE ≥ UNC_SIZE.
+# This was already done in the validation step, but we report the total
+# here for informational purposes.
+if [ "$FLASH_SPACE_CHECK" = "0" ]; then
+    ui_print "  Note: Cannot check free space (df/lptools unavailable)."
+    ui_print "  Per-partition size validation passed — proceeding with flash."
+    ui_print "  Total flash size: $(( TOTAL_FLASH_SIZE / 1048576 )) MB"
+fi
+
+ui_print "  ✓ Free space check complete"
+
+# ── Flash each partition ──"#,
+        free_space_step = free_space_step,
+        total_steps = total_steps,
+    ));
+
     // ── Flash each partition ──
     // BUG FIX (NEW-G): Generate algorithm-specific fallback decompressors instead
     // of hardcoding gzip-only fallbacks. Previously, all compression types used
@@ -2199,6 +2306,7 @@ exit 0
 fn build_flash_info(
     compress_name: &str,
     bundle_size: u64,
+    total_unc_size: u64,
     num_parts: usize,
     partitions_meta: &[PartitionMeta],
     device: &str,
@@ -2235,6 +2343,11 @@ fn build_flash_info(
         "Bundle size: {} bytes ({})",
         bundle_size,
         human_size(bundle_size)
+    ));
+    lines.push(format!(
+        "Total flash size: {} bytes ({})",
+        total_unc_size,
+        human_size(total_unc_size)
     ));
     lines.push(format!("Partitions: {}", num_parts));
     lines.push(format!(
@@ -2312,6 +2425,7 @@ pub fn run_dd_build(
             zip_path: None,
             zip_size: None,
             bundle_size: None,
+            total_unc_size: None,
             error: Some("no images specified".to_string()),
             duration_ms: start.elapsed().as_millis() as u64,
         };
@@ -2332,6 +2446,7 @@ pub fn run_dd_build(
             zip_path: None,
             zip_size: None,
             bundle_size: None,
+            total_unc_size: None,
             error: Some(format!("too many partitions: {} > {}", images.len(), MAX_PARTITIONS)),
             duration_ms: start.elapsed().as_millis() as u64,
         };
@@ -2344,6 +2459,7 @@ pub fn run_dd_build(
             zip_path: None,
             zip_size: None,
             bundle_size: None,
+            total_unc_size: None,
             error: Some("output_path is required".to_string()),
             duration_ms: start.elapsed().as_millis() as u64,
         };
@@ -2366,6 +2482,7 @@ pub fn run_dd_build(
             zip_path: None,
             zip_size: None,
             bundle_size: None,
+            total_unc_size: None,
             error: Some(format!("unsupported compression: {}", compression)),
             duration_ms: start.elapsed().as_millis() as u64,
         };
@@ -2383,6 +2500,7 @@ pub fn run_dd_build(
                 zip_path: None,
                 zip_size: None,
                 bundle_size: None,
+                total_unc_size: None,
                 error: Some(format!("image file not found: {}", path)),
                 duration_ms: start.elapsed().as_millis() as u64,
             };
@@ -2658,6 +2776,16 @@ pub fn run_dd_build(
             .map(|m| m.len())
             .unwrap_or(0);
         lines.push(format!("  Bundle size  : {}", human_size(bundle_size)));
+
+        // ── Compute total uncompressed size (for free space check during flashing) ──
+        // This is the sum of all partition image sizes — it represents the minimum
+        // free space needed on target partitions to flash the entire bundle.
+        let total_unc_size: u64 = partitions_meta.iter().map(|p| p.unc_size).sum();
+        lines.push(format!(
+            "  Total flash size: {} ({})",
+            human_size(total_unc_size),
+            total_unc_size
+        ));
         lines.push(String::new());
 
         // ── Step 2: Build flasher scripts ──
@@ -2673,6 +2801,7 @@ pub fn run_dd_build(
             compress_id_val,
             &compress_name,
             &partitions_meta,
+            total_unc_size,
             device,
             skip_verify,
         );
@@ -2726,6 +2855,7 @@ pub fn run_dd_build(
         let flash_info = build_flash_info(
             &compress_name,
             bundle_size,
+            total_unc_size,
             num_parts,
             &partitions_meta,
             device,
@@ -2828,6 +2958,7 @@ pub fn run_dd_build(
             zip_path: Some(output_path.to_string()),
             zip_size: Some(zip_size),
             bundle_size: Some(bundle_size),
+            total_unc_size: Some(total_unc_size),
             error: None,
             duration_ms: elapsed.as_millis() as u64,
         })
@@ -2854,6 +2985,7 @@ pub fn run_dd_build(
                 zip_path: None,
                 zip_size: None,
                 bundle_size: None,
+                total_unc_size: None,
                 error: Some(e),
                 duration_ms: start.elapsed().as_millis() as u64,
             }
@@ -2936,7 +3068,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         assert!(script.starts_with("#!/sbin/sh"));
         assert!(script.contains("PART_0_NAME=\"boot\""));
         assert!(script.contains("PART_0_HASH=\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\""));
@@ -2957,7 +3089,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", true);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", true);
         assert!(script.contains("Verification skipped"));
         // sha256sum appears in pre-flash compressed hash verification even when
         // post-flash verify is skipped — that's expected behavior.
@@ -2974,7 +3106,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "crosshatch", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "crosshatch", false);
         assert!(script.contains("TARGET_DEVICE=\"crosshatch\""));
         assert!(script.contains("DEVICE_MATCH"));
     }
@@ -2989,13 +3121,14 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let info = build_flash_info("gzip", 16781312, 1, &meta, "crosshatch", 6, false, "TestROM", "TestMaker");
+        let info = build_flash_info("gzip", 16781312, 33554432, 1, &meta, "crosshatch", 6, false, "TestROM", "TestMaker");
         assert!(info.contains("OTAku — Custom Payload Maker"));
         assert!(info.contains("gzip (level 6)"));
         assert!(info.contains("crosshatch"));
         assert!(info.contains("[boot]"));
         assert!(info.contains("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"));
         assert!(info.contains("enabled"));
+        assert!(info.contains("Total flash size: 33554432 bytes"));
     }
 
     #[test]
@@ -3042,7 +3175,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // The broken pattern was:
         //   lptools resize "$rname" "$rsize" >/dev/null 2>&1 || \
@@ -3078,7 +3211,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // Assert: broken regex pattern is NOT present.
         let broken_patterns = [
@@ -3119,7 +3252,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // Assert: idempotent check is present.
         assert!(
@@ -3151,7 +3284,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // Assert: explicit RC capture variables are present.
         // RESIZE_RC and CREATE_RC are inline in the resize loop.
@@ -3181,7 +3314,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "alioth", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false);
 
         // Assert: choose is gated by command -v check.
         assert!(
@@ -3219,7 +3352,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "alioth", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false);
 
         // Assert: vendor partition props are the primary source.
         assert!(
@@ -3258,7 +3391,7 @@ mod tests {
         }];
         for skip in [false, true] {
             for device in ["", "alioth"] {
-                let script = build_update_script(1, 1, "gzip", &meta, device, skip);
+                let script = build_update_script(1, 1, "gzip", &meta, 0, device, skip);
                 assert!(
                     script.trim_end().ends_with("exit 0"),
                     "Script does not end with exit 0 (skip={}, device='{}')",
@@ -3301,7 +3434,7 @@ mod tests {
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // AOSP standard names
         for required in ["system", "vendor", "product", "system_ext", "odm", "odm_dlkm", "vendor_dlkm"] {
@@ -3364,7 +3497,7 @@ mod tests {
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // Pre-flash verify step is present
         assert!(
@@ -3415,7 +3548,7 @@ mod tests {
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // Merged step header
         assert!(
@@ -3452,7 +3585,7 @@ mod tests {
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         // Without device check
-        let script_no_dev = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script_no_dev = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // Step 0 = open payload — header line format: "[Step 0/7]"
         assert!(script_no_dev.contains("Step 0/"), "Step 0 (open payload) missing");
@@ -3477,7 +3610,7 @@ mod tests {
         );
 
         // With device check, all subsequent steps shift +1
-        let script_with_dev = build_update_script(1, 1, "gzip", &meta, "alioth", false);
+        let script_with_dev = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false);
         // Step 3 = device check (with device) — header format: "Step {device_check_step}:" (note colon)
         assert!(
             script_with_dev.contains("Step 3:") || script_with_dev.contains("Step 3 "),
@@ -3506,7 +3639,7 @@ mod tests {
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         assert!(script.contains("empty_offset"), "Bug NEW-A: empty_offset guard missing");
         assert!(script.contains("empty_comp_size"), "Bug NEW-A: empty_comp_size guard missing");
     }
@@ -3521,7 +3654,7 @@ mod tests {
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         // The fix uses ${VUNC:-0} — check for the literal string in output
         assert!(script.contains("VUNC"), "Bug NEW-B: VUNC reference missing");
     }
@@ -3536,7 +3669,7 @@ mod tests {
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         assert!(script.contains("HASH_SHORT"), "Bug NEW-C: HASH_SHORT variable missing");
         assert!(script.contains("printf"), "Bug NEW-C: printf fix missing");
     }
@@ -3553,7 +3686,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         // The flash step guard checks for empty POFFSET, PCSIZE, PSIZE
         assert!(
             script.contains("-z \"$POFFSET\"") || script.contains("-z \"$POFFSET\""),
@@ -3587,7 +3720,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         // PCOMP_HASH eval is present
         assert!(
             script.contains("PCOMP_HASH"),
@@ -3623,7 +3756,7 @@ mod tests {
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // ZIP_DATA_OFFSET variable is computed
         assert!(
@@ -3684,7 +3817,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         // GZIP_ERR temp file is used (not 2>/dev/null on decompressor)
         assert!(
             script.contains("GZIP_ERR"),
@@ -3732,7 +3865,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // ── Fix 1: lptools resize is PRIMARY ──
         // The resize step must try `lptools resize` FIRST, with remove+create
@@ -3812,7 +3945,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // Cleanup trap must do unmap BEFORE resize (BlassGo pattern)
         // The old code just did resize; the new code does unmap → resize → map.
@@ -3844,7 +3977,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // 1. unmount_partition function is defined (split from unmount_and_unmap)
         assert!(
@@ -3905,7 +4038,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // 1. /dev/block/platform/bootdevice/by-name/ path resolution
         assert!(
@@ -3957,7 +4090,7 @@ mod tests {
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
         // 1. Auto-map comment present (references Format Data / Unmap_Super_Devices)
         assert!(

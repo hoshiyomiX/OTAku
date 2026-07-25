@@ -266,9 +266,10 @@ object OTABridge {
                 val durationMs = System.currentTimeMillis() - buildStartTime
                 val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
                 val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
+                val totalUncSizeStr = ddResult.totalUncSize?.let { formatSize(it) } ?: "N/A"
                 val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
                     "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
-                    "bundle_size=$bundleSizeStr"
+                    "bundle_size=$bundleSizeStr, total_flash_size=$totalUncSizeStr"
                 Log.d(TAG, debugEndMsg)
                 onOutputLine?.invoke(debugEndMsg)
 

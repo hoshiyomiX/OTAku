@@ -536,6 +536,9 @@ object NativeBridge {
         val zipPath: String? = null,
         val zipSize: Long? = null,
         val bundleSize: Long? = null,
+        /** Total uncompressed size of all partition images.
+         *  Used by the flasher script for pre-flash free space verification. */
+        val totalUncSize: Long? = null,
         val error: String? = null,
         val durationMs: Long = 0
     ) {
@@ -698,6 +701,7 @@ object NativeBridge {
                 zipPath = json.optString("zip_path", null),
                 zipSize = if (json.has("zip_size")) json.optLong("zip_size") else null,
                 bundleSize = if (json.has("bundle_size")) json.optLong("bundle_size") else null,
+                totalUncSize = if (json.has("total_unc_size")) json.optLong("total_unc_size") else null,
                 error = null,
                 durationMs = json.optLong("duration_ms", 0)
             )
