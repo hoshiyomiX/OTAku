@@ -736,10 +736,10 @@ fi
 #   = 20 bytes extra (typical for our ZIPs with 9-byte filename "otaku.bin")
 #   Total offset = 30 + 9 + 20 = 59 bytes
 DIRECT_READ_OK=0
-ZIP_LFH_SIG=$(od -A n -t x1 -N 4 "$ZIPFILE" 2>/dev/null | tr -d ' \\n')
+ZIP_LFH_SIG=$(od -A n -t x1 -N 4 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
 if [ "$ZIP_LFH_SIG" = "504b0304" ]; then
-    FNAME_LEN=$(od -A n -t u2 -j 26 -N 2 "$ZIPFILE" 2>/dev/null | tr -d ' ')
-    EXTRA_LEN=$(od -A n -t u2 -j 28 -N 2 "$ZIPFILE" 2>/dev/null | tr -d ' ')
+    FNAME_LEN=$(od -A n -t u2 -j 26 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
+    EXTRA_LEN=$(od -A n -t u2 -j 28 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
     if [ -n "$FNAME_LEN" ] && [ -n "$EXTRA_LEN" ]; then
         ZIP_DATA_OFFSET=$(( 30 + FNAME_LEN + EXTRA_LEN ))
         # Verify: read the filename and confirm it's "otaku.bin"
@@ -1084,21 +1084,21 @@ read_bundle_bytes() {{
     dd if="$BUNDLE" bs=1 skip=$(( ZIP_DATA_OFFSET + offset )) count=$count 2>/dev/null
 }}
 
-HDR_MAGIC=$(read_bundle_bytes 0 4 | od -A n -t x1 | tr -d ' \\n')
+HDR_MAGIC=$(read_bundle_bytes 0 4 | od -A n -t x1 | tr -d '[:space:]')
 if [ "$HDR_MAGIC" != "44444255" ]; then
-    ui_print "! ABORT: Invalid bundle magic (expected DDBU, got $(echo $HDR_MAGIC | sed 's/\(..\)/\\x\\1/g'))"
+    ui_print "! ABORT: Invalid bundle magic (expected DDBU, got $(echo $HDR_MAGIC | sed 's/\(..\)/\\x\1/g'))"
     exit 1
 fi
 
-HDR_VERSION=$(read_bundle_bytes 4 2 | od -A n -t u2 | tr -d ' ')
+HDR_VERSION=$(read_bundle_bytes 4 2 | od -A n -t u2 | tr -d '[:space:]')
 # HDR_COMPRESS is u16 LE (2 bytes) — read with -t u2 -N 2 to match the
 # header writer (build_header() writes compress_id as u16 LE).
 # Previous code used -t u1 -N 1 which only read the low byte; this worked
 # by accident for compress_id 0-4 (high byte = 0) but would silently
 # truncate if compress_id ever exceeded 255.
-HDR_COMPRESS=$(read_bundle_bytes 6 2 | od -A n -t u2 | tr -d ' ')
-HDR_NUM_PARTS=$(read_bundle_bytes 8 2 | od -A n -t u2 | tr -d ' ')
-HDR_HDR_SIZE=$(read_bundle_bytes 10 2 | od -A n -t u2 | tr -d ' ')
+HDR_COMPRESS=$(read_bundle_bytes 6 2 | od -A n -t u2 | tr -d '[:space:]')
+HDR_NUM_PARTS=$(read_bundle_bytes 8 2 | od -A n -t u2 | tr -d '[:space:]')
+HDR_HDR_SIZE=$(read_bundle_bytes 10 2 | od -A n -t u2 | tr -d '[:space:]')
 
 if [ "$HDR_VERSION" != "1" ]; then
     ui_print "! ABORT: Unsupported bundle version: $HDR_VERSION"
