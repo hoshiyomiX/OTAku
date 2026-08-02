@@ -3587,26 +3587,28 @@ mod tests {
         // Without device check
         let script_no_dev = build_update_script(1, 1, "gzip", &meta, 0, "", false);
 
-        // Step 0 = open payload — header line format: "[Step 0/7]"
+        // Step 0 = open payload — header line format: "[Step 0/8]"
         assert!(script_no_dev.contains("Step 0/"), "Step 0 (open payload) missing");
-        // Step 1 = pre-flash verify (NEW) — header format: "[Step 1/7]"
+        // Step 1 = pre-flash verify (NEW) — header format: "[Step 1/8]"
         assert!(script_no_dev.contains("Step 1/"), "Step 1 (pre-flash verify) missing");
-        // Step 2 = integrity + decompressor (MERGED) — header format: "[Step 2/7]"
+        // Step 2 = integrity + decompressor (MERGED) — header format: "[Step 2/8]"
         assert!(script_no_dev.contains("Step 2/"), "Step 2 (integrity+decompressor) missing");
-        // Step 3 = slot detection (no device) — header format: "[Step 3/7]"
+        // Step 3 = slot detection (no device) — header format: "[Step 3/8]"
         assert!(script_no_dev.contains("Step 3/"), "Step 3 (slot detection) missing");
-        // Step 4 = partition validation — header format: "[Step 4/7]"
+        // Step 4 = partition validation — header format: "[Step 4/8]"
         assert!(script_no_dev.contains("Step 4/"), "Step 4 (partition validation) missing");
-        // Step 5 = resize — header format: "[Step 5/7]"
+        // Step 5 = resize — header format: "[Step 5/8]"
         assert!(script_no_dev.contains("Step 5/"), "Step 5 (resize) missing");
-        // Step 6 = flash — header format is DIFFERENT from other steps:
+        // Step 6 = pre-flash free space check — header format: "[Step 6/8]"
+        assert!(script_no_dev.contains("Step 6/8"), "Step 6 (free space check) missing");
+        // Step 7 = flash — header format is DIFFERENT from other steps:
         //   "# ── Step {flash_step_offset}+{num_parts_minus_1}/{total_steps}: Flash each partition"
-        // For 1 partition with no device: "Step 6+0/7"
-        // We check for "Step 6" as substring (not "Step 6/") because the format differs.
+        // For 1 partition with no device: "Step 7+0/8"
+        // We check for "Step 7" as substring (not "Step 7/") because the format differs.
         assert!(
-            script_no_dev.contains("Step 6+0/7") || script_no_dev.contains("Step 6 "),
-            "Step 6 (flash) header missing — got: {}",
-            script_no_dev.lines().filter(|l| l.contains("Step 6")).collect::<Vec<_>>().join("\n")
+            script_no_dev.contains("Step 7+0/8") || script_no_dev.contains("Step 7 "),
+            "Step 7 (flash) header missing — got: {}",
+            script_no_dev.lines().filter(|l| l.contains("Step 7")).collect::<Vec<_>>().join("\n")
         );
 
         // With device check, all subsequent steps shift +1
@@ -3616,12 +3618,14 @@ mod tests {
             script_with_dev.contains("Step 3:") || script_with_dev.contains("Step 3 "),
             "Step 3 (device check) missing with device"
         );
-        // Step 4 = slot detection (with device) — header format: "[Step 4/8]"
+        // Step 4 = slot detection (with device) — header format: "[Step 4/9]"
         assert!(script_with_dev.contains("Step 4/"), "Step 4 (slot detection) missing with device");
-        // Step 7 = flash (with device) — header format: "Step 7+0/8"
+        // Step 7 = pre-flash free space check (with device) — header format: "[Step 7/9]"
+        assert!(script_with_dev.contains("Step 7/9"), "Step 7 (free space check) missing with device");
+        // Step 8 = flash (with device) — header format: "Step 8+0/9"
         assert!(
-            script_with_dev.contains("Step 7+0/8") || script_with_dev.contains("Step 7 "),
-            "Step 7 (flash) missing with device"
+            script_with_dev.contains("Step 8+0/9") || script_with_dev.contains("Step 8 "),
+            "Step 8 (flash) missing with device"
         );
     }
 
