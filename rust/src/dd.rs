@@ -1985,7 +1985,24 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # by checking blockdev --getsize64 when dd returns non-zero.
     EXTRACT_SKIP=$(( ZIP_DATA_OFFSET + DATA_OFFSET + POFFSET ))
     SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
+    SKIP_REMAINDER=$(( EXTRACT_SKIP % 4096 ))
     READ_COUNT=$(( (PCSIZE + 4095) / 4096 ))
+
+    # ── dd_if_bundle: read PCSIZE bytes from BUNDLE at EXTRACT_SKIP ──
+    # BUG FIX: When ZIP_DATA_OFFSET is not 4096-aligned (e.g. 59 bytes for
+    # ZIP64 local file header), the old code used dd bs=4096 skip=$SKIP_BLOCKS
+    # which truncates the remainder — reading from the WRONG offset. This caused
+    # compressed data hash mismatches and wrong data being flashed.
+    # Fix: read the full blocks, then skip the remainder bytes using tail -c.
+    # This is efficient (bs=4096 for bulk read) and correct (tail handles remainder).
+    dd_if_bundle() {{
+        if [ "$SKIP_REMAINDER" -gt 0 ]; then
+            dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$(( READ_COUNT + 1 )) 2>/dev/null | \
+                tail -c +$(( SKIP_REMAINDER + 1 ))
+        else
+            dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null
+        fi
+    }}
 
     # ── Pre-flash compressed-data hash verification ──
     # Compute SHA-256 of the compressed partition data and compare to the
@@ -2002,8 +2019,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # PART_i_COMP_HASH (empty string) — skip the check.
     if [ -n "$PCOMP_HASH" ]; then
         ui_print "  Verifying compressed data integrity..."
-        COMP_HASH_ACTUAL=$(dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
-            head -c "$PCSIZE" 2>/dev/null | sha256sum 2>/dev/null | awk '{{print $1}}')
+        COMP_HASH_ACTUAL=$(dd_if_bundle | head -c "$PCSIZE" 2>/dev/null | sha256sum 2>/dev/null | awk '{{print $1}}')
         if [ -z "$COMP_HASH_ACTUAL" ]; then
             ui_print "! ABORT: Cannot compute compressed data hash for $PNAME"
             ui_print "!  Bundle may be unreadable or sha256sum not available."
@@ -2078,7 +2094,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         # gzip EOF marker and returns status=2 with "trailing junk which was
         # ignored" — a FALSE FAILURE (data is actually fine). This eliminates
         # the need for the fallback decompressor chain in the common case.
-        dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+        dd_if_bundle | \
             head -c "$PCSIZE" 2>/dev/null | \
             $DECOMP_PIPE > "$TMP_FIFO" 2>"$GZIP_ERR" &
         DECOMP_PID=$!
@@ -2121,7 +2137,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
                         ui_print "    FIFO creation failed — skipping $FB_DECOMP"
                         continue
                     fi
-                    dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+                    dd_if_bundle | \
                         head -c "$PCSIZE" 2>/dev/null | \
                         $FB_DECOMP > "$TMP_FIFO2" 2>"$GZIP_ERR" &
                     FB_PID=$!
@@ -2189,7 +2205,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         # "trailing junk" false failure).
         GZIP_ERR="/tmp/ddpart_${{i}}.err"
         rm -f "$GZIP_ERR"
-        dd if="$BUNDLE" bs=4096 skip=$SKIP_BLOCKS count=$READ_COUNT 2>/dev/null | \
+        dd_if_bundle | \
             head -c "$PCSIZE" 2>/dev/null | \
             $DECOMP_PIPE 2>"$GZIP_ERR" | \
             dd of="$PTARGET" bs=1048576 2>/dev/null
@@ -3803,6 +3819,49 @@ mod tests {
         assert!(
             script.contains("BUNDLE_SIZE=$EXPECTED_BUNDLE_SIZE"),
             "REGRESSION: BUNDLE_SIZE should use EXPECTED_BUNDLE_SIZE when ZIP_LIST_OK=1 (fixes size mismatch from ZIP trailer)"
+        );
+    }
+
+    /// Regression test for dd_if_bundle helper and SKIP_REMAINDER handling.
+    /// BUG: When ZIP_DATA_OFFSET is not 4096-aligned (e.g. 59 for ZIP64),
+    /// the old code used `dd bs=4096 skip=$SKIP_BLOCKS` which truncates the
+    /// remainder — reading from the WRONG offset. This caused compressed data
+    /// hash mismatches and wrong data being flashed.
+    /// Fix: dd_if_bundle reads full blocks then uses tail -c to skip the remainder.
+    #[test]
+    fn test_regression_dd_if_bundle_remainder_handling() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1075,
+            hash_hex: "a".repeat(64),
+            comp_size: 334,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+
+        // dd_if_bundle helper function is defined
+        assert!(
+            script.contains("dd_if_bundle()"),
+            "REGRESSION: dd_if_bundle helper not defined (remainder offset fix)"
+        );
+
+        // SKIP_REMAINDER is computed
+        assert!(
+            script.contains("SKIP_REMAINDER"),
+            "REGRESSION: SKIP_REMAINDER not computed (remainder offset fix)"
+        );
+
+        // tail -c is used for remainder handling
+        assert!(
+            script.contains("tail -c"),
+            "REGRESSION: tail -c not used for remainder handling (remainder offset fix)"
+        );
+
+        // dd_if_bundle is used in the flash pipeline (not raw dd if=$BUNDLE)
+        assert!(
+            script.contains("dd_if_bundle |"),
+            "REGRESSION: dd_if_bundle not used in flash pipeline (remainder offset fix)"
         );
     }
 
