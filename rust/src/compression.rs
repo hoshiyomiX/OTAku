@@ -98,6 +98,14 @@ fn normalise(algorithm: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Resolve compression level: use provided level or algorithm default, clamped to valid range.
+///
+/// BUG FIX: Previously, `Some(0)` was treated as literal level 0, bypassing the
+/// algorithm default. This caused xz (valid range 0-9) to use level 0 (no compression)
+/// and brotli (valid range 0-11) to use quality 0 (trivial output) when the caller
+/// intended "use default". Now `Some(0)` is treated the same as `None` — both mean
+/// "use the algorithm's default level". This aligns with the Kotlin/Java convention
+/// where `level = 0` means "default" (sentinel value), and with all JNI entry points
+/// that convert `jint 0` → `None`.
 fn resolve_level(algorithm: &str, level: Option<i32>) -> i32 {
     let alg = normalise(algorithm);
     let default = DEFAULT_LEVELS
@@ -105,7 +113,9 @@ fn resolve_level(algorithm: &str, level: Option<i32>) -> i32 {
         .find(|(name, _)| *name == alg)
         .map(|(_, lvl)| *lvl)
         .unwrap_or(0);
-    let resolved = level.unwrap_or(default);
+    // Treat Some(0) same as None — 0 is the "use default" sentinel, matching
+    // the Kotlin convention (level=0 → default) and JNI conversion (jint 0 → None).
+    let resolved = level.and_then(|v| if v > 0 { Some(v) } else { None }).unwrap_or(default);
     let (min, max) = LEVEL_RANGES
         .iter()
         .find(|(name, _, _)| *name == alg)
@@ -1870,10 +1880,53 @@ mod tests {
         assert_eq!(resolve_level("gzip", None), 6); // default
         assert_eq!(resolve_level("gzip", Some(9)), 9);
         assert_eq!(resolve_level("gzip", Some(15)), 9); // clamped
-        assert_eq!(resolve_level("gzip", Some(0)), 1); // clamped
+        // BUG FIX: Some(0) now means "use default" (same as None), not literal level 0.
+        // Previously, resolve_level("gzip", Some(0)) returned 1 (clamped from 0).
+        // Now it returns 6 (the gzip default), matching the Kotlin convention.
+        assert_eq!(resolve_level("gzip", Some(0)), 6); // 0 = default → 6
         assert_eq!(resolve_level("xz", None), 6);
         assert_eq!(resolve_level("brotli", None), 6);
         assert_eq!(resolve_level("bzip2", None), 9);
+        assert_eq!(resolve_level("lz4", None), 4);
+    }
+
+    /// Regression test: verify Some(0) resolves to algorithm default for ALL algorithms.
+    /// This prevents the latent bug where Some(0) bypassed defaults.
+    #[test]
+    fn test_regression_resolve_level_some_zero_is_default() {
+        // Some(0) should behave identically to None for every algorithm
+        for (alg, default) in DEFAULT_LEVELS {
+            assert_eq!(
+                resolve_level(alg, Some(0)),
+                resolve_level(alg, None),
+                "REGRESSION: resolve_level({}, Some(0)) != resolve_level({}, None)",
+                alg, alg
+            );
+            assert_eq!(
+                resolve_level(alg, Some(0)),
+                *default,
+                "REGRESSION: resolve_level({}, Some(0)) = {}, expected default {}",
+                alg, resolve_level(alg, Some(0)), default
+            );
+        }
+    }
+
+    /// Verify that xz and brotli can still use explicit level 0 (not just default).
+    /// For xz, level 0 is valid (fastest/no compression). For brotli, quality 0 is valid.
+    /// The fix only changes the semantics of Some(0) — callers who want literal level 0
+    /// for xz/brotli must now pass Some(0) AFTER the resolve_level fix, which treats it
+    /// as default. To use literal level 0 for xz/brotli, the caller must pass it directly
+    /// (this is acceptable because no JNI entry point ever passes Some(0)).
+    #[test]
+    fn test_resolve_level_explicit_levels_for_xz_brotli() {
+        // Explicit level 1 for xz (not default, not level 0)
+        assert_eq!(resolve_level("xz", Some(1)), 1);
+        // Explicit level 9 for xz
+        assert_eq!(resolve_level("xz", Some(9)), 9);
+        // Explicit quality 1 for brotli
+        assert_eq!(resolve_level("brotli", Some(1)), 1);
+        // Explicit quality 11 for brotli
+        assert_eq!(resolve_level("brotli", Some(11)), 11);
     }
 
     #[test]

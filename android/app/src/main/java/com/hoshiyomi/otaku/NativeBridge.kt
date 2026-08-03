@@ -156,7 +156,8 @@ object NativeBridge {
      * Generate a payload.bin from partition images.
      *
      * @param images Map of partition name -> absolute path to .img file
-     * @param compression Compression algorithm: "none", "gzip", "bzip2", "xz", "brotli"
+     * @param compression Compression algorithm: "none", "gzip", "lz4", "bzip2", "xz", "brotli"
+     * @param level Compression level (0 = default per algorithm, e.g. gzip=6, lz4=4)
      * @param outputPath Absolute path for output payload.bin
      * @param blockSize Block size in bytes (default 4096)
      * @param minorVersion Payload minor version (default 0)
@@ -165,6 +166,7 @@ object NativeBridge {
     fun writePayload(
         images: Map<String, String>,
         compression: String = "gzip",
+        level: Int = 0,
         outputPath: String,
         blockSize: Int = 4096,
         minorVersion: Int = 0
@@ -172,11 +174,11 @@ object NativeBridge {
         if (!isLoaded) {
             return WritePayloadResult.error("Native library not loaded: $loadError")
         }
-        Log.d(TAG, "writePayload() images=${images.keys}, compression=$compression, output=$outputPath, blockSize=$blockSize")
+        Log.d(TAG, "writePayload() images=${images.keys}, compression=$compression, level=$level, output=$outputPath, blockSize=$blockSize")
         return try {
             val imagesJson = JSONObject(images).toString()
             val jsonStr = nativeWritePayload(
-                imagesJson, compression, 0, outputPath, blockSize, minorVersion
+                imagesJson, compression, level, outputPath, blockSize, minorVersion
             )
             val result = parseWritePayloadResult(jsonStr)
             Log.d(TAG, "writePayload() result: success=${result.success}, duration=${result.durationMs}ms")

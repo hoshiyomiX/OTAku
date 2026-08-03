@@ -62,10 +62,10 @@ object OTABridge {
 
     // Compression algorithm choices exposed in the UI spinner
     // Ordered by compression ratio: worst (none) → best (brotli)
-    val COMPRESSION_ALGORITHMS = listOf("none", "gzip", "bzip2", "xz", "brotli")
+    val COMPRESSION_ALGORITHMS = listOf("none", "gzip", "lz4", "bzip2", "xz", "brotli")
 
     // All valid compression values (for validation)
-    val ALL_COMPRESSION = setOf("none", "gzip", "bzip2", "xz", "brotli")
+    val ALL_COMPRESSION = setOf("none", "gzip", "lz4", "bzip2", "xz", "brotli")
 
 
     // Compression level ranges per algorithm: (min, max, default)

@@ -790,6 +790,7 @@ class MainActivity : AppCompatActivity() {
     private val COMPRESSION_LEVELS: Map<String, Pair<Int, Int>> = mapOf(
         "none" to Pair(0, 0),     // no compression
         "gzip" to Pair(1, 9),     // stdlib gzip: levels 1-9, default 6
+        "lz4" to Pair(1, 12),     // lz4_flex frame: levels 1-12, default 4
         "bzip2" to Pair(1, 9),    // stdlib bzip2: levels 1-9, default 9
         "xz" to Pair(0, 9),       // stdlib lzma: levels 0-9, default 6
         "brotli" to Pair(0, 11)   // brotli: quality 0-11, default 6
@@ -799,6 +800,7 @@ class MainActivity : AppCompatActivity() {
     private val DEFAULT_COMPRESSION_LEVELS: Map<String, Int> = mapOf(
         "none" to 0,
         "gzip" to 6,
+        "lz4" to 4,
         "bzip2" to 9,
         "xz" to 6,
         "brotli" to 6
@@ -823,7 +825,11 @@ class MainActivity : AppCompatActivity() {
         return if (min == 0 && max == 0) {
             listOf(0)  // "none" → just show "Default"
         } else {
-            listOf(0) + (min..max).toList()  // 0 (default) + 1..9
+            // BUG FIX: Previously, `listOf(0) + (min..max)` produced duplicate zeros
+            // for algorithms where min=0 (xz: 0-9, brotli: 0-11). The list would be
+            // [0, 0, 1, 2, ...] with two "Default" labels. Now we filter out 0 from
+            // the numeric range so the sentinel 0 (meaning "Default") is unique.
+            listOf(0) + (min..max).filter { it != 0 }.toList()
         }
     }
 

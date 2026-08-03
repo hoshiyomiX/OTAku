@@ -29,6 +29,25 @@ use std::panic::AssertUnwindSafe;
 //  Modules
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+//  Shared JNI helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a Kotlin/Java `jint` compression level to Rust `Option<i32>`.
+///
+/// Convention: Kotlin passes `0` to mean "use the algorithm's default level"
+/// (sentinel value). Rust uses `None` for the same concept. This helper
+/// centralizes the conversion to avoid duplication and prevent the latent bug
+/// where a caller might pass `Some(0)` directly to `resolve_level()`, which
+/// would bypass the algorithm default.
+///
+/// Before this helper existed, the conversion `if level > 0 { Some(level) } else { None }`
+/// was duplicated in 3 locations (nativeWritePayload, nativeBuildDd, nativeCompress).
+/// A future developer adding a new call path could easily forget the conversion.
+fn jint_to_level_opt(level: jint) -> Option<i32> {
+    if level > 0 { Some(level) } else { None }
+}
+
 pub mod proto;
 pub mod compression;
 pub mod payload;
@@ -344,7 +363,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
         // all partitions were compressed with None (default level). Users who
         // selected a custom compression level (e.g., xz level 9) got the default
         // instead, with no error. Now we pass the level to write_payload.
-        let level_opt = if _level > 0 { Some(_level) } else { None };
+        let level_opt = jint_to_level_opt(_level);
 
         let result = payload::write_payload(
             &output_str,
@@ -857,7 +876,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCompress(
             Err(_) => "gzip".to_string(),
         };
 
-        let level_opt = if level > 0 { Some(level) } else { None };
+        let level_opt = jint_to_level_opt(level);
 
         let (compressed, hash_hex) = match compression::hash_and_compress_file(
             &input_str,

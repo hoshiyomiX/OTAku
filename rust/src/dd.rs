@@ -1078,7 +1078,17 @@ else
     # ── Multi-threaded decompressor upgrade ──
     # On multi-core SoCs, parallel decompressors are significantly faster
     # (e.g., pigz is ~2-3x faster than gzip on 4-core Cortex-A55).
-    # This checks for MT variants and upgrades DECOMP_PIPE if available.
+    #
+    # OrangeFox recovery availability (default build, no optional flags):
+    #   gzip/bzip2/xz: ✅ via toybox (single-threaded only)
+    #   nproc:         ✅ via toybox
+    #   pigz/pbzip2:   ❌ NEVER available (no OrangeFox build flag exists)
+    #   xz -T0:        ⚠️  Only if FOX_USE_XZ_UTILS=1 enabled by device maintainer
+    #   lz4:           ⚠️  Only if FOX_USE_LZ4_BINARY=1 enabled by device maintainer
+    #   brotli:        ❌ NEVER available (no OrangeFox build flag exists)
+    #
+    # All MT checks are graceful no-ops — if the tool is not found, the
+    # single-threaded fallback (already set in DECOMP_PIPE) is used.
     NPROC=$(nproc 2>/dev/null || echo 1)
     if [ "$NPROC" -gt 1 ]; then
         case "$COMPRESS_ID" in
@@ -2745,6 +2755,7 @@ pub fn run_dd_build(
         }
 
         let mut partitions_meta: Vec<PartitionMeta> = Vec::new();
+        // Centralized level conversion: 0 = use algorithm default (same as Kotlin convention)
         let level_opt = if level > 0 { Some(level) } else { None };
 
         // Stream compressed data directly to the temp file.
