@@ -641,17 +641,23 @@ cleanup_abort() {{
     # Source: source.android.com/docs/core/ota/dynamic_partitions/nonab
     if [ "$HAS_LPTOOLS" = "1" ]; then
         for pname in $DYNAMIC_PART_NAMES; do
-            # Skip if already mapped — no need to touch it.
-            if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ]; then
-                continue
-            fi
             # Build slot-suffixed name for lptools (same as resize step)
             pname_lp="$pname"
             if [ -n "$TARGET_SLOT" ]; then
                 pname_lp="${{pname}}${{TARGET_SLOT}}"
             fi
-            # Not mapped — try to map.
-            unmount_and_unmap_partition "$pname" >/dev/null 2>&1
+            # Skip if already mapped — no need to touch it.
+            # Check both plain and slot-suffixed paths: on A/B devices the
+            # dm-linear device is named "vendor_a", not just "vendor".
+            if [ -e "/dev/mapper/$pname" ] || [ -e "/dev/block/by-name/$pname" ] || \
+               [ -e "/dev/mapper/$pname_lp" ] || [ -e "/dev/block/by-name/$pname_lp" ]; then
+                continue
+            fi
+            # Not mapped — try to map.  Use unmount_partition + lptools unmap
+            # separately so that lptools unmap receives the slot-suffixed name
+            # (unmount_and_unmap_partition hardcodes plain $pname for lptools).
+            unmount_partition "$pname" >/dev/null 2>&1 || true
+            lptools unmap "$pname_lp" >/dev/null 2>&1 || true
             lptools map "$pname_lp" >/dev/null 2>&1
         done
     fi
@@ -1371,27 +1377,12 @@ unmount_and_unmap_partition() {{
     return 0
 }}
 
-# Helper: targeted unmount + lptools unmap + lptools map for a single dynamic
-# partition. Use this when you need a fresh dm-linear device with current
-# metadata (e.g. after resize).
-# Args: $1 = partition name
-# Returns: 0 on success, 1 if final map failed.
-# Prints ui_print warnings on intermediate failures so the user can debug.
-unmap_and_remap_partition() {{
-    local pname="$1"
-    local map_rc
-
-    if ! unmount_and_unmap_partition "$pname"; then
-        ui_print "    warning: unmap failed for $pname (continuing to map anyway)"
-    fi
-    lptools map "$pname" >/dev/null 2>&1
-    map_rc=$?
-    if [ $map_rc -ne 0 ]; then
-        ui_print "    error: lptools map failed for $pname (rc=$map_rc)"
-        return 1
-    fi
-    return 0
-}}
+# REMOVED: dead-code helper that wrapped unmount + lptools unmap + lptools map
+# for a single dynamic partition.  It was never called and had a bug where
+# lptools unmap/map received the plain partition name instead of the
+# slot-suffixed name required on A/B devices.  The cleanup trap now uses
+# unmount_partition + lptools unmap/map directly with the correct
+# slot-suffixed name ($pname_lp).
 
 # List of partitions that need resizing (filled during validation)
 RESIZE_NEEDED=""
@@ -3274,6 +3265,72 @@ mod tests {
         assert!(
             script.contains("/dev/mapper/$pname") || script.contains("/dev/block/by-name/$pname"),
             "REGRESSION: idempotent unmap existence check missing (Bug #3)"
+        );
+    }
+
+    /// Regression: Cleanup trap slot-suffixed path check + correct lptools
+    /// unmap/map names on A/B devices.
+    ///
+    /// Bug #9 (P2): The cleanup trap's "already mapped" check only tested
+    /// plain paths (`/dev/mapper/vendor`), but on A/B devices the dm-linear
+    /// device is named `vendor_a` (slot-suffixed).  If the device was already
+    /// mapped, the check would miss it and the cleanup would unmap+remap
+    /// unnecessarily (risking EBUSY on partitions recovery is using).
+    ///
+    /// Bug #10 (P2): The cleanup trap called `unmount_and_unmap_partition
+    /// "$pname"` which internally calls `lptools unmap "$pname"` — plain
+    /// name, not slot-suffixed.  On A/B devices lptools requires the
+    /// slot-suffixed name (e.g. `vendor_a`), so the unmap would silently
+    /// fail and the subsequent map would also fail or be wrong.
+    ///
+    /// Bug #11 (P3): `unmap_and_remap_partition()` was dead code (never
+    /// called) and had the same plain-name bug.  Removed entirely.
+    #[test]
+    fn test_regression_cleanup_slot_suffixed_paths() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1073741824,
+            hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            comp_size: 536870912,
+            data_offset: 0,
+        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        }];
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+
+        // Bug #9: slot-suffixed path check in cleanup "already mapped" guard.
+        // The cleanup trap must check /dev/mapper/$pname_lp in addition to
+        // /dev/mapper/$pname, because on A/B devices the dm-linear device
+        // is named with the slot suffix (e.g. vendor_a, not vendor).
+        assert!(
+            script.contains("/dev/mapper/$pname_lp"),
+            "REGRESSION: cleanup trap missing slot-suffixed /dev/mapper/$pname_lp check (Bug #9)"
+        );
+        assert!(
+            script.contains("/dev/block/by-name/$pname_lp"),
+            "REGRESSION: cleanup trap missing slot-suffixed /dev/block/by-name/$pname_lp check (Bug #9)"
+        );
+
+        // Bug #10: cleanup uses unmount_partition + lptools unmap "$pname_lp"
+        // (NOT unmount_and_unmap_partition "$pname" which passes plain name).
+        assert!(
+            script.contains("unmount_partition \"$pname\""),
+            "REGRESSION: cleanup trap should use unmount_partition directly, not unmount_and_unmap_partition (Bug #10)"
+        );
+        assert!(
+            script.contains("lptools unmap \"$pname_lp\""),
+            "REGRESSION: cleanup trap lptools unmap must use slot-suffixed $pname_lp (Bug #10)"
+        );
+
+        // Bug #10: the old broken pattern must NOT be present.
+        assert!(
+            !script.contains("unmount_and_unmap_partition \"$pname\""),
+            "REGRESSION: cleanup trap still uses unmount_and_unmap_partition with plain $pname (Bug #10)"
+        );
+
+        // Bug #11: dead code unmap_and_remap_partition() must NOT be present.
+        assert!(
+            !script.contains("unmap_and_remap_partition()"),
+            "REGRESSION: dead code unmap_and_remap_partition() still present (Bug #11)"
         );
     }
 
