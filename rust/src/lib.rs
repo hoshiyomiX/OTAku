@@ -109,7 +109,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCheckDeps(
 ) -> jstring {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let result = serde_json::json!({
-            "available": ["none", "gzip", "bzip2", "xz", "brotli"],
+            "available": ["none", "gzip", "lz4", "bzip2", "xz", "brotli"],
             "missing": [],
             "all_ok": true,
             "native_version": env!("CARGO_PKG_VERSION")
@@ -388,7 +388,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
 /// Kotlin: `external fun nativeBuildDd(...): String`
 ///
 /// @param images_json   JSON: {"partition_name": "/path/to/image.img", ...}
-/// @param compression   "none" | "gzip" | "bzip2" | "xz" | "brotli"
+/// @param compression   "none" | "gzip" | "lz4" | "bzip2" | "xz" | "brotli"
 /// @param level         Compression level (0 = default)
 /// @param output_path   Absolute path for output .zip
 /// @param device        Device codename(s), comma-separated

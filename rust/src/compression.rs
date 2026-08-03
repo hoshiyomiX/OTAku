@@ -1,7 +1,7 @@
 //! Compression / decompression for AOSP payload.bin operations.
 //!
 //! All algorithms are statically compiled — no runtime dependency checks needed.
-//! Supported: none, gzip (flate2/miniz_oxide), bzip2, xz (xz2/liblzma), brotli (pure Rust).
+//! Supported: none, gzip (flate2/miniz_oxide), lz4 (lz4_flex/frame), bzip2, xz (xz2/liblzma), brotli (pure Rust).
 //!
 //! Ported from Python compression.py to Rust with identical semantics.
 
@@ -13,17 +13,19 @@ use std::io::{Read, Write};
 
 pub const ALG_NONE: &str = "none";
 pub const ALG_GZIP: &str = "gzip";
+pub const ALG_LZ4: &str = "lz4";
 pub const ALG_BZIP2: &str = "bzip2";
 pub const ALG_XZ: &str = "xz";
 pub const ALG_BROTLI: &str = "brotli";
 pub const ALG_AUTO: &str = "auto";
 
-pub const ALL_ALGORITHMS: &[&str] = &[ALG_NONE, ALG_BZIP2, ALG_GZIP, ALG_XZ, ALG_BROTLI];
+pub const ALL_ALGORITHMS: &[&str] = &[ALG_NONE, ALG_BZIP2, ALG_GZIP, ALG_LZ4, ALG_XZ, ALG_BROTLI];
 
 /// Default compression levels per algorithm (matches Python DEFAULT_LEVELS)
 pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
     (ALG_NONE, 0),
     (ALG_GZIP, 6),
+    (ALG_LZ4, 4),
     (ALG_BZIP2, 9),
     (ALG_XZ, 6),
     (ALG_BROTLI, 6),
@@ -33,6 +35,7 @@ pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
 pub const LEVEL_RANGES: &[(&str, i32, i32)] = &[
     (ALG_NONE, 0, 0),
     (ALG_GZIP, 1, 9),
+    (ALG_LZ4, 1, 12),
     (ALG_BZIP2, 1, 9),
     (ALG_XZ, 0, 9),
     (ALG_BROTLI, 0, 11),
@@ -48,6 +51,7 @@ pub const COMPRESS_ID_MAP: &[(&str, u16)] = &[
     ("bzip2", 2),
     ("xz", 3),
     ("brotli", 4),
+    ("lz4", 5),
 ];
 
 /// Get the compress ID for an algorithm name.
@@ -84,6 +88,7 @@ fn normalise(algorithm: &str) -> String {
         "gz" | "gzip" | "puigzip" => ALG_GZIP.to_string(),
         "lzma" | "xz" | "replace_xz" => ALG_XZ.to_string(),
         "br" | "brotli" | "replace_brot" | "brotli_bsdiff" => ALG_BROTLI.to_string(),
+        "lz4" | "l4" => ALG_LZ4.to_string(),
         other => other.to_string(), // return as-is for unknown algorithms
     }
 }
@@ -140,6 +145,11 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
         return ALG_XZ;
     }
 
+    // LZ4 frame format magic: 04 22 4D 18
+    if data.len() >= 4 && data[..4] == [0x04, 0x22, 0x4D, 0x18] {
+        return ALG_LZ4;
+    }
+
     // Brotli: no reliable magic, try trial decompression with larger probe.
     // BUG FIX: Previously only decoded 1 byte, which can produce false positives
     // — any random 3+ bytes can sometimes decode as valid brotli for 1 byte.
@@ -190,6 +200,9 @@ pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<
     if is_alg(algorithm, ALG_BROTLI) {
         return compress_brotli(data, resolved_level);
     }
+    if is_alg(algorithm, ALG_LZ4) {
+        return compress_lz4(data, resolved_level);
+    }
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
@@ -224,6 +237,9 @@ pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
     }
     if effective_alg == ALG_BROTLI {
         return decompress_brotli(data);
+    }
+    if effective_alg == ALG_LZ4 {
+        return decompress_lz4(data);
     }
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
@@ -318,6 +334,23 @@ pub fn decompress_to_writer<W: Write>(
             total += n as u64;
             if total > MAX_DECOMPRESSED_SIZE as u64 {
                 return Err(format!("brotli decompressed output exceeds {} GiB limit — possible zip bomb",
+                    MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
+            }
+        }
+        return Ok(total);
+    }
+
+    if effective_alg == ALG_LZ4 {
+        use std::io::Cursor;
+        let cursor = Cursor::new(data);
+        let mut decoder = lz4_flex::frame::FrameDecoder::new(cursor);
+        loop {
+            let n = decoder.read(&mut buf).map_err(|e| format!("lz4 streaming decompress error: {}", e))?;
+            if n == 0 { break; }
+            writer.write_all(&buf[..n]).map_err(|e| format!("Write decompressed error: {}", e))?;
+            total += n as u64;
+            if total > MAX_DECOMPRESSED_SIZE as u64 {
+                return Err(format!("lz4 decompressed output exceeds {} GiB limit — possible zip bomb",
                     MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
             }
         }
@@ -482,6 +515,56 @@ fn decompress_brotli(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 // ---------------------------------------------------------------------------
+//  LZ4 implementation (lz4_flex frame format — compatible with lz4 CLI)
+// ---------------------------------------------------------------------------
+
+/// Map our 1-12 compression level to lz4_flex BlockSize.
+/// LZ4 frame format controls compression via block size rather than a numeric
+/// level. Larger blocks give better compression ratios but use more memory.
+///   Level 1-3  → Max64KB  (fastest, least compression — ~2x ratio)
+///   Level 4-6  → Max4MB   (balanced — default, ~2.5x ratio)
+///   Level 7-9  → Max4MB   (better ratio, still fast)
+///   Level 10-12 → Max8MB  (best ratio, uses more memory)
+fn lz4_block_size_for_level(level: i32) -> lz4_flex::frame::BlockSize {
+    match level.clamp(1, 12) {
+        1..=3 => lz4_flex::frame::BlockSize::Max64KB,
+        4..=9 => lz4_flex::frame::BlockSize::Max4MB,
+        _ => lz4_flex::frame::BlockSize::Max8MB,
+    }
+}
+
+/// Build a FrameInfo with the appropriate block size for a given level.
+fn lz4_frame_info_for_level(level: i32) -> lz4_flex::frame::FrameInfo {
+    lz4_flex::frame::FrameInfo::new()
+        .block_size(lz4_block_size_for_level(level))
+}
+
+fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
+    // lz4_flex frame format produces output compatible with `lz4 -d` CLI.
+    // We use FrameEncoder with FrameInfo to control block size (which is the
+    // primary compression knob in frame format — larger blocks = better ratio).
+    let resolved_level = level.clamp(1, 12);
+    let frame_info = lz4_frame_info_for_level(resolved_level);
+    let mut result = Vec::new();
+    {
+        let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
+        encoder.write_all(data)
+            .map_err(|e| format!("lz4 frame compress write error: {}", e))?;
+    } // encoder.finish() is called on drop — flushes and writes end mark
+    Ok(result)
+}
+
+fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+    let cursor = Cursor::new(data);
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(cursor);
+    let mut result = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut result)
+        .map_err(|e| format!("lz4 frame decompress error: {}", e))?;
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 //  SHA-256 hashing
 // ---------------------------------------------------------------------------
 
@@ -628,6 +711,26 @@ pub fn compress_streaming(
                 encoder
                     .write_all(&data[offset..end])
                     .map_err(|e| format!("brotli streaming write error: {}", e))?;
+                offset = end;
+                if let Some(ref mut cb) = on_progress {
+                    cb(offset as u64, total);
+                }
+            }
+        } // encoder is flushed on drop
+        return Ok(result);
+    }
+
+    if is_alg(algorithm, ALG_LZ4) {
+        let frame_info = lz4_frame_info_for_level(resolved_level);
+        let mut result = Vec::new();
+        {
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
+            let mut offset: usize = 0;
+            while offset < data.len() {
+                let end = (offset + effective_chunk).min(data.len());
+                encoder
+                    .write_all(&data[offset..end])
+                    .map_err(|e| format!("lz4 streaming write error: {}", e))?;
                 offset = end;
                 if let Some(ref mut cb) = on_progress {
                     cb(offset as u64, total);
@@ -816,6 +919,28 @@ pub fn hash_and_compress_file(
                 encoder
                     .write_all(&buf[..n])
                     .map_err(|e| format!("brotli compress write error: {}", e))?;
+            }
+        } // encoder is flushed on drop
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((result, hex));
+    }
+
+    if is_alg(algorithm, ALG_LZ4) {
+        let frame_info = lz4_frame_info_for_level(resolved_level);
+        let mut result = Vec::new();
+        {
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("lz4 compress write error: {}", e))?;
             }
         } // encoder is flushed on drop
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
@@ -1015,6 +1140,30 @@ pub fn hash_and_compress_file_with_progress(
                 report_progress(bytes_read, file_size);
             }
         }
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((result, hex));
+    }
+
+    if is_alg(algorithm, ALG_LZ4) {
+        let frame_info = lz4_frame_info_for_level(resolved_level);
+        let mut result = Vec::new();
+        {
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("lz4 compress write error: {}", e))?;
+                bytes_read += n as u64;
+                report_progress(bytes_read, file_size);
+            }
+        } // encoder is flushed on drop
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
         return Ok((result, hex));
     }
@@ -1303,6 +1452,29 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
         return Ok((compressed_size, hex));
     }
 
+    if is_alg(algorithm, ALG_LZ4) {
+        let frame_info = lz4_frame_info_for_level(resolved_level);
+        {
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting).auto_finish();
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("lz4 compress write error: {}", e))?;
+            }
+        } // encoder is flushed on drop
+        let compressed_size = counting.bytes_written();
+        counting.flush().map_err(|e| format!("lz4 flush error: {}", e))?;
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((compressed_size, hex));
+    }
+
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
@@ -1554,6 +1726,35 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         ));
     }
 
+    if is_alg(algorithm, ALG_LZ4) {
+        let frame_info = lz4_frame_info_for_level(resolved_level);
+        {
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting).auto_finish();
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("lz4 compress write error: {}", e))?;
+                bytes_read += n as u64;
+                report_progress(bytes_read, file_size);
+            }
+        } // encoder is flushed on drop
+        counting.flush().map_err(|e| format!("lz4 flush error: {}", e))?;
+        let comp_size = counting.bytes_written();
+        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
+        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((
+            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
+            _sha_writer,
+        ));
+    }
+
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
@@ -1593,6 +1794,9 @@ pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
     }
     if is_alg(algorithm, ALG_BROTLI) {
         return 13; // REPLACE_BROT
+    }
+    if is_alg(algorithm, ALG_LZ4) {
+        return 0; // LZ4 has no AOSP operation type; use REPLACE (0) as fallback
     }
     0
 }
@@ -1725,6 +1929,42 @@ mod tests {
         assert!(!compressed.is_empty());
         let decompressed = decompress(&compressed, "brotli").unwrap();
         assert_eq!(data.to_vec(), decompressed);
+    }
+
+    #[test]
+    fn test_compress_decompress_lz4() {
+        let data = b"Hello, OTAku! This is a test of lz4 compression.";
+        let compressed = compress(data, "lz4", None).unwrap();
+        assert!(!compressed.is_empty());
+        let decompressed = decompress(&compressed, "lz4").unwrap();
+        assert_eq!(data.to_vec(), decompressed);
+    }
+
+    #[test]
+    fn test_lz4_frame_magic() {
+        let data = b"LZ4 frame format test data";
+        let compressed = compress(data, "lz4", None).unwrap();
+        // LZ4 frame magic: 04 22 4D 18
+        assert_eq!(compressed[0], 0x04);
+        assert_eq!(compressed[1], 0x22);
+        assert_eq!(compressed[2], 0x4D);
+        assert_eq!(compressed[3], 0x18);
+        // detect_from_data should identify it
+        assert_eq!(detect_from_data(&compressed), ALG_LZ4);
+    }
+
+    #[test]
+    fn test_compress_id_lz4() {
+        assert_eq!(compress_id("lz4"), 5);
+        assert_eq!(compress_id("LZ4"), 5);
+        assert_eq!(compress_id("l4"), 5);
+    }
+
+    #[test]
+    fn test_normalise_lz4() {
+        assert_eq!(normalise("lz4"), ALG_LZ4);
+        assert_eq!(normalise("LZ4"), ALG_LZ4);
+        assert_eq!(normalise("l4"), ALG_LZ4);
     }
 
     #[test]

@@ -14,6 +14,7 @@ jni = "0.21"
 
 # Compression
 flate2 = { version = "1.0", default-features = false, features = ["miniz_oxide"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["frame"] }
 # bzip2: bumped from 0.4 → 0.6 (latest stable).
 # 0.6 uses libbz2-rs-sys (pure Rust) instead of C bindings — better for
 # Android NDK cross-compile (no need to bundle libbz2 C source). API is
