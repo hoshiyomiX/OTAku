@@ -61,23 +61,23 @@ object OTABridge {
     private const val TAG = "OTABridge"
 
     // Compression algorithm choices exposed in the UI spinner
-    // Ordered by compression ratio: worst (none) → best (brotli)
-    val COMPRESSION_ALGORITHMS = listOf("none", "gzip", "lz4", "zstd", "bzip2", "xz", "brotli")
+    // Ordered by compression ratio: best (zstd ~35%) → fastest (lz4 ~70%)
+    // "none" removed — users should always compress OTA packages.
+    val COMPRESSION_ALGORITHMS = listOf("zstd", "brotli", "xz", "bzip2", "gzip", "lz4")
 
-    // All valid compression values (for validation)
+    // All valid compression values (for validation, includes internal "none")
     val ALL_COMPRESSION = setOf("none", "gzip", "lz4", "zstd", "bzip2", "xz", "brotli")
 
 
     // Compression level ranges per algorithm: (min, max, default)
     // Ranges match the Rust native backend LEVEL_RANGES and DEFAULT_LEVELS.
     val COMPRESS_LEVELS = mapOf(
-        "none" to Triple(0, 0, 0),
-        "gzip" to Triple(1, 9, 6),
-        "lz4" to Triple(1, 12, 4),
-        "bzip2" to Triple(1, 9, 9),
-        "xz" to Triple(0, 9, 6),
+        "zstd" to Triple(1, 22, 3),
         "brotli" to Triple(0, 11, 6),
-        "zstd" to Triple(1, 22, 3)
+        "xz" to Triple(0, 9, 6),
+        "bzip2" to Triple(1, 9, 9),
+        "gzip" to Triple(1, 9, 6),
+        "lz4" to Triple(1, 12, 4)
     )
 
     // ═══════════════════════════════════════════════════════════════

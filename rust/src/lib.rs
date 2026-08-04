@@ -128,7 +128,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCheckDeps(
 ) -> jstring {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let result = serde_json::json!({
-            "available": ["none", "gzip", "lz4", "bzip2", "xz", "brotli"],
+            "available": ["zstd", "brotli", "xz", "bzip2", "gzip", "lz4"],
             "missing": [],
             "all_ok": true,
             "native_version": env!("CARGO_PKG_VERSION")

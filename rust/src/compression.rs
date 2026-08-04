@@ -20,7 +20,7 @@ pub const ALG_BROTLI: &str = "brotli";
 pub const ALG_ZSTD: &str = "zstd";
 pub const ALG_AUTO: &str = "auto";
 
-pub const ALL_ALGORITHMS: &[&str] = &[ALG_NONE, ALG_BZIP2, ALG_GZIP, ALG_LZ4, ALG_XZ, ALG_BROTLI, ALG_ZSTD];
+pub const ALL_ALGORITHMS: &[&str] = &[ALG_ZSTD, ALG_BROTLI, ALG_XZ, ALG_BZIP2, ALG_GZIP, ALG_LZ4];
 
 /// Default compression levels per algorithm (matches Python DEFAULT_LEVELS)
 pub const DEFAULT_LEVELS: &[(&str, i32)] = &[

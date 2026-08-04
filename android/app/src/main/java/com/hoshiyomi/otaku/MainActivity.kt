@@ -509,7 +509,7 @@ class MainActivity : AppCompatActivity() {
      * Format:
      *   Initializing OTAku...
      *   Native backend: otaku-native 1.0.0 (rust)
-     *   Native compression: none, gzip, bzip2, xz, brotli
+     *   Native compression: zstd, brotli, xz, bzip2, gzip, lz4
      *   OTAku ready
      *
      * If native failed to load, the error variant is returned instead.
@@ -757,12 +757,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupCompressionSelector() {
         val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompression)
+        // Ordered by compression ratio: best → fastest (matches OTABridge.COMPRESSION_ALGORITHMS)
         val displayLabels = listOf(
-            "none — no compression (100%)",
-            "gzip — standard (~60%)",
-            "bzip2 — high (~50%)",
+            "zstd — supreme (~35%)",
+            "brotli — best (~40%)",
             "xz — ultra (~45%)",
-            "brotli — best (~40%)"
+            "bzip2 — high (~50%)",
+            "gzip — standard (~60%)",
+            "lz4 — fast (~70%)"
         )
         val adapter = ArrayAdapter(
             this,
@@ -785,25 +787,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Compression level ranges per algorithm (matches Rust native backend LEVEL_RANGES)
-    // Default level per algorithm (matches Rust native backend DEFAULT_LEVELS):
-    //   gzip=6, bzip2=9, xz=6, brotli=6
+    // Ordered by compression ratio: best → fastest
     private val COMPRESSION_LEVELS: Map<String, Pair<Int, Int>> = mapOf(
-        "none" to Pair(0, 0),     // no compression
-        "gzip" to Pair(1, 9),     // stdlib gzip: levels 1-9, default 6
-        "lz4" to Pair(1, 12),     // lz4_flex frame: levels 1-12, default 4
-        "bzip2" to Pair(1, 9),    // stdlib bzip2: levels 1-9, default 9
+        "zstd" to Pair(1, 22),     // zstd: levels 1-22, default 3
+        "brotli" to Pair(0, 11),  // brotli: quality 0-11, default 6
         "xz" to Pair(0, 9),       // stdlib lzma: levels 0-9, default 6
-        "brotli" to Pair(0, 11)   // brotli: quality 0-11, default 6
+        "bzip2" to Pair(1, 9),    // stdlib bzip2: levels 1-9, default 9
+        "gzip" to Pair(1, 9),     // stdlib gzip: levels 1-9, default 6
+        "lz4" to Pair(1, 12)      // lz4_flex frame: levels 1-12, default 4
     )
 
     // Default compression level per algorithm (single source of truth for UI labels)
     private val DEFAULT_COMPRESSION_LEVELS: Map<String, Int> = mapOf(
-        "none" to 0,
-        "gzip" to 6,
-        "lz4" to 4,
-        "bzip2" to 9,
+        "zstd" to 3,
+        "brotli" to 6,
         "xz" to 6,
-        "brotli" to 6
+        "bzip2" to 9,
+        "gzip" to 6,
+        "lz4" to 4
     )
 
     private fun setupCompressionLevelSpinner() {

@@ -72,8 +72,8 @@ object NativeBridge {
     fun checkDeps(): DepCheckResult {
         if (!isLoaded) {
             return DepCheckResult(
-                available = listOf("none"),
-                missing = listOf("gzip", "bzip2", "xz", "brotli"),
+                available = listOf("gzip"),
+                missing = listOf("zstd", "brotli", "xz", "bzip2", "lz4"),
                 allOk = false,
                 nativeVersion = "not loaded"
             )
@@ -84,8 +84,8 @@ object NativeBridge {
         } catch (e: Exception) {
             Log.e(TAG, "checkDeps failed: ${e.message}")
             DepCheckResult(
-                available = listOf("none"),
-                missing = listOf("gzip", "bzip2", "xz", "brotli"),
+                available = listOf("gzip"),
+                missing = listOf("zstd", "brotli", "xz", "bzip2", "lz4"),
                 allOk = false,
                 nativeVersion = "error"
             )

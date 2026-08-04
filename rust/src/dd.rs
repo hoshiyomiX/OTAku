@@ -13,8 +13,8 @@
 //!   Data:
 //!     each partition compressed, padded to 4096 alignment
 //!
-//! Compress IDs:
-//!   0 = none,  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli,  5 = lz4,  6 = zstd
+//! Compress IDs (internal binary format — UI no longer exposes "none"):
+//!   0 = none (internal),  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli,  5 = lz4,  6 = zstd
 //!
 //! Ported from Python modes/dd.py (849 lines) to Rust with identical semantics.
 
