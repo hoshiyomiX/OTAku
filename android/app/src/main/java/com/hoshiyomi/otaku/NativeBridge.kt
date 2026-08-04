@@ -13,7 +13,7 @@ import org.json.JSONObject
  *   Kotlin → JNI → libotaku_native.so (Rust, statically links all compression)
  *
  * No Python, no dlopen, no LD_PRELOAD, no ELF manipulation.
- * All compression algorithms (gzip, bzip2, xz, brotli) are always available
+ * All compression algorithms (zstd, brotli, xz, bzip2, gzip, lz4) are always available
  * because they're statically compiled into the Rust .so.
  */
 object NativeBridge {
@@ -156,7 +156,7 @@ object NativeBridge {
      * Generate a payload.bin from partition images.
      *
      * @param images Map of partition name -> absolute path to .img file
-     * @param compression Compression algorithm: "none", "gzip", "lz4", "bzip2", "xz", "brotli"
+     * @param compression Compression algorithm: "zstd", "brotli", "xz", "bzip2", "gzip", "lz4"
      * @param level Compression level (0 = default per algorithm, e.g. gzip=6, lz4=4)
      * @param outputPath Absolute path for output payload.bin
      * @param blockSize Block size in bytes (default 4096)
@@ -219,7 +219,7 @@ object NativeBridge {
      *
      * @param inputPath Absolute path to the input file
      * @param outputPath Absolute path for the compressed output
-     * @param algorithm Compression algorithm: "none", "gzip", "bzip2", "xz", "brotli"
+     * @param algorithm Compression algorithm: "zstd", "brotli", "xz", "bzip2", "gzip", "lz4"
      * @param level Compression level (0 = algorithm default)
      * @return CompressResult with success/error and size info
      */
@@ -281,7 +281,7 @@ object NativeBridge {
      * that Kotlin polls every 500ms. This avoids JNI callback complexity.
      *
      * @param images Map of partition name -> absolute path to .img file
-     * @param compression Compression algorithm: "none", "gzip", "bzip2", "xz", "brotli"
+     * @param compression Compression algorithm: "zstd", "brotli", "xz", "bzip2", "gzip", "lz4"
      * @param level Compression level (0 = default per algorithm)
      * @param outputPath Absolute path for output .zip file
      * @param device Device codename(s), comma-separated

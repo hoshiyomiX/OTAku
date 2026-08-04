@@ -23,7 +23,8 @@ use std::io::{Seek, Write, SeekFrom};
 use std::path::Path;
 
 use crate::compression::{
-    compress_id, hash_and_compress_file_to_writer_with_progress, is_alg, ALG_NONE,
+    compress_id, hash_and_compress_file_to_writer_with_progress, is_alg,
+    ALG_GZIP, ALG_BZIP2, ALG_XZ, ALG_BROTLI, ALG_LZ4, ALG_ZSTD,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,11 +103,11 @@ pub const ALIGN: usize = 4096;
 
 /// otaku numeric ID -> shell decompressor command
 pub const COMPRESS_CMD_MAP: &[(&str, u16)] = &[
-    ("none", 0),
-    ("gzip", 1),
-    ("bzip2", 2),
-    ("xz", 3),
+    ("zstd", 6),
     ("brotli", 4),
+    ("xz", 3),
+    ("bzip2", 2),
+    ("gzip", 1),
     ("lz4", 5),
 ];
 
@@ -2684,18 +2685,20 @@ pub fn run_dd_build(
         };
     }
 
-    // Validate compression algorithm
-    let is_valid_compression = is_alg(compression, ALG_NONE)
-        || is_alg(compression, "gzip")
-        || is_alg(compression, "bzip2")
-        || is_alg(compression, "xz")
-        || is_alg(compression, "brotli");
+    // Validate compression algorithm — "none" removed from user-facing options.
+    // All 6 algorithms: zstd, brotli, xz, bzip2, gzip, lz4 (ordered by ratio).
+    let is_valid_compression = is_alg(compression, ALG_ZSTD)
+        || is_alg(compression, ALG_BROTLI)
+        || is_alg(compression, ALG_XZ)
+        || is_alg(compression, ALG_BZIP2)
+        || is_alg(compression, ALG_GZIP)
+        || is_alg(compression, ALG_LZ4);
 
     if !is_valid_compression {
         return DdBuildResult {
             success: false,
             output: format!(
-                "[!] Error: unsupported compression '{}'. Supported: none, gzip, bzip2, xz, brotli",
+                "[!] Error: unsupported compression '{}'. Supported: zstd, brotli, xz, bzip2, gzip, lz4",
                 compression
             ),
             zip_path: None,
