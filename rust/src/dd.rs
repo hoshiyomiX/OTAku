@@ -2377,7 +2377,7 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
                     : # Fall through to post-verify
                 else
                     ui_print "✗ Error: All decompressors failed"
-                    ui_print "  Hint: Rebuild with --compress none or different level"
+                    ui_print "  Hint: Rebuild with --compress lz4 (fastest) or --compress gzip"
                     exit 1
                 fi
             else
@@ -2607,7 +2607,7 @@ fn build_flash_info(
 ///
 /// # Arguments
 /// * `images` - List of (partition_name, image_path) pairs
-/// * `compression` - Compression algorithm: "none", "gzip", "bzip2", "xz", "brotli"
+/// * `compression` - Compression algorithm: "zstd", "brotli", "xz", "bzip2", "gzip", "lz4"
 /// * `level` - Compression level (0 = default per algorithm)
 /// * `output_path` - Absolute path for output .zip file
 /// * `device` - Device codename(s), comma-separated (empty = no device check)

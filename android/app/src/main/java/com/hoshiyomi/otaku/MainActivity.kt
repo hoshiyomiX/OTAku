@@ -824,7 +824,7 @@ class MainActivity : AppCompatActivity() {
         val range = COMPRESSION_LEVELS[selectedCompression] ?: (0 to 0)
         val (min, max) = range
         return if (min == 0 && max == 0) {
-            listOf(0)  // "none" → just show "Default"
+            listOf(0)  // Unknown algorithm → just show "Default"
         } else {
             // BUG FIX: Previously, `listOf(0) + (min..max)` produced duplicate zeros
             // for algorithms where min=0 (xz: 0-9, brotli: 0-11). The list would be
