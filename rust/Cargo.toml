@@ -25,10 +25,12 @@ xz2 = "0.1"
 brotli = "6.0"
 # ZSTD (Zstandard): high compression ratio with fast decompression.
 # Uses libzstd-sys (C bindings to Facebook's zstd library) — the same
-# library used by RapidFlasher. Cross-compiles to Android NDK (arm64/armv7).
-# Feature "pkg-config" allows finding system libzstd; default build bundles
-# the C source via the cc crate, which is more portable for NDK.
-zstd = { version = "0.13", default-features = false, features = ["pkg-config"] }
+# library used by RapidFlasher. Cross-compiles to Android NDK (arm64/armv7)
+# by building libzstd from source (cc crate bundles the C code) — no
+# pkg-config or system libzstd needed for cross-compile.
+# NOTE: Do NOT add "pkg-config" feature — it breaks Android NDK cross-compile
+# because pkg-config cannot find target-architecture libraries.
+zstd = { version = "0.13", default-features = false }
 
 # Hashing
 sha2 = "0.10"
