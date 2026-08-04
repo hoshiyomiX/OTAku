@@ -23,7 +23,7 @@ use std::io::{Seek, Write, SeekFrom};
 use std::path::Path;
 
 use crate::compression::{
-    compress_id, hash_and_compress_file_to_writer_with_progress, is_alg,
+    compress_id, hash_and_compress_file_to_writer_with_progress, is_alg, resolve_level,
     ALG_GZIP, ALG_BZIP2, ALG_XZ, ALG_BROTLI, ALG_LZ4, ALG_ZSTD,
 };
 
@@ -2732,11 +2732,11 @@ pub fn run_dd_build(
     // ── Run the build pipeline ──
     let result: Result<DdBuildResult, String> = (|| {
         let num_parts = images.len();
-        let level_display = if level > 0 {
-            format!(" (level {})", level)
-        } else {
-            String::new()
-        };
+        // Resolve effective level: 0 = algorithm default (zstd→3, gzip→6, etc.)
+        // Always show the actual level used — never display the raw sentinel 0.
+        let level_opt = if level > 0 { Some(level) } else { None };
+        let effective_level = resolve_level(&compress_name, level_opt);
+        let level_display = format!(" (level {})", effective_level);
 
         // ── Compute total estimated size (sum of all input image sizes) ──
         // Used by Kotlin for progress percentage calculation.
@@ -2834,16 +2834,15 @@ pub fn run_dd_build(
         ));
 
         // Warn about high compression levels on mobile
-        if (compress_name == "xz" || compress_name == "brotli") && level >= 7 {
+        if (compress_name == "xz" || compress_name == "brotli") && effective_level >= 7 {
             lines.push(format!(
                 "  ! {} level {} is very slow on mobile. Level 6 recommended.",
-                compress_name, level
+                compress_name, effective_level
             ));
         }
 
         let mut partitions_meta: Vec<PartitionMeta> = Vec::new();
-        // Centralized level conversion: 0 = use algorithm default (same as Kotlin convention)
-        let level_opt = if level > 0 { Some(level) } else { None };
+        // (level_opt already computed above — used by resolve_level and compression)
 
         // Stream compressed data directly to the temp file.
         // Each partition is compressed chunk-by-chunk and written to the

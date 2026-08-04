@@ -111,7 +111,7 @@ fn normalise(algorithm: &str) -> String {
 /// "use the algorithm's default level". This aligns with the Kotlin/Java convention
 /// where `level = 0` means "default" (sentinel value), and with all JNI entry points
 /// that convert `jint 0` → `None`.
-fn resolve_level(algorithm: &str, level: Option<i32>) -> i32 {
+pub fn resolve_level(algorithm: &str, level: Option<i32>) -> i32 {
     let alg = normalise(algorithm);
     let default = DEFAULT_LEVELS
         .iter()

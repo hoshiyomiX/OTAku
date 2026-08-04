@@ -133,9 +133,13 @@ object OTABridge {
             try { java.io.File(path).length() } catch (_: Exception) { 0L }
         }
 
+        // Resolve effective level: 0 = algorithm default (zstd→3, gzip→6, etc.)
+        // Always log the actual level used — never display the raw sentinel 0.
+        val effectiveLevel = if (level > 0) level else COMPRESS_LEVELS[compression]?.third ?: level
+
         // Log input parameters before the JNI call
         val debugStartMsg = "[DEBUG] dd() called: ${images.size} partitions, " +
-            "compression=$compression, level=$level, device=$effectiveDevice, " +
+            "compression=$compression, level=$effectiveLevel, device=$effectiveDevice, " +
             "output=$outputPath, total_input=${formatSize(totalInputBytes)}"
         Log.d(TAG, debugStartMsg)
         onOutputLine?.invoke(debugStartMsg)
