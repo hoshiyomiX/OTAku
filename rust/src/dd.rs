@@ -4432,10 +4432,11 @@ mod tests {
             script.contains("conv=notrunc"),
             "Optimize: O_DIRECT probe should use conv=notrunc on actual target"
         );
-        // O_DIRECT probe should write to PTARGET, not /dev/null
+        // The O_DIRECT probe writes to $PTARGET with conv=notrunc, not to /dev/null.
+        // Verify the probe pattern includes writing to the actual target.
         assert!(
-            !script.contains("of=/dev/null") || !script.contains("oflag=direct"),
-            "Optimize: O_DIRECT probe should NOT write to /dev/null (false positive)"
+            script.contains("of=\"$PTARGET\" bs=4096 count=1 conv=notrunc"),
+            "Optimize: O_DIRECT probe should write to $PTARGET (not /dev/null)"
         );
 
         // 4. verify_block uses ${i} (not ${{i}} — that was a format!() escaping bug)
