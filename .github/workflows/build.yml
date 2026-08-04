@@ -29,6 +29,21 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - name: Run cargo clippy (lint)
+        working-directory: rust
+        run: cargo clippy --lib -- -D warnings 2>&1
+
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk

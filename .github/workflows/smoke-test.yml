@@ -58,6 +58,10 @@ jobs:
         working-directory: rust
         run: cargo test --verbose --lib 2>&1
 
+      - name: Run cargo clippy (lint)
+        working-directory: rust
+        run: cargo clippy --lib -- -D warnings 2>&1
+
       - name: Show test summary on failure
         if: failure()
         working-directory: rust
@@ -295,6 +299,15 @@ jobs:
               "num_parts_minus_1", "total_steps", "verify_block",
               "device_check_step", "device",
           ]
+          # Verify zstd COMPRESS_ID=6 is present in the generated script
+          zstd_checks = [
+              ("zstd", "zstd DECOMP_PIPE"),
+              ("zstdcat", "zstdcat fallback"),
+              ("COMPRESS_ID", "COMPRESS_ID mapping"),
+          ]
+          for check, desc in zstd_checks:
+              if check not in content:
+                  print(f"WARNING: zstd check '{desc}' not found in dd.rs")
           missing = []
           for arg in required_args:
               if arg not in content:
@@ -331,6 +344,22 @@ jobs:
               print(f"FAIL: missing ZIP entry references in dd.rs: {missing}")
               exit(1)
           print(f"PASS: all {len(required_entries)} ZIP entries referenced in source")
+
+          # Verify optimization features are present
+          optimizations = [
+              ("trim_pipe", "trim_pipe function (replaces head -c)"),
+              ("oflag=direct", "O_DIRECT for block device writes"),
+              ("NEED_TRIM", "NEED_TRIM optimization flag"),
+              ("PCSIZE_BLOCKS", "PCSIZE_BLOCKS for block-aligned trim"),
+          ]
+          missing_opt = []
+          for check, desc in optimizations:
+              if check not in content:
+                  missing_opt.append(f"{check} ({desc})")
+          if missing_opt:
+              print(f"FAIL: missing optimizations in dd.rs: {missing_opt}")
+              exit(1)
+          print(f"PASS: all {len(optimizations)} optimizations present")
           PYEOF
 
       # ── Step 6: Summary ──

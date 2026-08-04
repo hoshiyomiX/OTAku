@@ -1,7 +1,7 @@
 //! Compression / decompression for AOSP payload.bin operations.
 //!
 //! All algorithms are statically compiled — no runtime dependency checks needed.
-//! Supported: none, gzip (flate2/miniz_oxide), lz4 (lz4_flex/frame), bzip2, xz (xz2/liblzma), brotli (pure Rust).
+//! Supported: none, gzip (flate2/miniz_oxide), lz4 (lz4_flex/frame), bzip2, xz (xz2/liblzma), brotli (pure Rust), zstd (libzstd-sys).
 //!
 //! Ported from Python compression.py to Rust with identical semantics.
 
@@ -17,9 +17,10 @@ pub const ALG_LZ4: &str = "lz4";
 pub const ALG_BZIP2: &str = "bzip2";
 pub const ALG_XZ: &str = "xz";
 pub const ALG_BROTLI: &str = "brotli";
+pub const ALG_ZSTD: &str = "zstd";
 pub const ALG_AUTO: &str = "auto";
 
-pub const ALL_ALGORITHMS: &[&str] = &[ALG_NONE, ALG_BZIP2, ALG_GZIP, ALG_LZ4, ALG_XZ, ALG_BROTLI];
+pub const ALL_ALGORITHMS: &[&str] = &[ALG_NONE, ALG_BZIP2, ALG_GZIP, ALG_LZ4, ALG_XZ, ALG_BROTLI, ALG_ZSTD];
 
 /// Default compression levels per algorithm (matches Python DEFAULT_LEVELS)
 pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
@@ -29,6 +30,7 @@ pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
     (ALG_BZIP2, 9),
     (ALG_XZ, 6),
     (ALG_BROTLI, 6),
+    (ALG_ZSTD, 3),
 ];
 
 /// Valid level ranges per algorithm: (min, max) (matches Python LEVEL_RANGES)
@@ -39,6 +41,7 @@ pub const LEVEL_RANGES: &[(&str, i32, i32)] = &[
     (ALG_BZIP2, 1, 9),
     (ALG_XZ, 0, 9),
     (ALG_BROTLI, 0, 11),
+    (ALG_ZSTD, 1, 22),
 ];
 
 // ---------------------------------------------------------------------------
@@ -52,6 +55,7 @@ pub const COMPRESS_ID_MAP: &[(&str, u16)] = &[
     ("xz", 3),
     ("brotli", 4),
     ("lz4", 5),
+    ("zstd", 6),
 ];
 
 /// Get the compress ID for an algorithm name.
@@ -160,6 +164,11 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
         return ALG_LZ4;
     }
 
+    // ZSTD frame magic: 28 B5 2F FD
+    if data.len() >= 4 && data[..4] == [0x28, 0xB5, 0x2F, 0xFD] {
+        return ALG_ZSTD;
+    }
+
     // Brotli: no reliable magic, try trial decompression with larger probe.
     // BUG FIX: Previously only decoded 1 byte, which can produce false positives
     // — any random 3+ bytes can sometimes decode as valid brotli for 1 byte.
@@ -213,6 +222,9 @@ pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<
     if is_alg(algorithm, ALG_LZ4) {
         return compress_lz4(data, resolved_level);
     }
+    if is_alg(algorithm, ALG_ZSTD) {
+        return compress_zstd(data, resolved_level);
+    }
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
@@ -250,6 +262,9 @@ pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
     }
     if effective_alg == ALG_LZ4 {
         return decompress_lz4(data);
+    }
+    if effective_alg == ALG_ZSTD {
+        return decompress_zstd(data);
     }
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
@@ -361,6 +376,21 @@ pub fn decompress_to_writer<W: Write>(
             total += n as u64;
             if total > MAX_DECOMPRESSED_SIZE as u64 {
                 return Err(format!("lz4 decompressed output exceeds {} GiB limit — possible zip bomb",
+                    MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
+            }
+        }
+        return Ok(total);
+    }
+
+    if effective_alg == ALG_ZSTD {
+        let mut decoder = zstd::Decoder::new(data).map_err(|e| format!("zstd decoder init error: {}", e))?;
+        loop {
+            let n = decoder.read(&mut buf).map_err(|e| format!("zstd streaming decompress error: {}", e))?;
+            if n == 0 { break; }
+            writer.write_all(&buf[..n]).map_err(|e| format!("Write decompressed error: {}", e))?;
+            total += n as u64;
+            if total > MAX_DECOMPRESSED_SIZE as u64 {
+                return Err(format!("zstd decompressed output exceeds {} GiB limit — possible zip bomb",
                     MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
             }
         }
@@ -584,6 +614,50 @@ fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, String> {
     if result.len() >= MAX_DECOMPRESSED_SIZE {
         return Err(format!(
             "lz4 decompressed output exceeds {} GiB limit — possible zip bomb",
+            MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
+        ));
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+//  ZSTD implementation (zstd / libzstd-sys)
+// ---------------------------------------------------------------------------
+
+fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
+    // zstd crate Encoder wraps Facebook's libzstd C library.
+    // Level 1-19 are standard; 20-22 are "ultra" (slower, better ratio).
+    // Default level 3 provides ~2.8x ratio at 400 MB/s decompress speed,
+    // significantly better than gzip level 6 (~2.5x at 200 MB/s) and
+    // competitive with xz level 6 (~3.5x at 40 MB/s) for much faster
+    // decompression — critical for recovery flashing time.
+    let level_clamped = level.clamp(1, 22) as i32;
+    let mut result = Vec::new();
+    {
+        let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
+            .map_err(|e| format!("zstd encoder init error: {}", e))?;
+        encoder.write_all(data)
+            .map_err(|e| format!("zstd compress write error: {}", e))?;
+        encoder.finish()
+            .map_err(|e| format!("zstd compress finish error: {}", e))?;
+    }
+    Ok(result)
+}
+
+fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let decoder = zstd::Decoder::new(data)
+        .map_err(|e| format!("zstd decoder init error: {}", e))?;
+    let mut result = Vec::new();
+    // Zip-bomb protection: same .take() pattern as all other decompress_*.
+    // A crafted ZSTD frame could decompress to gigabytes; this prevents OOM.
+    decoder
+        .take(MAX_DECOMPRESSED_SIZE as u64)
+        .read_to_end(&mut result)
+        .map_err(|e| format!("zstd decompress error: {}", e))?;
+    if result.len() >= MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "zstd decompressed output exceeds {} GiB limit — possible zip bomb",
             MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
         ));
     }
