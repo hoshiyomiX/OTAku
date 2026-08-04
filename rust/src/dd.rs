@@ -1090,6 +1090,14 @@ else
     if [ "$COMPRESS_ID" = "6" ]; then
         DECOMP_PIPE="$DECOMP_CMD -dc"
     fi
+    # Brotli also requires -c for stdout output when piped (like lz4/zstd).
+    # On OrangeFox, brotli is only available via busybox, and busybox brotli -d
+    # without -c attempts to write to a file (removing .br extension) instead of
+    # stdout. The fallback chain already uses "busybox brotli -dc", so the
+    # primary pipe should match.
+    if [ "$COMPRESS_ID" = "4" ]; then
+        DECOMP_PIPE="$DECOMP_CMD -dc"
+    fi
 
     # ── Multi-threaded decompressor upgrade ──
     # OrangeFox recovery availability (default build, no optional flags):
@@ -4586,6 +4594,33 @@ mod tests {
         assert!(
             script.contains("DECOMP_PIPE=\"$DECOMP_CMD -dc\""),
             "REGRESSION: lz4 DECOMP_PIPE -dc override missing"
+        );
+    }
+
+    /// Regression: brotli primary DECOMP_PIPE must use -dc flag.
+    /// Without -c, busybox brotli -d attempts to write to a file instead of
+    /// stdout when used in a pipe, causing silent flash failure. This is the
+    /// same class of bug as lz4 (ID=5) and zstd (ID=6) — all three require
+    /// explicit -c for stdout output; gzip/bzip2/xz auto-detect pipe mode.
+    #[test]
+    fn test_regression_brotli_decomp_pipe_dc_flag() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 1073741824,
+            hash_hex: "a".repeat(64),
+            comp_size: 536870912,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 4, "brotli", &meta, 0, "", false);
+        // The brotli-specific override must be present in the generated script
+        assert!(
+            script.contains(r#"if [ "$COMPRESS_ID" = "4" ]; then"#),
+            "REGRESSION: brotli compress_id=4 override for -dc flag missing"
+        );
+        assert!(
+            script.contains("DECOMP_PIPE=\"$DECOMP_CMD -dc\""),
+            "REGRESSION: brotli DECOMP_PIPE -dc override missing"
         );
     }
 
