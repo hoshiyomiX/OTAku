@@ -52,7 +52,7 @@ data class ProgressUpdate(
  * This app is DD-mode only: generates otaku-format flashable ZIPs
  * from partition images (.img) for TWRP/OrangeFox recovery flashing.
  *
- * Supported compression: none, gzip, bzip2, xz, brotli
+ * Supported compression: none, gzip, lz4, bzip2, xz, brotli
  *
  * All operations use NativeBridge (Rust libotaku_native.so) — no Python dependency.
  */
@@ -73,6 +73,7 @@ object OTABridge {
     val COMPRESS_LEVELS = mapOf(
         "none" to Triple(0, 0, 0),
         "gzip" to Triple(1, 9, 6),
+        "lz4" to Triple(1, 12, 4),
         "bzip2" to Triple(1, 9, 9),
         "xz" to Triple(0, 9, 6),
         "brotli" to Triple(0, 11, 6)

@@ -14,7 +14,7 @@
 //!     each partition compressed, padded to 4096 alignment
 //!
 //! Compress IDs:
-//!   0 = none,  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli
+//!   0 = none,  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli,  5 = lz4
 //!
 //! Ported from Python modes/dd.py (849 lines) to Rust with identical semantics.
 
@@ -1067,43 +1067,37 @@ else
     if ! check_decompressor "{decomp_cmd}"; then
         ui_print "! ABORT: {decomp_cmd} not found."
         ui_print "! Available tools:"
-        which gzip bzip2 xz brotli lz4 2>/dev/null || echo "  (none found)"
+        which gzip bzip2 xz lz4 2>/dev/null || echo "  (none found)"
         busybox --list 2>/dev/null | head -5
         ui_print "! Rebuild bundle with an available compressor."
         ui_print "! Recommended: --compress lz4 (fastest) or --compress gzip"
         exit 1
     fi
     DECOMP_PIPE="$DECOMP_CMD -d"
+    # BUG FIX: lz4 requires explicit -c flag for stdout output when piped.
+    # gzip/bzip2/xz auto-detect pipe and write to stdout, but lz4 -d
+    # without -c may attempt to write to a file (especially older versions
+    # or busybox lz4). The fallback chain already uses "lz4 -dc" as the
+    # first fallback, so the primary pipe should match.
+    if [ "$COMPRESS_ID" = "5" ]; then
+        DECOMP_PIPE="$DECOMP_CMD -dc"
+    fi
 
     # ── Multi-threaded decompressor upgrade ──
-    # On multi-core SoCs, parallel decompressors are significantly faster
-    # (e.g., pigz is ~2-3x faster than gzip on 4-core Cortex-A55).
-    #
     # OrangeFox recovery availability (default build, no optional flags):
     #   gzip/bzip2/xz: ✅ via toybox (single-threaded only)
     #   nproc:         ✅ via toybox
-    #   pigz/pbzip2:   ❌ NEVER available (no OrangeFox build flag exists)
+    #   pigz/pbzip2:   ❌ REMOVED — no OrangeFox build flag exists; never available
+    #   brotli:        ❌ REMOVED — no OrangeFox build flag exists; never available
     #   xz -T0:        ⚠️  Only if FOX_USE_XZ_UTILS=1 enabled by device maintainer
     #   lz4:           ⚠️  Only if FOX_USE_LZ4_BINARY=1 enabled by device maintainer
-    #   brotli:        ❌ NEVER available (no OrangeFox build flag exists)
     #
-    # All MT checks are graceful no-ops — if the tool is not found, the
-    # single-threaded fallback (already set in DECOMP_PIPE) is used.
+    # pigz/pbzip2/brotli MT upgrade branches removed — they were dead code
+    # (command -v always fails on OrangeFox). Removing them shrinks the
+    # generated script and eliminates misleading "try pigz" messages.
     NPROC=$(nproc 2>/dev/null || echo 1)
     if [ "$NPROC" -gt 1 ]; then
         case "$COMPRESS_ID" in
-            1) # gzip → try pigz (parallel gzip)
-                if command -v pigz >/dev/null 2>&1; then
-                    DECOMP_PIPE="pigz -dc -p $NPROC"
-                    ui_print "  ✓ Multi-threaded: pigz ($NPROC cores)"
-                fi
-                ;;
-            2) # bzip2 → try pbzip2 (parallel bzip2)
-                if command -v pbzip2 >/dev/null 2>&1; then
-                    DECOMP_PIPE="pbzip2 -dc -p$NPROC"
-                    ui_print "  ✓ Multi-threaded: pbzip2 ($NPROC cores)"
-                fi
-                ;;
             3) # xz → try xz -T0 (multi-threaded xz, liblzma 5.2+)
                 # xz -T0 uses all available threads; -T1 = single-threaded (default)
                 if xz -T0 --help >/dev/null 2>&1; then
@@ -1968,10 +1962,10 @@ ui_print "  ✓ Free space check complete"
     // gzip fallbacks, which guaranteed failure for bzip2/xz/brotli partitions.
     let fallback_decompressors = match compress_id {
         0 => "",  // ALG_NONE — no decompression, no fallback needed
-        1 => r#""pigz -dc" "gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc""#,
-        2 => r#""pbzip2 -dc" "bzip2 -dc" "bzcat" "busybox bzip2 -dc""#,
+        1 => r#""gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc""#,
+        2 => r#""bzip2 -dc" "bzcat" "busybox bzip2 -dc""#,
         3 => r#""xz -T0 -dc" "xz -dc" "xzcat" "busybox xz -dc""#,
-        4 => r#""brotli -dc" "busybox brotli -dc""#,
+        4 => r#""busybox brotli -dc""#,
         5 => r#""lz4 -dc" "lz4 -d" "busybox lz4 -dc""#,
         _ => "",
     };
@@ -4450,12 +4444,47 @@ mod tests {
             script.contains("--compress lz4 (fastest)"),
             "REGRESSION: lz4 recommendation missing from error message"
         );
+
+        // 6. BUG FIX: Primary DECOMP_PIPE for lz4 must use -dc (not just -d)
+        // lz4 requires explicit -c for stdout output when piped; gzip/bzip2/xz
+        // auto-detect pipe, but lz4 does not (especially older/busybox versions).
+        assert!(
+            script.contains("COMPRESS_ID = \"5\"") || script.contains("COMPRESS_ID\" = \"5\"") || script.contains(r#"$COMPRESS_ID" = "5"#) || script.contains("COMPRESS_ID = 5"),
+            "REGRESSION: lz4 compress_id=5 check for -dc flag missing"
+        );
+    }
+
+    /// Regression: lz4 primary DECOMP_PIPE must use -dc flag.
+    /// Without -c, lz4 -d may attempt to write to a file instead of stdout
+    /// when used in a pipe (dd | lz4 -d | dd), causing silent flash failure.
+    #[test]
+    fn test_regression_lz4_decomp_pipe_dc_flag() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 1073741824,
+            hash_hex: "a".repeat(64),
+            comp_size: 536870912,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 5, "lz4", &meta, 0, "", false);
+        // The lz4-specific override must be present in the generated script
+        assert!(
+            script.contains(r#"if [ "$COMPRESS_ID" = "5" ]; then"#),
+            "REGRESSION: lz4 compress_id=5 override for -dc flag missing"
+        );
+        assert!(
+            script.contains("DECOMP_PIPE=\"$DECOMP_CMD -dc\""),
+            "REGRESSION: lz4 DECOMP_PIPE -dc override missing"
+        );
     }
 
     // ── Multi-threaded decompressor regression tests ──
 
-    /// Verify ALL decompressors have multi-threaded upgrade paths.
-    /// gzip → pigz, bzip2 → pbzip2, xz → xz -T0, lz4 → lz4 -T0.
+    /// Verify MT decompressor upgrade paths for supported algorithms.
+    /// pigz/pbzip2/brotli REMOVED — never available on OrangeFox recovery.
+    /// Remaining MT paths: xz → xz -T0, lz4 → lz4 -T0.
+    /// gzip and bzip2 have NO MT upgrade (pigz/pbzip2 removed).
     #[test]
     fn test_regression_mt_decompressor_all_algorithms() {
         let meta = vec![PartitionMeta {
@@ -4467,35 +4496,27 @@ mod tests {
             comp_hash_hex: "b".repeat(64),
         }];
 
-        // gzip → pigz
+        // gzip — NO MT upgrade (pigz removed, never available on OrangeFox)
         let gzip_script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
         assert!(
-            gzip_script.contains("1) # gzip → try pigz"),
-            "REGRESSION: gzip MT case label missing"
+            !gzip_script.contains("pigz"),
+            "REGRESSION: pigz should be removed from generated script"
         );
+        // gzip fallback chain should NOT contain pigz
         assert!(
-            gzip_script.contains("pigz -dc -p $NPROC"),
-            "REGRESSION: pigz MT command missing"
-        );
-        // pigz should be first in fallback chain
-        assert!(
-            gzip_script.contains("\"pigz -dc\""),
-            "REGRESSION: pigz not in gzip fallback chain"
+            !gzip_script.contains("\"pigz -dc\""),
+            "REGRESSION: pigz should not be in gzip fallback chain"
         );
 
-        // bzip2 → pbzip2
+        // bzip2 — NO MT upgrade (pbzip2 removed, never available on OrangeFox)
         let bzip2_script = build_update_script(1, 2, "bzip2", &meta, 0, "", false);
         assert!(
-            bzip2_script.contains("2) # bzip2 → try pbzip2"),
-            "REGRESSION: bzip2 MT case label missing"
+            !bzip2_script.contains("pbzip2"),
+            "REGRESSION: pbzip2 should be removed from generated script"
         );
         assert!(
-            bzip2_script.contains("pbzip2 -dc -p$NPROC"),
-            "REGRESSION: pbzip2 MT command missing"
-        );
-        assert!(
-            bzip2_script.contains("\"pbzip2 -dc\""),
-            "REGRESSION: pbzip2 not in bzip2 fallback chain"
+            !bzip2_script.contains("\"pbzip2 -dc\""),
+            "REGRESSION: pbzip2 should not be in bzip2 fallback chain"
         );
 
         // xz → xz -T0
@@ -4528,6 +4549,13 @@ mod tests {
         assert!(
             gzip_script.contains("NPROC=$(nproc"),
             "REGRESSION: nproc detection for MT decompressors missing"
+        );
+
+        // brotli — no "brotli -dc" standalone fallback (only busybox)
+        let brotli_script = build_update_script(1, 4, "brotli", &meta, 0, "", false);
+        assert!(
+            !brotli_script.contains("\"brotli -dc\""),
+            "REGRESSION: standalone brotli -dc should be removed from fallback (never available on OrangeFox)"
         );
     }
 

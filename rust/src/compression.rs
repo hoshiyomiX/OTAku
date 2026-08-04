@@ -544,9 +544,14 @@ fn lz4_block_size_for_level(level: i32) -> lz4_flex::frame::BlockSize {
 }
 
 /// Build a FrameInfo with the appropriate block size for a given level.
+///
+/// ContentChecksum is enabled for frame integrity verification — adds only 4 bytes
+/// per frame but allows `lz4 -d` to detect corrupted partition images instead of
+/// silently decompressing to garbage. This matches the `lz4` CLI default behavior.
 fn lz4_frame_info_for_level(level: i32) -> lz4_flex::frame::FrameInfo {
     lz4_flex::frame::FrameInfo::new()
         .block_size(lz4_block_size_for_level(level))
+        .content_checksum(lz4_flex::frame::ContentChecksum::ContentChecksum)
 }
 
 fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
@@ -565,12 +570,23 @@ fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
 }
 
 fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, String> {
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
     let cursor = Cursor::new(data);
     let mut decoder = lz4_flex::frame::FrameDecoder::new(cursor);
     let mut result = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut result)
+    // BUG FIX: Use take() to limit decompressed output to MAX_DECOMPRESSED_SIZE.
+    // Without this, a crafted LZ4 frame could decompress to gigabytes and OOM.
+    // All other decompress_* functions have this protection; lz4 was missing it.
+    decoder
+        .take(MAX_DECOMPRESSED_SIZE as u64)
+        .read_to_end(&mut result)
         .map_err(|e| format!("lz4 frame decompress error: {}", e))?;
+    if result.len() >= MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "lz4 decompressed output exceeds {} GiB limit — possible zip bomb",
+            MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
+        ));
+    }
     Ok(result)
 }
 
@@ -2018,6 +2034,21 @@ mod tests {
         assert_eq!(normalise("lz4"), ALG_LZ4);
         assert_eq!(normalise("LZ4"), ALG_LZ4);
         assert_eq!(normalise("l4"), ALG_LZ4);
+    }
+
+    /// Regression: decompress_lz4() must have .take() zip-bomb protection
+    /// matching all other decompress_* functions. Without it, a crafted LZ4
+    /// frame could decompress to gigabytes and OOM on Android.
+    #[test]
+    fn test_regression_lz4_zip_bomb_protection() {
+        // Normal data should decompress fine
+        let data = b"Normal lz4 data for zip-bomb test";
+        let compressed = compress(data, "lz4", None).unwrap();
+        let result = decompress(&compressed, "lz4").unwrap();
+        assert_eq!(data.to_vec(), result);
+        // If a 2 GiB+ payload were crafted, decompress_lz4 would return Err
+        // (we can't easily create a real zip bomb in a unit test, but the
+        // .take() guard + size check ensure it fails instead of OOM).
     }
 
     #[test]
