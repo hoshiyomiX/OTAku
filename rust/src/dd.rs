@@ -443,7 +443,7 @@ fi
     // This string is interpolated into a shell comment in the flasher script.
     // Without sanitization, a device codename containing \n breaks out of the
     // comment, allowing arbitrary command execution with root privileges.
-    header_info = header_info.replace('\n', " ").replace('\r', " ");
+    header_info = header_info.replace(['\n', '\r'], " ");
 
     // Verification block.
     // Two paths based on skip_verify:

@@ -43,6 +43,7 @@ pub const METADATA_SIG_ALIGNMENT: u64 = 4096;
 /// >256 MB for a single operation is likely to OOM — and a real AOSP
 /// payload never has operations this large (largest single op is typically
 /// a REPLACE_XZ for a ~2GB partition, but split across many operations).
+#[allow(clippy::doc_lazy_continuation)]
 const MAX_OP_DATA_SIZE: u64 = 256 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
