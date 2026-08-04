@@ -525,14 +525,14 @@ if command -v sha256sum >/dev/null 2>&1; then
         # 4096x fewer than head -c.
         VERIFY_FULL_BLOCKS=$(( PSIZE / 4096 ))
         VERIFY_REMAINDER=$(( PSIZE % 4096 ))
-        verify_trim() {{
+        verify_trim() {
             if [ "$VERIFY_REMAINDER" -eq 0 ]; then
                 dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
             else
                 dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
                 dd bs=1 count=$VERIFY_REMAINDER 2>/dev/null
             fi
-        }}
+        }
         dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | verify_trim | tee "$VERIFY_FIFO" >/dev/null
 
         # Close FIFO and wait for hash to complete.
@@ -558,14 +558,14 @@ if [ "$FAST_OK" != "1" ]; then
     VERIFY_BLOCKS=$(( (PSIZE + 1048575) / 1048576 ))
     VERIFY_FULL_BLOCKS=$(( PSIZE / 4096 ))
     VERIFY_REMAINDER=$(( PSIZE % 4096 ))
-    verify_trim() {{
+    verify_trim() {
         if [ "$VERIFY_REMAINDER" -eq 0 ]; then
             dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
         else
             dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
             dd bs=1 count=$VERIFY_REMAINDER 2>/dev/null
         fi
-    }}
+    }
     VERIFY_HASH=$(dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | verify_trim | sha256sum | cut -d' ' -f1)
 fi
 
@@ -4375,6 +4375,7 @@ mod tests {
     /// 4. verify_block uses ${i} not ${{i}} (format!() escaping bug fixed)
     /// 5. Post-flash re-map is silent on success
     /// 6. O_DIRECT (oflag=direct) for block device writes
+    /// 7. verify_trim() uses single braces { } not double {{ }} (raw string bug)
     #[test]
     fn test_optimization_changes() {
         let meta = vec![PartitionMeta {
@@ -4461,6 +4462,16 @@ mod tests {
         assert!(
             script.contains("unmount_partition \"$pname\" || true"),
             "Optimize: resize step should use unmount_partition (not unmount_and_unmap_partition)"
+        );
+
+        // 7. verify_trim() uses single braces { } not double {{ }} (raw string bug)
+        assert!(
+            !script.contains("verify_trim() {{"),
+            "Optimize: verify_trim() must not have double braces {{ (raw string escaping bug)"
+        );
+        assert!(
+            script.contains("verify_trim() {"),
+            "Optimize: verify_trim() must use single braces (POSIX shell syntax)"
         );
     }
 
@@ -4825,6 +4836,60 @@ mod tests {
         assert!(
             script.contains("if [ \"$NPROC\" -gt 1 ]; then"),
             "REGRESSION: NPROC > 1 guard for MT decompressor missing"
+        );
+    }
+
+    // ── Bug #13 regression: verify_trim() {{ raw string escaping ──
+
+    /// Verify that verify_trim() uses single braces `{` / `}` in the generated
+    /// shell script, NOT double braces `{{` / `}}`.
+    ///
+    /// ROOT CAUSE: `verify_block` is constructed as a Rust raw string
+    /// (`r#"..."#`). Inside raw strings, `{{` is a LITERAL `{{`, not a
+    /// format!() escape for `{`. When the raw string is interpolated via
+    /// `format!("{verify_block}")`, the literal `{{` passes through
+    /// unchanged, producing invalid POSIX shell syntax:
+    ///   verify_trim() {{
+    /// This crashes the flashing script at runtime:
+    ///   /tmp/updater: line 1952: syntax error near unexpected token `{{'
+    ///
+    /// EVIDENCE: recovery.log from Infinix X695C (OrangeFox R11.1):
+    ///   2024-10-12 OTAku flash → ERROR: 2 → emergency cleanup
+    ///   The script got as far as "Checking available storage space..."
+    ///   before hitting the verify_trim() definition in the verify step.
+    ///
+    /// FIX: Replace `{{` with `{` and `}}` with `}` in the raw string.
+    /// Raw strings don't need format!() brace escaping — single braces
+    /// are literal characters that pass through as-is.
+    #[test]
+    fn test_regression_verify_trim_single_braces() {
+        let meta = vec![PartitionMeta {
+            name: "vendor".to_string(),
+            unc_size: 1127219200, // 1075 MB
+            hash_hex: "a".repeat(64),
+            comp_size: 234881024,
+            data_offset: 0,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let script = build_update_script(1, 3, "xz", &meta, 0, "", false);
+
+        // verify_trim() must use single braces: `verify_trim() {` not `verify_trim() {{`
+        assert!(
+            script.contains("verify_trim() {"),
+            "REGRESSION: verify_trim() must use single braces (not {{) — raw string bug"
+        );
+        // Double braces must NOT appear in the generated script
+        assert!(
+            !script.contains("verify_trim() {{"),
+            "REGRESSION: verify_trim() still has double braces {{ — raw string escaping bug"
+        );
+        // Closing `}}` (double) must also not appear for verify_trim
+        // Note: `}}` may legitimately appear elsewhere in format!() templates
+        // (e.g. ${{i}} in the flash loop), so we specifically check the
+        // verify_trim function body area.
+        assert!(
+            !script.contains("VERIFY_REMAINDER 2>/dev/null\n            fi\n        }}"),
+            "REGRESSION: verify_trim closing brace is }} (double) — must be single }"
         );
     }
 }
