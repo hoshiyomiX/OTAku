@@ -119,7 +119,7 @@ fn resolve_level(algorithm: &str, level: Option<i32>) -> i32 {
         .unwrap_or(0);
     // Treat Some(0) same as None — 0 is the "use default" sentinel, matching
     // the Kotlin convention (level=0 → default) and JNI conversion (jint 0 → None).
-    let resolved = level.and_then(|v| if v > 0 { Some(v) } else { None }).unwrap_or(default);
+    let resolved = level.filter(|&v| v > 0).unwrap_or(default);
     let (min, max) = LEVEL_RANGES
         .iter()
         .find(|(name, _, _)| *name == alg)
@@ -631,7 +631,7 @@ fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     // significantly better than gzip level 6 (~2.5x at 200 MB/s) and
     // competitive with xz level 6 (~3.5x at 40 MB/s) for much faster
     // decompression — critical for recovery flashing time.
-    let level_clamped = level.clamp(1, 22) as i32;
+    let level_clamped = level.clamp(1, 22);
     let mut result = Vec::new();
     {
         let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
