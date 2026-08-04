@@ -575,13 +575,13 @@ fn lz4_block_size_for_level(level: i32) -> lz4_flex::frame::BlockSize {
 
 /// Build a FrameInfo with the appropriate block size for a given level.
 ///
-/// ContentChecksum is enabled for frame integrity verification — adds only 4 bytes
-/// per frame but allows `lz4 -d` to detect corrupted partition images instead of
-/// silently decompressing to garbage. This matches the `lz4` CLI default behavior.
+/// NOTE: lz4_flex 0.14 does not expose ContentChecksum in the frame module,
+/// so we rely on block_size alone (which is the primary compression knob).
+/// The lz4 CLI default adds ContentChecksum, but our frames are verified
+/// via SHA-256 in the flash pipeline anyway (PART_i_COMP_HASH).
 fn lz4_frame_info_for_level(level: i32) -> lz4_flex::frame::FrameInfo {
     lz4_flex::frame::FrameInfo::new()
         .block_size(lz4_block_size_for_level(level))
-        .content_checksum(lz4_flex::frame::ContentChecksum::ContentChecksum)
 }
 
 fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
@@ -602,7 +602,7 @@ fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
 fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, String> {
     use std::io::{Cursor, Read};
     let cursor = Cursor::new(data);
-    let mut decoder = lz4_flex::frame::FrameDecoder::new(cursor);
+    let decoder = lz4_flex::frame::FrameDecoder::new(cursor);
     let mut result = Vec::new();
     // BUG FIX: Use take() to limit decompressed output to MAX_DECOMPRESSED_SIZE.
     // Without this, a crafted LZ4 frame could decompress to gigabytes and OOM.
