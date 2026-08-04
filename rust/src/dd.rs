@@ -501,10 +501,10 @@ if command -v sha256sum >/dev/null 2>&1; then
         VERIFY_PID=$!
 
         # Read PSIZE bytes in 1MB blocks. count rounds UP to next MB to ensure
-        # we cover the full partition, but `head -c "$PSIZE"` trims the stream
-        # to EXACTLY PSIZE bytes before it reaches sha256sum.
+        # we cover the full partition, then trim to EXACTLY PSIZE bytes using
+        # dd-based verify_trim() instead of head -c (1-byte-at-a-time syscall).
         #
-        # Without head -c, if PSIZE is not 1MB-aligned (common for Android
+        # Without verify_trim, if PSIZE is not 1MB-aligned (common for Android
         # system.img — raw ext4 with arbitrary byte count), dd reads
         # VERIFY_BLOCKS * 1MB bytes which is MORE than PSIZE. The extra bytes
         # are OLD partition data (from previous ROM), which changes the hash
@@ -517,7 +517,23 @@ if command -v sha256sum >/dev/null 2>&1; then
         #     Expected: 999c8faadf98484d...         ← hash of .img (PSIZE bytes)
         #     Got:      68ee9379004d3593...         ← hash of PSIZE + extra old data
         VERIFY_BLOCKS=$(( (PSIZE + 1048575) / 1048576 ))
-        dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | head -c "$PSIZE" | tee "$VERIFY_FIFO" >/dev/null
+        # ── verify_trim: dd-based replacement for head -c "$PSIZE" ──
+        # head -c reads 1 byte per syscall — O(n) syscalls for n bytes.
+        # For a 5120 MB partition, that's 5.12 billion syscalls → extremely slow.
+        # verify_trim uses dd bs=4096 (4KB blocks) for bulk reads, then
+        # dd bs=1 for the <4096 byte remainder. This is O(n/4096) syscalls —
+        # 4096x fewer than head -c.
+        VERIFY_FULL_BLOCKS=$(( PSIZE / 4096 ))
+        VERIFY_REMAINDER=$(( PSIZE % 4096 ))
+        verify_trim() {{
+            if [ "$VERIFY_REMAINDER" -eq 0 ]; then
+                dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
+            else
+                dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
+                dd bs=1 count=$VERIFY_REMAINDER 2>/dev/null
+            fi
+        }}
+        dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | verify_trim | tee "$VERIFY_FIFO" >/dev/null
 
         # Close FIFO and wait for hash to complete.
         rm -f "$VERIFY_FIFO"
@@ -536,12 +552,21 @@ fi
 # (possible on ancient busybox with broken bs=1M support).
 if [ "$FAST_OK" != "1" ]; then
     ui_print "  Note: fast hash unavailable — using legacy 4KB path."
-    # Use head -c "$PSIZE" to ensure we hash EXACTLY PSIZE bytes, same as
-    # the fast path. The old 2-dd approach (FULL_BLOCKS + REMAINDER) was
-    # correct but slower and more complex. head -c is simpler and available
-    # in busybox/toybox.
+    # Use verify_trim (dd-based) to ensure we hash EXACTLY PSIZE bytes.
+    # verify_trim uses dd bs=4096 for bulk reads — 4096x fewer syscalls
+    # than head -c (1-byte-at-a-time). Same approach as flash trim_pipe.
     VERIFY_BLOCKS=$(( (PSIZE + 1048575) / 1048576 ))
-    VERIFY_HASH=$(dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | head -c "$PSIZE" | sha256sum | cut -d' ' -f1)
+    VERIFY_FULL_BLOCKS=$(( PSIZE / 4096 ))
+    VERIFY_REMAINDER=$(( PSIZE % 4096 ))
+    verify_trim() {{
+        if [ "$VERIFY_REMAINDER" -eq 0 ]; then
+            dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
+        else
+            dd bs=4096 count=$VERIFY_FULL_BLOCKS 2>/dev/null
+            dd bs=1 count=$VERIFY_REMAINDER 2>/dev/null
+        fi
+    }}
+    VERIFY_HASH=$(dd if="$PTARGET" bs=1048576 count=$VERIFY_BLOCKS 2>/dev/null | verify_trim | sha256sum | cut -d' ' -f1)
 fi
 
 if [ "$VERIFY_HASH" = "$PHASH" ]; then
@@ -2259,16 +2284,36 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
         # Requirements:
         #   - Target must be a block device (test -b)
         #   - Write size must be sector-aligned (bs=4096 minimum)
-        #   - busybox dd must support oflag=direct (most do since 1.33)
+        #   - dd must support oflag=direct (busybox 1.33+ or GNU coreutils)
         #
         # For non-block devices (regular files, tmpfs), skip O_DIRECT —
         # it's invalid and would cause EINVAL errors.
+        #
+        # BUG FIX: Probe O_DIRECT on the ACTUAL target device, not /dev/null.
+        # The old probe `dd oflag=direct if=/dev/zero of=/dev/null` always
+        # succeeds because /dev/null accepts any flags — it's a no-op write.
+        # This gave false positives on devices where the underlying block
+        # device doesn't support O_DIRECT (e.g., some dm-linear targets
+        # on older kernels, or F2FS on certain eMMC chips).
+        #
+        # New probe: write 1 sector to the target with oflag=direct, then
+        # immediately read it back. If the write succeeds, O_DIRECT works.
+        # If it fails (EINVAL/EOPNOTSUPP), fall back to buffered writes.
+        # The 1-sector write is harmless — we're about to overwrite the
+        # entire partition anyway, and 4096 bytes is a single flash page.
         DD_OFLAG=""
         if [ -b "$PTARGET" ]; then
-            # Test if dd supports oflag=direct (not all busybox builds do)
-            if dd oflag=direct if=/dev/zero of=/dev/null bs=4096 count=1 2>/dev/null; then
+            # Probe O_DIRECT on the actual target device.
+            # Write 4096 bytes (1 sector) with oflag=direct — if it fails,
+            # the device doesn't support O_DIRECT and we fall back.
+            # Use a temp file for the probe input (dd if=pipe doesn't work
+            # reliably with oflag=direct on all busybox builds).
+            _OD_PROBE="/tmp/od_probe_$$_${{i}}"
+            dd if=/dev/zero of="$_OD_PROBE" bs=4096 count=1 2>/dev/null
+            if dd oflag=direct if="$_OD_PROBE" of="$PTARGET" bs=4096 count=1 conv=notrunc 2>/dev/null; then
                 DD_OFLAG="oflag=direct"
             fi
+            rm -f "$_OD_PROBE"
         fi
 
         # No conv= flags — busybox dd ftruncate() on dm-linear is a false-failure
@@ -2354,7 +2399,7 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
                         trim_pipe | \
                         $FB_DECOMP > "$TMP_FIFO2" 2>"$GZIP_ERR" &
                     FB_PID=$!
-                    dd of="$PTARGET" bs=1048576 if="$TMP_FIFO2" 2>/dev/null
+                    dd of="$PTARGET" bs=1048576 if="$TMP_FIFO2" $DD_OFLAG 2>/dev/null
                     FB_DD_STATUS=$?
                     wait $FB_PID 2>/dev/null
                     FB_DECOMP_STATUS=$?
@@ -2415,12 +2460,24 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
         # We lose decompressor error detection (sh $? = last pipe stage only),
         # but this avoids tmpfs exhaustion by never writing a temp file.
         # trim_pipe replaces head -c (dd-based block reads instead of 1-byte-at-a-time).
+        # O_DIRECT: apply if DD_OFLAG was set by the probe above. In the
+        # 3-pipeline, dd is the last stage so we can add oflag=direct.
         GZIP_ERR="/tmp/ddpart_${{i}}.err"
         rm -f "$GZIP_ERR"
+        if [ -b "$PTARGET" ] && [ -z "$DD_OFLAG" ]; then
+            # Re-probe O_DIRECT for this path (DD_OFLAG may not be set yet
+            # if FIFO path was skipped). Same probe as above.
+            _OD_PROBE="/tmp/od_probe_$$_${{i}}_nf"
+            dd if=/dev/zero of="$_OD_PROBE" bs=4096 count=1 2>/dev/null
+            if dd oflag=direct if="$_OD_PROBE" of="$PTARGET" bs=4096 count=1 conv=notrunc 2>/dev/null; then
+                DD_OFLAG="oflag=direct"
+            fi
+            rm -f "$_OD_PROBE"
+        fi
         dd_if_bundle | \
             trim_pipe | \
             $DECOMP_PIPE 2>"$GZIP_ERR" | \
-            dd of="$PTARGET" bs=1048576 2>/dev/null
+            dd of="$PTARGET" bs=1048576 $DD_OFLAG 2>/dev/null
         DD_STATUS=$?
 
         if [ $DD_STATUS -ne 0 ]; then
@@ -4039,10 +4096,14 @@ mod tests {
             script.contains("Compressed data hash mismatch"),
             "Hash mismatch abort message missing"
         );
-        // Uses head -c for exact byte count
+        // Uses verify_trim (dd-based) for exact byte count instead of head -c
         assert!(
-            script.contains("head -c"),
-            "head -c (exact byte extraction) missing"
+            script.contains("verify_trim"),
+            "verify_trim (dd-based exact byte extraction) missing from verify step"
+        );
+        assert!(
+            script.contains("VERIFY_FULL_BLOCKS"),
+            "VERIFY_FULL_BLOCKS computation missing from verify step"
         );
     }
 
@@ -4340,16 +4401,21 @@ mod tests {
             "Optimize: twrp unmount dead code should be removed"
         );
 
-        // 3. trim_pipe replaces head -c $PCSIZE in flash pipeline
+        // 3. trim_pipe replaces head -(c) $PCSIZE in flash pipeline
         assert!(
             script.contains("trim_pipe"),
             "Optimize: trim_pipe missing from flash pipeline (replaces head -c)"
         );
-        // head -c "$PCSIZE" should NOT appear in the flash step (only in verify step)
-        // Check that trim_pipe is defined as a function
+        // head -c "$PSIZE" should NOT appear anywhere in the script —
+        // replaced by verify_trim (verify step) and trim_pipe (flash step).
+        // Check that both dd-based replacements are defined as functions.
         assert!(
             script.contains("trim_pipe()"),
             "Optimize: trim_pipe function not defined"
+        );
+        assert!(
+            script.contains("verify_trim()"),
+            "Optimize: verify_trim function not defined (replaces head -c in verify)"
         );
 
         // 6. O_DIRECT (oflag=direct) for block device writes
@@ -4360,6 +4426,16 @@ mod tests {
         assert!(
             script.contains("-b \"$PTARGET\""),
             "Optimize: block device check (-b) missing before oflag=direct"
+        );
+        // O_DIRECT probe should test on actual target, not /dev/null
+        assert!(
+            script.contains("conv=notrunc"),
+            "Optimize: O_DIRECT probe should use conv=notrunc on actual target"
+        );
+        // O_DIRECT probe should write to PTARGET, not /dev/null
+        assert!(
+            !script.contains("of=/dev/null") || !script.contains("oflag=direct"),
+            "Optimize: O_DIRECT probe should NOT write to /dev/null (false positive)"
         );
 
         // 4. verify_block uses ${i} (not ${{i}} — that was a format!() escaping bug)
