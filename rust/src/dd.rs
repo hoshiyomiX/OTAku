@@ -4889,7 +4889,7 @@ mod tests {
         // verify_trim function body area.
         assert!(
             !script.contains("VERIFY_REMAINDER 2>/dev/null\n            fi\n        }}"),
-            "REGRESSION: verify_trim closing brace is }} (double) — must be single }"
+            "REGRESSION: verify_trim closing brace is double-brace — must be single brace"
         );
     }
 }
