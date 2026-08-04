@@ -93,6 +93,7 @@ fn normalise(algorithm: &str) -> String {
         "lzma" | "xz" | "replace_xz" => ALG_XZ.to_string(),
         "br" | "brotli" | "replace_brot" | "brotli_bsdiff" => ALG_BROTLI.to_string(),
         "lz4" | "l4" => ALG_LZ4.to_string(),
+        "zstd" | "zs" | "zst" => ALG_ZSTD.to_string(),
         other => other.to_string(), // return as-is for unknown algorithms
     }
 }
@@ -840,6 +841,29 @@ pub fn compress_streaming(
         return Ok(result);
     }
 
+    if is_alg(algorithm, ALG_ZSTD) {
+        let level_clamped = resolved_level.clamp(1, 22);
+        let mut result = Vec::new();
+        {
+            let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
+                .map_err(|e| format!("zstd encoder init error: {}", e))?;
+            let mut offset: usize = 0;
+            while offset < data.len() {
+                let end = (offset + effective_chunk).min(data.len());
+                encoder
+                    .write_all(&data[offset..end])
+                    .map_err(|e| format!("zstd streaming write error: {}", e))?;
+                offset = end;
+                if let Some(ref mut cb) = on_progress {
+                    cb(offset as u64, total);
+                }
+            }
+            encoder.finish()
+                .map_err(|e| format!("zstd streaming finish error: {}", e))?;
+        }
+        return Ok(result);
+    }
+
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
@@ -1043,6 +1067,31 @@ pub fn hash_and_compress_file(
                     .map_err(|e| format!("lz4 compress write error: {}", e))?;
             }
         } // encoder is flushed on drop
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((result, hex));
+    }
+
+    if is_alg(algorithm, ALG_ZSTD) {
+        let level_clamped = resolved_level.clamp(1, 22);
+        let mut result = Vec::new();
+        {
+            let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
+                .map_err(|e| format!("zstd encoder init error: {}", e))?;
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("zstd compress write error: {}", e))?;
+            }
+            encoder.finish()
+                .map_err(|e| format!("zstd compress finish error: {}", e))?;
+        }
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
         return Ok((result, hex));
     }
@@ -1264,6 +1313,33 @@ pub fn hash_and_compress_file_with_progress(
                 report_progress(bytes_read, file_size);
             }
         } // encoder is flushed on drop
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((result, hex));
+    }
+
+    if is_alg(algorithm, ALG_ZSTD) {
+        let level_clamped = resolved_level.clamp(1, 22);
+        let mut result = Vec::new();
+        {
+            let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
+                .map_err(|e| format!("zstd encoder init error: {}", e))?;
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("zstd compress write error: {}", e))?;
+                bytes_read += n as u64;
+                report_progress(bytes_read, file_size);
+            }
+            encoder.finish()
+                .map_err(|e| format!("zstd compress finish error: {}", e))?;
+        }
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
         return Ok((result, hex));
     }
@@ -1575,6 +1651,30 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
         return Ok((compressed_size, hex));
     }
 
+    if is_alg(algorithm, ALG_ZSTD) {
+        let level_clamped = resolved_level.clamp(1, 22);
+        let mut encoder = zstd::Encoder::new(&mut counting, level_clamped)
+            .map_err(|e| format!("zstd encoder init error: {}", e))?;
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("zstd compress write error: {}", e))?;
+        }
+        encoder.finish()
+            .map_err(|e| format!("zstd compress finish error: {}", e))?;
+        let compressed_size = counting.bytes_written();
+        counting.flush().map_err(|e| format!("zstd flush error: {}", e))?;
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((compressed_size, hex));
+    }
+
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
@@ -1855,6 +1955,36 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         ));
     }
 
+    if is_alg(algorithm, ALG_ZSTD) {
+        let level_clamped = resolved_level.clamp(1, 22);
+        let mut encoder = zstd::Encoder::new(&mut counting, level_clamped)
+            .map_err(|e| format!("zstd encoder init error: {}", e))?;
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("zstd compress write error: {}", e))?;
+            bytes_read += n as u64;
+            report_progress(bytes_read, file_size);
+        }
+        encoder.finish()
+            .map_err(|e| format!("zstd compress finish error: {}", e))?;
+        counting.flush().map_err(|e| format!("zstd flush error: {}", e))?;
+        let comp_size = counting.bytes_written();
+        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
+        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        return Ok((
+            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
+            _sha_writer,
+        ));
+    }
+
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
@@ -1897,6 +2027,9 @@ pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
     }
     if is_alg(algorithm, ALG_LZ4) {
         return 0; // LZ4 has no AOSP operation type; use REPLACE (0) as fallback
+    }
+    if is_alg(algorithm, ALG_ZSTD) {
+        return 0; // ZSTD has no AOSP operation type; use REPLACE (0) as fallback
     }
     0
 }
@@ -2108,6 +2241,22 @@ mod tests {
         assert_eq!(normalise("lz4"), ALG_LZ4);
         assert_eq!(normalise("LZ4"), ALG_LZ4);
         assert_eq!(normalise("l4"), ALG_LZ4);
+    }
+
+    #[test]
+    fn test_normalise_zstd() {
+        assert_eq!(normalise("zstd"), ALG_ZSTD);
+        assert_eq!(normalise("ZSTD"), ALG_ZSTD);
+        assert_eq!(normalise("zs"), ALG_ZSTD);
+        assert_eq!(normalise("ZS"), ALG_ZSTD);
+        assert_eq!(normalise("zst"), ALG_ZSTD);
+    }
+
+    #[test]
+    fn test_compress_id_zstd() {
+        assert_eq!(compress_id("zstd"), 6);
+        assert_eq!(compress_id("ZSTD"), 6);
+        assert_eq!(compress_id("zs"), 6);
     }
 
     /// Regression: decompress_lz4() must have .take() zip-bomb protection
