@@ -204,10 +204,10 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 //  EXTRACT — partition extraction
 // ---------------------------------------------------------------------------
 
-/// Extract the raw (compressed) data blobs for a partition.
-///
-/// Reads the data blob for each InstallOperation in the partition's
-/// operation list and returns the concatenation.
+// /// Extract the raw (compressed) data blobs for a partition.
+// ///
+// /// Reads the data blob for each InstallOperation in the partition's
+// /// operation list and returns the concatenation.
 // REMOVED: extract_partition_data() — dead function (zero callers).
 // Superseded by extract_and_decompress_partition_to_writer() for OOM safety.
 
