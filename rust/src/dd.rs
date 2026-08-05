@@ -101,15 +101,8 @@ pub const ALIGN: usize = 4096;
 //  Compress ID mapping (matches Python COMPRESS_ID_MAP)
 // ---------------------------------------------------------------------------
 
-/// otaku numeric ID -> shell decompressor command
-pub const COMPRESS_CMD_MAP: &[(&str, u16)] = &[
-    ("zstd", 6),
-    ("brotli", 4),
-    ("xz", 3),
-    ("bzip2", 2),
-    ("gzip", 1),
-    ("lz4", 5),
-];
+// REMOVED: COMPRESS_CMD_MAP — dead constant (zero callers).
+// compress_id() from compression.rs is used instead for ID lookups.
 
 /// Get the shell decompressor command for a compress ID.
 fn decomp_cmd_for_id(compress_id: u16) -> &'static str {
@@ -1456,20 +1449,9 @@ unmount_partition() {{
     return 0
 }}
 
-# unmount_and_unmap_partition: convenience wrapper — unmount + lptools unmap.
-# Kept for backward compat with the cleanup trap and other callers that need
-# both operations in one call. NOTE: lptools unmap here uses PLAIN name
-# (no slot suffix) — callers that need slot-suffixed unmap should call
-# unmount_partition + lptools unmap "$LP_NAME" directly.
-unmount_and_unmap_partition() {{
-    local pname="$1"
-    unmount_partition "$pname" || true
-    # lptools unmap is idempotent: returns 0 if already unmapped.
-    if ! lptools unmap "$pname" >/dev/null 2>&1; then
-        return 1
-    fi
-    return 0
-}}
+# REMOVED: unmount_and_unmap_partition — dead shell function (zero callers).
+# The cleanup trap now calls unmount_partition + lptools unmap "$pname_lp"
+# directly with slot-suffixed names (Bug #10 fix, commit 8a2469c).
 
 # REMOVED: dead-code helper that wrapped unmount + lptools unmap + lptools map
 # for a single dynamic partition.  It was never called and had a bug where
@@ -3608,6 +3590,12 @@ mod tests {
         assert!(
             !script.contains("unmount_and_unmap_partition \"$pname\""),
             "REGRESSION: cleanup trap still uses unmount_and_unmap_partition with plain $pname (Bug #10)"
+        );
+
+        // Bug #10 + dead code demotion: the entire function definition must be removed.
+        assert!(
+            !script.contains("unmount_and_unmap_partition()"),
+            "REGRESSION: dead code unmount_and_unmap_partition() definition still present in script"
         );
 
         // Bug #11: dead code unmap_and_remap_partition() must NOT be present.

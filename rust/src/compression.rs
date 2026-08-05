@@ -20,7 +20,8 @@ pub const ALG_BROTLI: &str = "brotli";
 pub const ALG_ZSTD: &str = "zstd";
 pub const ALG_AUTO: &str = "auto";
 
-pub const ALL_ALGORITHMS: &[&str] = &[ALG_ZSTD, ALG_BROTLI, ALG_XZ, ALG_BZIP2, ALG_GZIP, ALG_LZ4];
+// REMOVED: ALL_ALGORITHMS — dead constant (zero callers).
+// nativeCheckDeps in lib.rs hardcodes the available algorithm list.
 
 /// Default compression levels per algorithm (matches Python DEFAULT_LEVELS)
 pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
@@ -201,6 +202,10 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
 ///
 /// # Returns
 /// Compressed data (or data unchanged for "none")
+///
+/// Note: Only used in tests. Production code uses the streaming
+/// hash_and_compress_file_to_writer_with_progress path.
+#[cfg(test)]
 pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<u8>, String> {
     if is_alg(algorithm, ALG_NONE) {
         return Ok(data.to_vec());
@@ -405,6 +410,7 @@ pub fn decompress_to_writer<W: Write>(
 //  Gzip implementation (flate2 / miniz_oxide)
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn compress_gzip(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     use flate2::write::GzEncoder;
     use flate2::Compression;
@@ -449,6 +455,7 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, String> {
 //  Bzip2 implementation
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn compress_bzip2(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     use bzip2::write::BzEncoder;
     use bzip2::Compression;
@@ -487,6 +494,7 @@ fn decompress_bzip2(data: &[u8]) -> Result<Vec<u8>, String> {
 //  XZ implementation (xz2 / liblzma)
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn compress_xz(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     let level_clamped = level.clamp(0, 9) as u32;
     let mut result = Vec::new();
@@ -523,6 +531,7 @@ fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, String> {
 //  Brotli implementation (pure Rust brotli crate)
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn compress_brotli(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     let quality = level.clamp(0, 11);
     // brotli crate expects quality as a u32 parameter in CompressorWriter
@@ -585,6 +594,7 @@ fn lz4_frame_info_for_level(level: i32) -> lz4_flex::frame::FrameInfo {
         .block_size(lz4_block_size_for_level(level))
 }
 
+#[cfg(test)]
 fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     // lz4_flex frame format produces output compatible with `lz4 -d` CLI.
     // We use FrameEncoder with FrameInfo to control block size (which is the
@@ -625,6 +635,7 @@ fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, String> {
 //  ZSTD implementation (zstd / libzstd-sys)
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     // zstd crate Encoder wraps Facebook's libzstd C library.
     // Level 1-19 are standard; 20-22 are "ultra" (slower, better ratio).
@@ -670,6 +681,10 @@ fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, String> {
 // ---------------------------------------------------------------------------
 
 /// Compute SHA-256 hash of data
+///
+/// Note: Only used in tests. Production code uses the streaming hash
+/// inside hash_and_compress_file_to_writer_with_progress.
+#[cfg(test)]
 pub fn sha256(data: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -677,31 +692,9 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Compute SHA-256 hash of a file (streaming, chunked)
-pub fn sha256_file(path: &str) -> Result<Vec<u8>, String> {
-    use sha2::{Digest, Sha256};
-    use std::fs::File;
-
-    let mut file = File::open(path).map_err(|e| format!("Cannot open {}: {}", path, e))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 4 * 1024 * 1024]; // 4 MB chunks
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| format!("Read error: {}", e))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize().to_vec())
-}
-
-/// Compute SHA-256 hash of a file and return hex string
-pub fn sha256_file_hex(path: &str) -> Result<String, String> {
-    let hash = sha256_file(path)?;
-    Ok(hash.iter().map(|b| format!("{:02x}", b)).collect())
-}
+// REMOVED: sha256_file() — dead function (only caller was dead sha256_file_hex).
+// Production code uses the streaming hash inside
+// hash_and_compress_file_to_writer_with_progress instead.
 
 // ---------------------------------------------------------------------------
 //  Streaming compression with progress
@@ -714,6 +707,10 @@ pub type ProgressFn = Box<dyn FnMut(u64, u64)>;
 ///
 /// This matches the Python `compress_streaming()` function for real-time
 /// progress reporting on large (2+ GB) partition images.
+///
+/// Note: Only used in tests. Production code uses the streaming
+/// hash_and_compress_file_to_writer_with_progress path.
+#[cfg(test)]
 pub fn compress_streaming(
     data: &[u8],
     algorithm: &str,
@@ -1099,253 +1096,10 @@ pub fn hash_and_compress_file(
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
-// ---------------------------------------------------------------------------
-//  Hash and compress a file with real-time progress reporting
-// ---------------------------------------------------------------------------
-
-/// Hash and compress a file with real-time progress reporting.
-///
-/// Same as `hash_and_compress_file` but calls the progress callback
-/// after each chunk is read and fed to the compressor.
-/// Throttled to report at most once per ~1% change to avoid flooding
-/// the JNI bridge.
-///
-/// The callback signature is `(bytes_read, file_size)`.
-pub fn hash_and_compress_file_with_progress(
-    file_path: &str,
-    algorithm: &str,
-    level: Option<i32>,
-    mut on_progress: Option<&mut dyn FnMut(u64, u64)>,
-) -> Result<(Vec<u8>, String), String> {
-    use sha2::{Digest, Sha256};
-    use std::fs::File;
-
-    let file_size = std::fs::metadata(file_path)
-        .map_err(|e| format!("Cannot stat {}: {}", file_path, e))?
-        .len();
-
-    // ALG_NONE size guard — see hash_and_compress_file for full rationale.
-    // 256MB cap; large files must use gzip/xz (streaming) or payload.bin path.
-    const ALG_NONE_MAX_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
-    if is_alg(algorithm, ALG_NONE) && file_size > ALG_NONE_MAX_SIZE {
-        return Err(format!(
-            "ALG_NONE (no compression) refused for {} — file size {} bytes exceeds {} byte limit. \
-             ALG_NONE loads the entire file into memory, which would OOM Android's 256-512MB heap. \
-             Use gzip or xz instead (they stream chunks and never hold the full file in memory). \
-             If you genuinely need uncompressed storage, use the payload.bin path (write_payload) \
-             which supports streaming.",
-            file_path, file_size, ALG_NONE_MAX_SIZE
-        ));
-    }
-
-    let mut file =
-        File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
-    let mut hasher = Sha256::new();
-    let chunk_size = 4 * 1024 * 1024; // 4 MB chunks
-    let mut buf = vec![0u8; chunk_size];
-    let mut bytes_read: u64 = 0;
-    let mut last_reported_percent: i32 = -1;
-
-    // Throttled progress callback: only fires when percent changes by >= 1
-    let mut report_progress = |read: u64, total: u64| {
-        if let Some(ref mut cb) = on_progress {
-            let percent = if total > 0 {
-                (read as f64 / total as f64 * 100.0) as i32
-            } else {
-                100
-            };
-            if percent != last_reported_percent {
-                last_reported_percent = percent;
-                cb(read, total);
-            }
-        }
-    };
-
-    if is_alg(algorithm, ALG_NONE) {
-        // CRITICAL: Do NOT load entire file into Vec — for 5GB system.img this
-        // would cause OOM on Android (heap limit 256-512MB).
-        // Instead, stream through a BufWriter to a temp Vec with limited capacity.
-        // We still need to return Vec<u8> for API compatibility, but we use a
-        // capped Vec that grows incrementally (not pre-allocated to file_size).
-        let mut raw_buf = Vec::new();
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            raw_buf.extend_from_slice(&buf[..n]);
-            bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
-        }
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        // NOTE: raw_buf still holds entire file in memory for ALG_NONE.
-        // This is a known limitation — users should use gzip/xz for large files.
-        // ALG_NONE is primarily for small partitions (boot, dtbo, vbmeta).
-        // Full streaming fix requires changing the return type to io::Write.
-        return Ok((raw_buf, hex));
-    }
-
-    let resolved_level = resolve_level(algorithm, level);
-
-    if is_alg(algorithm, ALG_GZIP) {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-
-        let level_clamped = resolved_level.clamp(1, 9) as u32;
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level_clamped));
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            encoder
-                .write_all(&buf[..n])
-                .map_err(|e| format!("gzip compress write error: {}", e))?;
-            bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
-        }
-        let compressed = encoder
-            .finish()
-            .map_err(|e| format!("gzip compress finish error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed, hex));
-    }
-
-    if is_alg(algorithm, ALG_BZIP2) {
-        use bzip2::write::BzEncoder;
-        use bzip2::Compression;
-
-        let level_clamped = resolved_level.clamp(1, 9) as u32;
-        let mut encoder = BzEncoder::new(Vec::new(), Compression::new(level_clamped));
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            encoder
-                .write_all(&buf[..n])
-                .map_err(|e| format!("bzip2 compress write error: {}", e))?;
-            bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
-        }
-        let compressed = encoder
-            .finish()
-            .map_err(|e| format!("bzip2 compress finish error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed, hex));
-    }
-
-    if is_alg(algorithm, ALG_XZ) {
-        let level_clamped = resolved_level.clamp(0, 9) as u32;
-        let inner = Vec::new();
-        let mut encoder = xz2::write::XzEncoder::new(inner, level_clamped);
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            encoder
-                .write_all(&buf[..n])
-                .map_err(|e| format!("xz compress write error: {}", e))?;
-            bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
-        }
-        let compressed = encoder
-            .finish()
-            .map_err(|e| format!("xz compress finish error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed, hex));
-    }
-
-    if is_alg(algorithm, ALG_BROTLI) {
-        let quality = resolved_level.clamp(0, 11) as u32;
-        let mut result = Vec::new();
-        {
-            let mut encoder = brotli::CompressorWriter::new(&mut result, 4096, quality, 22);
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Read error: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                encoder
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("brotli compress write error: {}", e))?;
-                bytes_read += n as u64;
-                report_progress(bytes_read, file_size);
-            }
-        }
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((result, hex));
-    }
-
-    if is_alg(algorithm, ALG_LZ4) {
-        let frame_info = lz4_frame_info_for_level(resolved_level);
-        let mut result = Vec::new();
-        {
-            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Read error: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                encoder
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("lz4 compress write error: {}", e))?;
-                bytes_read += n as u64;
-                report_progress(bytes_read, file_size);
-            }
-        } // encoder is flushed on drop
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((result, hex));
-    }
-
-    if is_alg(algorithm, ALG_ZSTD) {
-        let level_clamped = resolved_level.clamp(1, 22);
-        let mut result = Vec::new();
-        {
-            let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
-                .map_err(|e| format!("zstd encoder init error: {}", e))?;
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Read error: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                encoder
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("zstd compress write error: {}", e))?;
-                bytes_read += n as u64;
-                report_progress(bytes_read, file_size);
-            }
-            encoder.finish()
-                .map_err(|e| format!("zstd compress finish error: {}", e))?;
-        }
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((result, hex));
-    }
-
-    Err(format!("Unknown compression algorithm: {:?}", algorithm))
-}
+// REMOVED: hash_and_compress_file_with_progress() — dead function (zero callers).
+// Returns entire compressed output in Vec<u8> — OOM risk on Android.
+// Completely replaced by the streaming hash_and_compress_file_to_writer_with_progress
+// variant which writes compressed chunks directly to the output writer.
 
 // ---------------------------------------------------------------------------
 //  Sha256Writer — wraps a Write to compute SHA-256 of bytes written through it
@@ -1423,7 +1177,6 @@ impl<W> CountingWriter<W> {
     }
 
     /// Consume the CountingWriter and return the inner writer.
-    #[allow(dead_code)]
     fn into_inner(self) -> W {
         self.inner
     }
@@ -1699,15 +1452,15 @@ pub struct StreamCompressResult {
 /// Hash and compress a file, streaming compressed output directly to a writer,
 /// with real-time per-chunk progress reporting.
 ///
-/// This is the OOM-safe variant of `hash_and_compress_file_with_progress`.
-/// Instead of accumulating the entire compressed output in a `Vec<u8>` (which
-/// can be 351MB for a vendor partition), it writes compressed chunks to the
-/// provided writer as they are produced by the compressor.
+/// This is the OOM-safe streaming variant. Instead of accumulating the entire
+/// compressed output in a `Vec<u8>` (which can be 351MB for a vendor partition),
+/// it writes compressed chunks to the provided writer as they are produced
+/// by the compressor.
 ///
 /// # Memory usage
 /// Peak RAM: ~8MB (4MB read buffer + ~4MB compressor internal buffer).
-/// Compare: `hash_and_compress_file_with_progress` holds the entire compressed
-/// output in RAM, which can be 351MB+ for large partitions → OOM on Android.
+/// Compare: the removed in-memory variant held the entire compressed output
+/// in RAM, which can be 351MB+ for large partitions → OOM on Android.
 ///
 /// # Progress callback
 /// `on_progress` is called after each 4MB chunk is read from the input file

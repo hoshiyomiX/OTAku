@@ -192,6 +192,7 @@ pub fn decode_manifest(data: &[u8]) -> Result<DeltaArchiveManifest, String> {
 }
 
 /// Decode a single InstallOperation from raw bytes.
+#[cfg(test)]
 pub fn decode_install_operation(data: &[u8]) -> Result<InstallOperation, String> {
     InstallOperation::decode(data)
         .map_err(|e| format!("Failed to decode InstallOperation: {}", e))
@@ -203,11 +204,13 @@ pub fn decode_partition_update(data: &[u8]) -> Result<PartitionUpdate, String> {
 }
 
 /// Decode an Extent from raw bytes.
+#[cfg(test)]
 pub fn decode_extent(data: &[u8]) -> Result<Extent, String> {
     Extent::decode(data).map_err(|e| format!("Failed to decode Extent: {}", e))
 }
 
 /// Decode a PartitionInfo from raw bytes.
+#[cfg(test)]
 pub fn decode_partition_info(data: &[u8]) -> Result<PartitionInfo, String> {
     PartitionInfo::decode(data).map_err(|e| format!("Failed to decode PartitionInfo: {}", e))
 }
@@ -245,6 +248,7 @@ pub fn encode_partition_update(part: &PartitionUpdate) -> Vec<u8> {
 }
 
 /// Encode a PartitionInfo to bytes.
+#[cfg(test)]
 pub fn encode_partition_info(info: &PartitionInfo) -> Vec<u8> {
     let mut buf = Vec::with_capacity(info.encoded_len());
     info.encode(&mut buf).expect("prost encode should not fail");
@@ -252,18 +256,15 @@ pub fn encode_partition_info(info: &PartitionInfo) -> Vec<u8> {
 }
 
 /// Encode an Extent to bytes.
+#[cfg(test)]
 pub fn encode_extent(extent: &Extent) -> Vec<u8> {
     let mut buf = Vec::with_capacity(extent.encoded_len());
     extent.encode(&mut buf).expect("prost encode should not fail");
     buf
 }
 
-/// Encode a Signatures message to bytes.
-pub fn encode_signatures(sigs: &Signatures) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(sigs.encoded_len());
-    sigs.encode(&mut buf).expect("prost encode should not fail");
-    buf
-}
+// REMOVED: encode_signatures() — dead function (zero callers).
+// The Signatures struct exists in the protobuf schema but OTAku never writes signature blocks.
 
 // ---------------------------------------------------------------------------
 //  Builder helpers — construct common message types

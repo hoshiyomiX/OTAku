@@ -208,53 +208,8 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 ///
 /// Reads the data blob for each InstallOperation in the partition's
 /// operation list and returns the concatenation.
-/// Extract raw (possibly compressed) data for a partition.
-///
-/// **OOM WARNING**: This function accumulates all operation data chunks in
-/// memory as `Vec<Vec<u8>>` then flattens. For large partitions, prefer
-/// processing operations individually rather than using this function.
-pub fn extract_partition_data(
-    payload_info: &PayloadInfo,
-    partition_name: &str,
-) -> Result<Vec<u8>, String> {
-    let partition = find_partition(&payload_info.manifest, partition_name)?;
-
-    let mut file =
-        BufReader::new(File::open(&payload_info.file_path).map_err(|e| format!("{}", e))?);
-    let mut chunks: Vec<Vec<u8>> = Vec::new();
-
-    for op in &partition.install_operations {
-        if op.r#type == OP_ZERO || op.r#type == OP_DISCARD {
-            continue;
-        }
-        if op.data_length == 0 {
-            continue;
-        }
-        // BUG FIX (NEW-2): Validate data_length before allocating.
-        // A corrupt/malicious payload with huge data_length would cause OOM.
-        if op.data_length > MAX_OP_DATA_SIZE {
-            return Err(format!(
-                "Operation data_length {} exceeds {} MB limit — possible corrupt payload",
-                op.data_length, MAX_OP_DATA_SIZE / (1024 * 1024)
-            ));
-        }
-        if payload_info.data_offset + op.data_offset + op.data_length > payload_info.file_size {
-            return Err(format!(
-                "Operation data extends beyond file (offset={}, length={}, file_size={})",
-                op.data_offset, op.data_length, payload_info.file_size
-            ));
-        }
-        file.seek(SeekFrom::Start(payload_info.data_offset + op.data_offset))
-            .map_err(|e| format!("Seek error: {}", e))?;
-        let mut chunk = vec![0u8; op.data_length as usize];
-        file.read_exact(&mut chunk)
-            .map_err(|e| format!("Read error at offset {}: {}", op.data_offset, e))?;
-        chunks.push(chunk);
-    }
-
-    let total: Vec<u8> = chunks.into_iter().flatten().collect();
-    Ok(total)
-}
+// REMOVED: extract_partition_data() — dead function (zero callers).
+// Superseded by extract_and_decompress_partition_to_writer() for OOM safety.
 
 /// Extract, detect compression, and decompress a partition image.
 ///
@@ -269,6 +224,10 @@ pub fn extract_partition_data(
 ///
 /// For large partitions, prefer `extract_and_decompress_partition_to_writer`
 /// which streams decompressed chunks to a file, using only ~8MB RAM.
+#[deprecated(
+    since = "0.4.0",
+    note = "OOM-unsafe: materializes entire partition in RAM. Use extract_and_decompress_partition_to_writer instead."
+)]
 pub fn extract_and_decompress_partition(
     payload_info: &PayloadInfo,
     partition_name: &str,
