@@ -206,13 +206,6 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 //  EXTRACT — partition extraction
 // ---------------------------------------------------------------------------
 
-// /// Extract the raw (compressed) data blobs for a partition.
-// ///
-// /// Reads the data blob for each InstallOperation in the partition's
-// /// operation list and returns the concatenation.
-// REMOVED: extract_partition_data() — dead function (zero callers).
-// Superseded by extract_and_decompress_partition_to_writer() for OOM safety.
-
 /// Extract, detect compression, and decompress a partition image.
 ///
 /// This is the primary extraction method — reads each operation's data,
@@ -226,8 +219,7 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 ///
 /// For large partitions, prefer `extract_and_decompress_partition_to_writer`
 /// which streams decompressed chunks to a file, using only ~8MB RAM.
-// DEMOTED: gate with #[cfg(test)] — zero production callers.
-// Deprecated since 0.4.0 (OOM-unsafe). Use extract_and_decompress_partition_to_writer instead.
+/// Deprecated since 0.4.0 (OOM-unsafe). Use extract_and_decompress_partition_to_writer instead.
 #[cfg(test)]
 #[deprecated(
     since = "0.4.0",

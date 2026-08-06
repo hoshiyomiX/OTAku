@@ -101,9 +101,6 @@ pub const ALIGN: usize = 4096;
 //  Compress ID mapping (matches Python COMPRESS_ID_MAP)
 // ---------------------------------------------------------------------------
 
-// REMOVED: COMPRESS_CMD_MAP — dead constant (zero callers).
-// compress_id() from compression.rs is used instead for ID lookups.
-
 /// Get the shell decompressor command for a compress ID.
 fn decomp_cmd_for_id(compress_id: u16) -> &'static str {
     match compress_id {
@@ -1448,17 +1445,6 @@ unmount_partition() {{
     done
     return 0
 }}
-
-# REMOVED: unmount_and_unmap_partition — dead shell function (zero callers).
-# The cleanup trap now calls unmount_partition + lptools unmap "$pname_lp"
-# directly with slot-suffixed names (Bug #10 fix, commit 8a2469c).
-
-# REMOVED: dead-code helper that wrapped unmount + lptools unmap + lptools map
-# for a single dynamic partition.  It was never called and had a bug where
-# lptools unmap/map received the plain partition name instead of the
-# slot-suffixed name required on A/B devices.  The cleanup trap now uses
-# unmount_partition + lptools unmap/map directly with the correct
-# slot-suffixed name ($pname_lp).
 
 # List of partitions that need resizing (filled during validation)
 RESIZE_NEEDED=""

@@ -17,16 +17,12 @@ pub const ALG_GZIP: &str = "gzip";
 pub const ALG_LZ4: &str = "lz4";
 pub const ALG_BZIP2: &str = "bzip2";
 pub const ALG_XZ: &str = "xz";
+pub const ALG_BROTLI: &str = "brotli";
 pub const ALG_ZSTD: &str = "zstd";
 pub const ALG_AUTO: &str = "auto";
 
-// REMOVED: ALL_ALGORITHMS — dead constant (zero callers).
-// nativeCheckDeps in lib.rs hardcodes the available algorithm list.
-
 /// Default compression levels per algorithm (matches Python DEFAULT_LEVELS)
 pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
-    // DEMOTED: (ALG_NONE, 0) — none is not user-selectable
-    // DEMOTED: (ALG_BROTLI, 6) — brotli removed from APK build
     (ALG_GZIP, 6),
     (ALG_LZ4, 4),
     (ALG_BZIP2, 9),
@@ -36,8 +32,6 @@ pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
 
 /// Valid level ranges per algorithm: (min, max) (matches Python LEVEL_RANGES)
 pub const LEVEL_RANGES: &[(&str, i32, i32)] = &[
-    // DEMOTED: (ALG_NONE, 0, 0) — none is not user-selectable
-    // DEMOTED: (ALG_BROTLI, 0, 11) — brotli removed from APK build
     (ALG_GZIP, 1, 9),
     (ALG_LZ4, 1, 12),
     (ALG_BZIP2, 1, 9),
@@ -50,11 +44,9 @@ pub const LEVEL_RANGES: &[(&str, i32, i32)] = &[
 // ---------------------------------------------------------------------------
 
 pub const COMPRESS_ID_MAP: &[(&str, u16)] = &[
-    // DEMOTED: ("none", 0) — none is not user-selectable
     ("gzip", 1),
     ("bzip2", 2),
     ("xz", 3),
-    // REMOVED: ("brotli", 4) — brotli removed from APK build
     ("lz4", 5),
     ("zstd", 6),
 ];
@@ -171,8 +163,6 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
     if data.len() >= 4 && data[..4] == [0x28, 0xB5, 0x2F, 0xFD] {
         return ALG_ZSTD;
     }
-
-    // REMOVED: brotli trial decompression — brotli not in APK build
 
     ALG_NONE
 }
@@ -493,8 +483,6 @@ fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
-// DEMOTED: compress_brotli() and decompress_brotli() — removed from APK build.
-
 // ---------------------------------------------------------------------------
 //  LZ4 implementation (lz4_flex frame format — compatible with lz4 CLI)
 // ---------------------------------------------------------------------------
@@ -622,10 +610,6 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
     hasher.update(data);
     hasher.finalize().to_vec()
 }
-
-// REMOVED: sha256_file() — dead function (only caller was dead sha256_file_hex).
-// Production code uses the streaming hash inside
-// hash_and_compress_file_to_writer_with_progress instead.
 
 // ---------------------------------------------------------------------------
 //  Streaming compression with progress
@@ -984,11 +968,6 @@ pub fn hash_and_compress_file(
 
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
-
-// REMOVED: hash_and_compress_file_with_progress() — dead function (zero callers).
-// Returns entire compressed output in Vec<u8> — OOM risk on Android.
-// Completely replaced by the streaming hash_and_compress_file_to_writer_with_progress
-// variant which writes compressed chunks directly to the output writer.
 
 // ---------------------------------------------------------------------------
 //  Sha256Writer — wraps a Write to compute SHA-256 of bytes written through it
@@ -1612,7 +1591,6 @@ pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
     if is_alg(algorithm, ALG_XZ) {
         return 8; // REPLACE_XZ
     }
-    // DEMOTED: if is_alg(algorithm, ALG_BROTLI) { return 13; } — brotli removed from APK build
     if is_alg(algorithm, ALG_LZ4) {
         return 0; // LZ4 has no AOSP operation type; use REPLACE (0) as fallback
     }
@@ -1636,7 +1614,6 @@ mod tests {
         assert_eq!(normalise("GZ"), ALG_GZIP);
         assert_eq!(normalise("bz2"), ALG_BZIP2);
         assert_eq!(normalise("XZ"), ALG_XZ);
-        // DEMOTED: assert_eq!(normalise("br"), ALG_BROTLI);
         assert_eq!(normalise("none"), ALG_NONE);
         assert_eq!(normalise("raw"), ALG_NONE);
         assert_eq!(normalise(""), ALG_NONE);
@@ -1645,9 +1622,6 @@ mod tests {
     /// Bug NEW-E: AOSP operation type names must map to canonical algorithms.
     #[test]
     fn test_normalise_aosp_op_type_names() {
-        // DEMOTED: REPLACE_BROT → brotli (now demoted to none)
-        // DEMOTED: assert_eq!(normalise("REPLACE_BROT"), ALG_BROTLI);
-        // DEMOTED: assert_eq!(normalise("replace_brot"), ALG_BROTLI);
         // REPLACE_BZ → bzip2
         assert_eq!(normalise("REPLACE_BZ"), ALG_BZIP2);
         assert_eq!(normalise("replace_bz"), ALG_BZIP2);
@@ -1656,33 +1630,23 @@ mod tests {
         assert_eq!(normalise("replace_xz"), ALG_XZ);
         // PUIGZIP → gzip
         assert_eq!(normalise("PUIGZIP"), ALG_GZIP);
-        // DEMOTED: BROTLI_BSDIFF → brotli (now demoted to none)
-        // DEMOTED: assert_eq!(normalise("BROTLI_BSDIFF"), ALG_BROTLI);
     }
 
     /// Bug NEW-E: compress_id must resolve AOSP type names correctly.
     #[test]
     fn test_compress_id_aosp_aliases() {
-        // DEMOTED: assert_eq!(compress_id("REPLACE_BROT"), 4); // brotli → now 0 (none)
         assert_eq!(compress_id("REPLACE_BZ"), 2);   // bzip2
         assert_eq!(compress_id("REPLACE_XZ"), 3);   // xz
         assert_eq!(compress_id("PUIGZIP"), 1);       // gzip
-        // DEMOTED: assert_eq!(compress_id("BROTLI_BSDIFF"), 4); // brotli → now 0 (none)
-        // DEMOTED: assert_eq!(compress_id("brotli"), 4); // brotli → now 0 (none)
         assert_eq!(compress_id("bzip2"), 2);
     }
 
     /// Bug NEW-E: is_alg must recognize AOSP type names.
     #[test]
     fn test_is_alg_aosp_aliases() {
-        // DEMOTED: assert!(is_alg("REPLACE_BROT", ALG_BROTLI));
         assert!(is_alg("REPLACE_BZ", ALG_BZIP2));
         assert!(is_alg("REPLACE_XZ", ALG_XZ));
         assert!(is_alg("PUIGZIP", ALG_GZIP));
-        // DEMOTED: assert!(is_alg("BROTLI_BSDIFF", ALG_BROTLI));
-        // Negative cases
-        // DEMOTED: assert!(!is_alg("REPLACE_BROT", ALG_BZIP2)); // brotli demoted
-        // DEMOTED: assert!(!is_alg("REPLACE_BZ", ALG_BROTLI)); // brotli demoted
     }
 
     #[test]
@@ -1695,7 +1659,6 @@ mod tests {
         // Now it returns 6 (the gzip default), matching the Kotlin convention.
         assert_eq!(resolve_level("gzip", Some(0)), 6); // 0 = default → 6
         assert_eq!(resolve_level("xz", None), 6);
-        // DEMOTED: assert_eq!(resolve_level("brotli", None), 6);
         assert_eq!(resolve_level("bzip2", None), 9);
         assert_eq!(resolve_level("lz4", None), 4);
     }
@@ -1727,7 +1690,6 @@ mod tests {
     /// for xz must now pass Some(0) AFTER the resolve_level fix, which treats it
     /// as default. To use literal level 0 for xz, the caller must pass it directly
     /// (this is acceptable because no JNI entry point ever passes Some(0)).
-    /// DEMOTED: brotli explicit level tests removed (brotli demoted from APK build).
     #[test]
     fn test_resolve_level_explicit_levels_for_xz() {
         // Explicit level 1 for xz (not default, not level 0)
@@ -1878,7 +1840,6 @@ mod tests {
         assert_eq!(operation_type_for_algorithm("bzip2"), 12); // REPLACE_BZ
         assert_eq!(operation_type_for_algorithm("xz"), 8);     // REPLACE_XZ
         assert_eq!(operation_type_for_algorithm("gzip"), 14); // PUIGZIP
-        // DEMOTED: assert_eq!(operation_type_for_algorithm("brotli"), 13); // REPLACE_BROT (brotli demoted → returns 0)
     }
 
     #[test]
