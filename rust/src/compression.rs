@@ -2,7 +2,7 @@
 //!
 //! All algorithms are statically compiled — no runtime dependency checks needed.
 //! Supported: gzip (flate2/miniz_oxide), lz4 (lz4_flex/frame), bzip2, xz (xz2/liblzma), zstd (libzstd-sys).
-//! DEMOTED: brotli (removed from APK build), none (internal identity only, not user-selectable)
+//! "none" is internal identity only (not user-selectable). "brotli" removed from APK build.
 //!
 //! Ported from Python compression.py to Rust with identical semantics.
 
@@ -17,8 +17,6 @@ pub const ALG_GZIP: &str = "gzip";
 pub const ALG_LZ4: &str = "lz4";
 pub const ALG_BZIP2: &str = "bzip2";
 pub const ALG_XZ: &str = "xz";
-// DEMOTED: ALG_BROTLI — removed from APK build
-pub const ALG_BROTLI: &str = "brotli";
 pub const ALG_ZSTD: &str = "zstd";
 pub const ALG_AUTO: &str = "auto";
 
@@ -56,7 +54,7 @@ pub const COMPRESS_ID_MAP: &[(&str, u16)] = &[
     ("gzip", 1),
     ("bzip2", 2),
     ("xz", 3),
-    // DEMOTED: ("brotli", 4) — brotli removed from APK build
+    // REMOVED: ("brotli", 4) — brotli removed from APK build
     ("lz4", 5),
     ("zstd", 6),
 ];
@@ -64,7 +62,7 @@ pub const COMPRESS_ID_MAP: &[(&str, u16)] = &[
 /// Get the compress ID for an algorithm name.
 ///
 /// BUG FIX (NEW-E): Uses `normalise()` to resolve aliases before lookup,
-/// so "REPLACE_BROT" → "brotli" → 4 and "REPLACE_BZ" → "bzip2" → 2.
+/// so "REPLACE_BROT" → "none" (brotli removed) and "REPLACE_BZ" → "bzip2" → 2.
 /// Previously did exact-match, returning 0 (none) for AOSP type names.
 pub fn compress_id(algorithm: &str) -> u16 {
     let canonical = normalise(algorithm);
@@ -83,10 +81,11 @@ pub fn compress_id(algorithm: &str) -> u16 {
 ///
 /// BUG FIX (NEW-E): Added AOSP operation type name aliases so that strings
 /// like "REPLACE_BROT" and "REPLACE_BZ" (which appear in parsed payload JSON)
-/// are correctly mapped to their canonical algorithm names ("brotli", "bzip2").
+/// are correctly mapped to their canonical algorithm names (brotli→"none", "bzip2").
 /// Previously, these strings fell through to the `other` arm and were returned
 /// as-is, causing `is_alg("REPLACE_BROT", "brotli")` to return false and
 /// `compress_id("REPLACE_BROT")` to return 0 (none) instead of 4 (brotli).
+/// Now brotli-like inputs normalise to "none" (uncompressed passthrough).
 fn normalise(algorithm: &str) -> String {
     let lower = algorithm.to_lowercase().trim().to_string();
     match lower.as_str() {
@@ -94,7 +93,7 @@ fn normalise(algorithm: &str) -> String {
         "bz2" | "bzip2" | "replace_bz" => ALG_BZIP2.to_string(),
         "gz" | "gzip" | "puigzip" => ALG_GZIP.to_string(),
         "lzma" | "xz" | "replace_xz" => ALG_XZ.to_string(),
-        "br" | "brotli" | "replace_brot" | "brotli_bsdiff" => "brotli_demoted".to_string(),
+        "br" | "brotli" | "replace_brot" | "brotli_bsdiff" => ALG_NONE.to_string(), // brotli removed — treat as uncompressed
         "lz4" | "l4" => ALG_LZ4.to_string(),
         "zstd" | "zs" | "zst" => ALG_ZSTD.to_string(),
         other => other.to_string(), // return as-is for unknown algorithms
@@ -109,7 +108,7 @@ fn normalise(algorithm: &str) -> String {
 ///
 /// BUG FIX: Previously, `Some(0)` was treated as literal level 0, bypassing the
 /// algorithm default. This caused xz (valid range 0-9) to use level 0 (no compression)
-/// and brotli (valid range 0-11) to use quality 0 (trivial output) when the caller
+/// and brotli (removed — normalises to "none") when the caller
 /// intended "use default". Now `Some(0)` is treated the same as `None` — both mean
 /// "use the algorithm's default level". This aligns with the Kotlin/Java convention
 /// where `level = 0` means "default" (sentinel value), and with all JNI entry points
@@ -173,7 +172,7 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
         return ALG_ZSTD;
     }
 
-    // DEMOTED: brotli trial decompression removed — brotli not in APK build
+    // REMOVED: brotli trial decompression — brotli not in APK build
 
     ALG_NONE
 }
@@ -186,7 +185,7 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
 ///
 /// # Arguments
 /// * `data` - Raw data to compress
-/// * `algorithm` - One of "none", "gzip", "bzip2", "xz", "brotli"
+/// * `algorithm` - One of "none", "gzip", "bzip2", "xz"
 /// * `level` - Compression level. None = use algorithm default.
 ///
 /// # Returns
@@ -211,9 +210,6 @@ pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<
     if is_alg(algorithm, ALG_XZ) {
         return compress_xz(data, resolved_level);
     }
-    if is_alg(algorithm, ALG_BROTLI) {
-        return Err("brotli compression demoted from APK build".to_string());
-    }
     if is_alg(algorithm, ALG_LZ4) {
         return compress_lz4(data, resolved_level);
     }
@@ -227,7 +223,7 @@ pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<
 ///
 /// # Arguments
 /// * `data` - Compressed (or raw) data
-/// * `algorithm` - One of "none", "gzip", "bzip2", "xz", "brotli", "auto"
+/// * `algorithm` - One of "none", "gzip", "bzip2", "xz", "auto"
 ///
 /// "auto" attempts to detect the format from magic bytes.
 pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
@@ -251,9 +247,6 @@ pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
     }
     if effective_alg == ALG_XZ {
         return decompress_xz(data);
-    }
-    if effective_alg == ALG_BROTLI {
-        return Err("brotli decompression demoted from APK build — recompile with brotli feature if needed".to_string());
     }
     if effective_alg == ALG_LZ4 {
         return decompress_lz4(data);
@@ -342,10 +335,6 @@ pub fn decompress_to_writer<W: Write>(
             }
         }
         return Ok(total);
-    }
-
-    if effective_alg == ALG_BROTLI {
-        return Err("brotli decompression demoted from APK build".to_string());
     }
 
     if effective_alg == ALG_LZ4 {
@@ -740,10 +729,6 @@ pub fn compress_streaming(
             .map_err(|e| format!("xz streaming finish error: {}", e));
     }
 
-    if is_alg(algorithm, ALG_BROTLI) {
-        return Err("brotli compression demoted from APK build".to_string());
-    }
-
     if is_alg(algorithm, ALG_LZ4) {
         let frame_info = lz4_frame_info_for_level(resolved_level);
         let mut result = Vec::new();
@@ -948,10 +933,6 @@ pub fn hash_and_compress_file(
             .map_err(|e| format!("xz compress finish error: {}", e))?;
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
         return Ok((compressed, hex));
-    }
-
-    if is_alg(algorithm, ALG_BROTLI) {
-        return Err("brotli compression demoted from APK build".to_string());
     }
 
     if is_alg(algorithm, ALG_LZ4) {
@@ -1266,10 +1247,6 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
         return Ok((compressed_size, hex));
     }
 
-    if is_alg(algorithm, ALG_BROTLI) {
-        return Err("brotli compression demoted from APK build".to_string());
-    }
-
     if is_alg(algorithm, ALG_LZ4) {
         let frame_info = lz4_frame_info_for_level(resolved_level);
         {
@@ -1537,10 +1514,6 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
             StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
             _sha_writer,
         ));
-    }
-
-    if is_alg(algorithm, ALG_BROTLI) {
-        return Err("brotli compression demoted from APK build".to_string());
     }
 
     if is_alg(algorithm, ALG_LZ4) {

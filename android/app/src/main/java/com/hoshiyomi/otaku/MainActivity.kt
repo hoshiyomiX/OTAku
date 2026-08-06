@@ -509,7 +509,7 @@ class MainActivity : AppCompatActivity() {
      * Format:
      *   Initializing OTAku...
      *   Native backend: otaku-native 1.0.0 (rust)
-     *   Native compression: zstd, brotli, xz, bzip2, gzip, lz4
+     *   Native compression: zstd, xz, bzip2, gzip, lz4
      *   OTAku ready
      *
      * If native failed to load, the error variant is returned instead.
@@ -760,7 +760,6 @@ class MainActivity : AppCompatActivity() {
         // Ordered by compression ratio: best → fastest (matches OTABridge.COMPRESSION_ALGORITHMS)
         val displayLabels = listOf(
             "zstd — supreme (~35%)",
-            "brotli — best (~40%)",
             "xz — ultra (~45%)",
             "bzip2 — high (~50%)",
             "gzip — standard (~60%)",
@@ -790,7 +789,6 @@ class MainActivity : AppCompatActivity() {
     // Ordered by compression ratio: best → fastest
     private val COMPRESSION_LEVELS: Map<String, Pair<Int, Int>> = mapOf(
         "zstd" to Pair(1, 22),     // zstd: levels 1-22, default 3
-        "brotli" to Pair(0, 11),  // brotli: quality 0-11, default 6
         "xz" to Pair(0, 9),       // stdlib lzma: levels 0-9, default 6
         "bzip2" to Pair(1, 9),    // stdlib bzip2: levels 1-9, default 9
         "gzip" to Pair(1, 9),     // stdlib gzip: levels 1-9, default 6
@@ -800,7 +798,6 @@ class MainActivity : AppCompatActivity() {
     // Default compression level per algorithm (single source of truth for UI labels)
     private val DEFAULT_COMPRESSION_LEVELS: Map<String, Int> = mapOf(
         "zstd" to 3,
-        "brotli" to 6,
         "xz" to 6,
         "bzip2" to 9,
         "gzip" to 6,
@@ -827,7 +824,7 @@ class MainActivity : AppCompatActivity() {
             listOf(0)  // Unknown algorithm → just show "Default"
         } else {
             // BUG FIX: Previously, `listOf(0) + (min..max)` produced duplicate zeros
-            // for algorithms where min=0 (xz: 0-9, brotli: 0-11). The list would be
+            // for algorithms where min=0 (xz: 0-9). The list would be
             // [0, 0, 1, 2, ...] with two "Default" labels. Now we filter out 0 from
             // the numeric range so the sentinel 0 (meaning "Default") is unique.
             listOf(0) + (min..max).filter { it != 0 }.toList()

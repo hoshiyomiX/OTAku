@@ -14,7 +14,7 @@
 //!     each partition compressed, padded to 4096 alignment
 //!
 //! Compress IDs (internal binary format — UI no longer exposes "none" or "brotli"):
-//!   0 = none (internal),  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli (DEMOTED),  5 = lz4,  6 = zstd
+//!   0 = none (internal),  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli (REMOVED→passthrough),  5 = lz4,  6 = zstd
 //!
 //! Ported from Python modes/dd.py (849 lines) to Rust with identical semantics.
 
@@ -111,7 +111,7 @@ fn decomp_cmd_for_id(compress_id: u16) -> &'static str {
         1 => "gzip",
         2 => "bzip2",
         3 => "xz",
-        4 => "brotli_demoted",  // DEMOTED: brotli removed from APK build
+        4 => "cat",  // brotli removed — treat as uncompressed passthrough
         5 => "lz4",
         6 => "zstd",
         _ => "cat",
@@ -1997,7 +1997,7 @@ ui_print "  ✓ Free space check complete"
         1 => r#""gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc""#,
         2 => r#""bzip2 -dc" "bzcat" "busybox bzip2 -dc""#,
         3 => r#""xz -T0 -dc" "xz -dc" "xzcat" "busybox xz -dc""#,
-        4 => "",  // DEMOTED: brotli removed — no fallback available
+        4 => "",  // brotli removed — no fallback available
         5 => r#""lz4 -dc" "lz4 -d" "busybox lz4 -dc""#,
         6 => r#""zstd -dc" "zstdcat" "busybox zstd -dc""#,
         _ => "",
@@ -2654,7 +2654,7 @@ fn build_flash_info(
 ///
 /// # Arguments
 /// * `images` - List of (partition_name, image_path) pairs
-/// * `compression` - Compression algorithm: "zstd", "brotli", "xz", "bzip2", "gzip", "lz4"
+/// * `compression` - Compression algorithm: "zstd", "xz", "bzip2", "gzip", "lz4"
 /// * `level` - Compression level (0 = default per algorithm)
 /// * `output_path` - Absolute path for output .zip file
 /// * `device` - Device codename(s), comma-separated (empty = no device check)
@@ -3305,7 +3305,7 @@ mod tests {
         assert_eq!(decomp_cmd_for_id(1), "gzip");
         assert_eq!(decomp_cmd_for_id(2), "bzip2");
         assert_eq!(decomp_cmd_for_id(3), "xz");
-        assert_eq!(decomp_cmd_for_id(4), "brotli_demoted");
+        assert_eq!(decomp_cmd_for_id(4), "cat");  // brotli removed — passthrough
         assert_eq!(decomp_cmd_for_id(5), "lz4");
         assert_eq!(decomp_cmd_for_id(6), "zstd");
     }
@@ -4672,33 +4672,6 @@ mod tests {
         );
     }
 
-    /// Regression: brotli primary DECOMP_PIPE must use -dc flag.
-    /// Without -c, busybox brotli -d attempts to write to a file instead of
-    /// stdout when used in a pipe, causing silent flash failure. This is the
-    /// same class of bug as lz4 (ID=5) and zstd (ID=6) — all three require
-    /// explicit -c for stdout output; gzip/bzip2/xz auto-detect pipe mode.
-    #[test]
-    fn test_regression_brotli_decomp_pipe_dc_flag() {
-        let meta = vec![PartitionMeta {
-            name: "system".to_string(),
-            unc_size: 1073741824,
-            hash_hex: "a".repeat(64),
-            comp_size: 536870912,
-            data_offset: 0,
-            comp_hash_hex: "b".repeat(64),
-        }];
-        let script = build_update_script(1, 4, "brotli", &meta, 0, "", false);
-        // The brotli-specific override must be present in the generated script
-        assert!(
-            script.contains(r#"if [ "$COMPRESS_ID" = "4" ]; then"#),
-            "REGRESSION: brotli compress_id=4 override for -dc flag missing"
-        );
-        assert!(
-            script.contains("DECOMP_PIPE=\"$DECOMP_CMD -dc\""),
-            "REGRESSION: brotli DECOMP_PIPE -dc override missing"
-        );
-    }
-
     // ── Multi-threaded decompressor regression tests ──
 
     /// Verify MT decompressor upgrade paths for supported algorithms.
@@ -4773,13 +4746,6 @@ mod tests {
         assert!(
             gzip_script.contains("NPROC=$(nproc"),
             "REGRESSION: nproc detection for MT decompressors missing"
-        );
-
-        // brotli — no "brotli -dc" standalone fallback (only busybox)
-        let brotli_script = build_update_script(1, 4, "brotli", &meta, 0, "", false);
-        assert!(
-            !brotli_script.contains("\"brotli -dc\""),
-            "REGRESSION: standalone brotli -dc should be removed from fallback (never available on OrangeFox)"
         );
 
         // zstd → zstd -T0

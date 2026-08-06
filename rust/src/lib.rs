@@ -407,7 +407,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
 /// Kotlin: `external fun nativeBuildDd(...): String`
 ///
 /// @param images_json   JSON: {"partition_name": "/path/to/image.img", ...}
-/// @param compression   "none" | "gzip" | "lz4" | "bzip2" | "xz" | "brotli"
+/// @param compression   "gzip" | "lz4" | "bzip2" | "xz" | "zstd"
 /// @param level         Compression level (0 = default)
 /// @param output_path   Absolute path for output .zip
 /// @param device        Device codename(s), comma-separated

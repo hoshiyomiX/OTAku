@@ -52,7 +52,7 @@ data class ProgressUpdate(
  * This app is DD-mode only: generates otaku-format flashable ZIPs
  * from partition images (.img) for TWRP/OrangeFox recovery flashing.
  *
- * Supported compression: zstd, brotli, xz, bzip2, gzip, lz4  ("none" removed — always compress)
+ * Supported compression: zstd, xz, bzip2, gzip, lz4  ("none" and "brotli" removed)
  *
  * All operations use NativeBridge (Rust libotaku_native.so) — no Python dependency.
  */
@@ -63,18 +63,17 @@ object OTABridge {
     // Compression algorithm choices exposed in the UI spinner
     // Ordered by compression ratio: best (zstd ~35%) → fastest (lz4 ~70%)
     // "none" removed — users should always compress OTA packages.
-    val COMPRESSION_ALGORITHMS = listOf("zstd", "brotli", "xz", "bzip2", "gzip", "lz4")
+    val COMPRESSION_ALGORITHMS = listOf("zstd", "xz", "bzip2", "gzip", "lz4")
 
     // All valid compression values (for validation). "none" removed —
     // users should always compress OTA packages.
-    val ALL_COMPRESSION = setOf("zstd", "brotli", "xz", "bzip2", "gzip", "lz4")
+    val ALL_COMPRESSION = setOf("zstd", "xz", "bzip2", "gzip", "lz4")
 
 
     // Compression level ranges per algorithm: (min, max, default)
     // Ranges match the Rust native backend LEVEL_RANGES and DEFAULT_LEVELS.
     val COMPRESS_LEVELS = mapOf(
         "zstd" to Triple(1, 22, 3),
-        "brotli" to Triple(0, 11, 6),
         "xz" to Triple(0, 9, 6),
         "bzip2" to Triple(1, 9, 9),
         "gzip" to Triple(1, 9, 6),
@@ -99,7 +98,7 @@ object OTABridge {
      *
      * @param images Map of partition name -> absolute path to .img file
      * @param device Device codename(s), comma-separated (e.g. "crosshatch" or "OP11,OP11A")
-     * @param compression Compression algorithm: zstd, brotli, xz, bzip2, gzip, lz4
+     * @param compression Compression algorithm: zstd, xz, bzip2, gzip, lz4
      * @param level Compression level (0 = default per algorithm)
      * @param skipVerify Skip post-flash SHA-256 hash verification
      * @param outputPath Absolute path to output .zip file
