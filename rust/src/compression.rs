@@ -1,7 +1,8 @@
 //! Compression / decompression for AOSP payload.bin operations.
 //!
 //! All algorithms are statically compiled — no runtime dependency checks needed.
-//! Supported: none, gzip (flate2/miniz_oxide), lz4 (lz4_flex/frame), bzip2, xz (xz2/liblzma), brotli (pure Rust), zstd (libzstd-sys).
+//! Supported: gzip (flate2/miniz_oxide), lz4 (lz4_flex/frame), bzip2, xz (xz2/liblzma), zstd (libzstd-sys).
+//! DEMOTED: brotli (removed from APK build), none (internal identity only, not user-selectable)
 //!
 //! Ported from Python compression.py to Rust with identical semantics.
 
@@ -16,6 +17,7 @@ pub const ALG_GZIP: &str = "gzip";
 pub const ALG_LZ4: &str = "lz4";
 pub const ALG_BZIP2: &str = "bzip2";
 pub const ALG_XZ: &str = "xz";
+// DEMOTED: ALG_BROTLI — removed from APK build
 pub const ALG_BROTLI: &str = "brotli";
 pub const ALG_ZSTD: &str = "zstd";
 pub const ALG_AUTO: &str = "auto";
@@ -25,23 +27,23 @@ pub const ALG_AUTO: &str = "auto";
 
 /// Default compression levels per algorithm (matches Python DEFAULT_LEVELS)
 pub const DEFAULT_LEVELS: &[(&str, i32)] = &[
-    (ALG_NONE, 0),
+    // DEMOTED: (ALG_NONE, 0) — none is not user-selectable
+    // DEMOTED: (ALG_BROTLI, 6) — brotli removed from APK build
     (ALG_GZIP, 6),
     (ALG_LZ4, 4),
     (ALG_BZIP2, 9),
     (ALG_XZ, 6),
-    (ALG_BROTLI, 6),
     (ALG_ZSTD, 3),
 ];
 
 /// Valid level ranges per algorithm: (min, max) (matches Python LEVEL_RANGES)
 pub const LEVEL_RANGES: &[(&str, i32, i32)] = &[
-    (ALG_NONE, 0, 0),
+    // DEMOTED: (ALG_NONE, 0, 0) — none is not user-selectable
+    // DEMOTED: (ALG_BROTLI, 0, 11) — brotli removed from APK build
     (ALG_GZIP, 1, 9),
     (ALG_LZ4, 1, 12),
     (ALG_BZIP2, 1, 9),
     (ALG_XZ, 0, 9),
-    (ALG_BROTLI, 0, 11),
     (ALG_ZSTD, 1, 22),
 ];
 
@@ -50,11 +52,11 @@ pub const LEVEL_RANGES: &[(&str, i32, i32)] = &[
 // ---------------------------------------------------------------------------
 
 pub const COMPRESS_ID_MAP: &[(&str, u16)] = &[
-    ("none", 0),
+    // DEMOTED: ("none", 0) — none is not user-selectable
     ("gzip", 1),
     ("bzip2", 2),
     ("xz", 3),
-    ("brotli", 4),
+    // DEMOTED: ("brotli", 4) — brotli removed from APK build
     ("lz4", 5),
     ("zstd", 6),
 ];
@@ -92,7 +94,7 @@ fn normalise(algorithm: &str) -> String {
         "bz2" | "bzip2" | "replace_bz" => ALG_BZIP2.to_string(),
         "gz" | "gzip" | "puigzip" => ALG_GZIP.to_string(),
         "lzma" | "xz" | "replace_xz" => ALG_XZ.to_string(),
-        "br" | "brotli" | "replace_brot" | "brotli_bsdiff" => ALG_BROTLI.to_string(),
+        "br" | "brotli" | "replace_brot" | "brotli_bsdiff" => "brotli_demoted".to_string(),
         "lz4" | "l4" => ALG_LZ4.to_string(),
         "zstd" | "zs" | "zst" => ALG_ZSTD.to_string(),
         other => other.to_string(), // return as-is for unknown algorithms
@@ -171,20 +173,7 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
         return ALG_ZSTD;
     }
 
-    // Brotli: no reliable magic, try trial decompression with larger probe.
-    // BUG FIX: Previously only decoded 1 byte, which can produce false positives
-    // — any random 3+ bytes can sometimes decode as valid brotli for 1 byte.
-    // Now decode at least 64 bytes and validate the output is non-trivial.
-    if data.len() >= 8 {
-        use brotli::Decompressor;
-        use std::io::Read;
-        let mut dec = Decompressor::new(data, 4096);
-        let mut probe = [0u8; 64];
-        match dec.read(&mut probe) {
-            Ok(n) if n > 0 => return ALG_BROTLI,
-            _ => {} // Not brotli
-        }
-    }
+    // DEMOTED: brotli trial decompression removed — brotli not in APK build
 
     ALG_NONE
 }
@@ -208,7 +197,7 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
 #[cfg(test)]
 pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<u8>, String> {
     if is_alg(algorithm, ALG_NONE) {
-        return Ok(data.to_vec());
+        return Err("ALG_NONE (no compression) is not a valid compression output — select gzip/lz4/bzip2/xz/zstd".to_string());
     }
 
     let resolved_level = resolve_level(algorithm, level);
@@ -223,7 +212,7 @@ pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<
         return compress_xz(data, resolved_level);
     }
     if is_alg(algorithm, ALG_BROTLI) {
-        return compress_brotli(data, resolved_level);
+        return Err("brotli compression demoted from APK build".to_string());
     }
     if is_alg(algorithm, ALG_LZ4) {
         return compress_lz4(data, resolved_level);
@@ -264,7 +253,7 @@ pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
         return decompress_xz(data);
     }
     if effective_alg == ALG_BROTLI {
-        return decompress_brotli(data);
+        return Err("brotli decompression demoted from APK build — recompile with brotli feature if needed".to_string());
     }
     if effective_alg == ALG_LZ4 {
         return decompress_lz4(data);
@@ -356,19 +345,7 @@ pub fn decompress_to_writer<W: Write>(
     }
 
     if effective_alg == ALG_BROTLI {
-        use brotli::Decompressor;
-        let mut decoder = Decompressor::new(data, BUF_SIZE);
-        loop {
-            let n = decoder.read(&mut buf).map_err(|e| format!("brotli streaming decompress error: {}", e))?;
-            if n == 0 { break; }
-            writer.write_all(&buf[..n]).map_err(|e| format!("Write decompressed error: {}", e))?;
-            total += n as u64;
-            if total > MAX_DECOMPRESSED_SIZE as u64 {
-                return Err(format!("brotli decompressed output exceeds {} GiB limit — possible zip bomb",
-                    MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)));
-            }
-        }
-        return Ok(total);
+        return Err("brotli decompression demoted from APK build".to_string());
     }
 
     if effective_alg == ALG_LZ4 {
@@ -527,42 +504,7 @@ fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
-// ---------------------------------------------------------------------------
-//  Brotli implementation (pure Rust brotli crate)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-fn compress_brotli(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
-    let quality = level.clamp(0, 11);
-    // brotli crate expects quality as a u32 parameter in CompressorWriter
-    let mut result = Vec::new();
-    {
-        let mut encoder = brotli::CompressorWriter::new(&mut result, 4096, quality as u32, 22);
-        encoder
-            .write_all(data)
-            .map_err(|e| format!("brotli compress write error: {}", e))?;
-    } // encoder is flushed on drop
-    Ok(result)
-}
-
-fn decompress_brotli(data: &[u8]) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-
-    let decoder = brotli::Decompressor::new(data, 4096);
-    let mut result = Vec::new();
-    // BUG FIX: Same zip-bomb protection as decompress_gzip.
-    decoder
-        .take(MAX_DECOMPRESSED_SIZE as u64)
-        .read_to_end(&mut result)
-        .map_err(|e| format!("brotli decompress error: {}", e))?;
-    if result.len() >= MAX_DECOMPRESSED_SIZE {
-        return Err(format!(
-            "brotli decompressed output exceeds {} GiB limit — possible zip bomb",
-            MAX_DECOMPRESSED_SIZE / (1024 * 1024 * 1024)
-        ));
-    }
-    Ok(result)
-}
+// DEMOTED: compress_brotli() and decompress_brotli() — removed from APK build.
 
 // ---------------------------------------------------------------------------
 //  LZ4 implementation (lz4_flex frame format — compatible with lz4 CLI)
@@ -799,23 +741,7 @@ pub fn compress_streaming(
     }
 
     if is_alg(algorithm, ALG_BROTLI) {
-        let quality = resolved_level.clamp(0, 11) as u32;
-        let mut result = Vec::new();
-        {
-            let mut encoder = brotli::CompressorWriter::new(&mut result, 4096, quality, 22);
-            let mut offset: usize = 0;
-            while offset < data.len() {
-                let end = (offset + effective_chunk).min(data.len());
-                encoder
-                    .write_all(&data[offset..end])
-                    .map_err(|e| format!("brotli streaming write error: {}", e))?;
-                offset = end;
-                if let Some(ref mut cb) = on_progress {
-                    cb(offset as u64, total);
-                }
-            }
-        } // encoder is flushed on drop
-        return Ok(result);
+        return Err("brotli compression demoted from APK build".to_string());
     }
 
     if is_alg(algorithm, ALG_LZ4) {
@@ -1025,25 +951,7 @@ pub fn hash_and_compress_file(
     }
 
     if is_alg(algorithm, ALG_BROTLI) {
-        let quality = resolved_level.clamp(0, 11) as u32;
-        let mut result = Vec::new();
-        {
-            let mut encoder = brotli::CompressorWriter::new(&mut result, 4096, quality, 22);
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Read error: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                encoder
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("brotli compress write error: {}", e))?;
-            }
-        } // encoder is flushed on drop
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((result, hex));
+        return Err("brotli compression demoted from APK build".to_string());
     }
 
     if is_alg(algorithm, ALG_LZ4) {
@@ -1359,26 +1267,7 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
     }
 
     if is_alg(algorithm, ALG_BROTLI) {
-        let quality = resolved_level.clamp(0, 11) as u32;
-        {
-            let mut encoder = brotli::CompressorWriter::new(&mut counting, 4096, quality, 22);
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Read error: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                encoder
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("brotli compress write error: {}", e))?;
-            }
-        } // encoder is flushed on drop
-        let compressed_size = counting.bytes_written();
-        counting.flush().map_err(|e| format!("brotli flush error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed_size, hex));
+        return Err("brotli compression demoted from APK build".to_string());
     }
 
     if is_alg(algorithm, ALG_LZ4) {
@@ -1651,32 +1540,7 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
     }
 
     if is_alg(algorithm, ALG_BROTLI) {
-        let quality = resolved_level.clamp(0, 11) as u32;
-        {
-            let mut encoder = brotli::CompressorWriter::new(&mut counting, 4096, quality, 22);
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Read error: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                encoder
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("brotli compress write error: {}", e))?;
-                bytes_read += n as u64;
-                report_progress(bytes_read, file_size);
-            }
-        } // encoder is flushed on drop
-        counting.flush().map_err(|e| format!("brotli flush error: {}", e))?;
-        let comp_size = counting.bytes_written();
-        let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();
-        let unc_hash_hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((
-            StreamCompressResult { comp_size, unc_hash_hex, comp_hash_hex },
-            _sha_writer,
-        ));
+        return Err("brotli compression demoted from APK build".to_string());
     }
 
     if is_alg(algorithm, ALG_LZ4) {
@@ -1752,9 +1616,9 @@ pub fn detect_compression(operation_type: u32) -> &'static str {
         0 => ALG_NONE,       // REPLACE
         8 => ALG_XZ,         // REPLACE_XZ
         12 => ALG_BZIP2,     // REPLACE_BZ
-        13 => ALG_BROTLI,    // REPLACE_BROT
+        13 => ALG_NONE,      // REPLACE_BROT — brotli demoted, treat as uncompressed
         14 => ALG_GZIP,      // PUIGZIP
-        23 => ALG_BROTLI,    // BROTLI_BSDIFF
+        23 => ALG_NONE,      // BROTLI_BSDIFF — brotli demoted, treat as uncompressed
         21 | 22 => ALG_NONE, // ZERO / DISCARD
         _ => ALG_NONE,
     }
@@ -1775,9 +1639,7 @@ pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
     if is_alg(algorithm, ALG_XZ) {
         return 8; // REPLACE_XZ
     }
-    if is_alg(algorithm, ALG_BROTLI) {
-        return 13; // REPLACE_BROT
-    }
+    // DEMOTED: if is_alg(algorithm, ALG_BROTLI) { return 13; } — brotli removed from APK build
     if is_alg(algorithm, ALG_LZ4) {
         return 0; // LZ4 has no AOSP operation type; use REPLACE (0) as fallback
     }
@@ -1801,7 +1663,7 @@ mod tests {
         assert_eq!(normalise("GZ"), ALG_GZIP);
         assert_eq!(normalise("bz2"), ALG_BZIP2);
         assert_eq!(normalise("XZ"), ALG_XZ);
-        assert_eq!(normalise("br"), ALG_BROTLI);
+        // DEMOTED: assert_eq!(normalise("br"), ALG_BROTLI);
         assert_eq!(normalise("none"), ALG_NONE);
         assert_eq!(normalise("raw"), ALG_NONE);
         assert_eq!(normalise(""), ALG_NONE);
@@ -1810,9 +1672,9 @@ mod tests {
     /// Bug NEW-E: AOSP operation type names must map to canonical algorithms.
     #[test]
     fn test_normalise_aosp_op_type_names() {
-        // REPLACE_BROT → brotli
-        assert_eq!(normalise("REPLACE_BROT"), ALG_BROTLI);
-        assert_eq!(normalise("replace_brot"), ALG_BROTLI);
+        // DEMOTED: REPLACE_BROT → brotli (now demoted to none)
+        // DEMOTED: assert_eq!(normalise("REPLACE_BROT"), ALG_BROTLI);
+        // DEMOTED: assert_eq!(normalise("replace_brot"), ALG_BROTLI);
         // REPLACE_BZ → bzip2
         assert_eq!(normalise("REPLACE_BZ"), ALG_BZIP2);
         assert_eq!(normalise("replace_bz"), ALG_BZIP2);
@@ -1821,34 +1683,33 @@ mod tests {
         assert_eq!(normalise("replace_xz"), ALG_XZ);
         // PUIGZIP → gzip
         assert_eq!(normalise("PUIGZIP"), ALG_GZIP);
-        // BROTLI_BSDIFF → brotli
-        assert_eq!(normalise("BROTLI_BSDIFF"), ALG_BROTLI);
+        // DEMOTED: BROTLI_BSDIFF → brotli (now demoted to none)
+        // DEMOTED: assert_eq!(normalise("BROTLI_BSDIFF"), ALG_BROTLI);
     }
 
     /// Bug NEW-E: compress_id must resolve AOSP type names correctly.
     #[test]
     fn test_compress_id_aosp_aliases() {
-        assert_eq!(compress_id("REPLACE_BROT"), 4); // brotli
+        // DEMOTED: assert_eq!(compress_id("REPLACE_BROT"), 4); // brotli → now 0 (none)
         assert_eq!(compress_id("REPLACE_BZ"), 2);   // bzip2
         assert_eq!(compress_id("REPLACE_XZ"), 3);   // xz
         assert_eq!(compress_id("PUIGZIP"), 1);       // gzip
-        assert_eq!(compress_id("BROTLI_BSDIFF"), 4); // brotli
-        // Canonical names still work
-        assert_eq!(compress_id("brotli"), 4);
+        // DEMOTED: assert_eq!(compress_id("BROTLI_BSDIFF"), 4); // brotli → now 0 (none)
+        // DEMOTED: assert_eq!(compress_id("brotli"), 4); // brotli → now 0 (none)
         assert_eq!(compress_id("bzip2"), 2);
     }
 
     /// Bug NEW-E: is_alg must recognize AOSP type names.
     #[test]
     fn test_is_alg_aosp_aliases() {
-        assert!(is_alg("REPLACE_BROT", ALG_BROTLI));
+        // DEMOTED: assert!(is_alg("REPLACE_BROT", ALG_BROTLI));
         assert!(is_alg("REPLACE_BZ", ALG_BZIP2));
         assert!(is_alg("REPLACE_XZ", ALG_XZ));
         assert!(is_alg("PUIGZIP", ALG_GZIP));
-        assert!(is_alg("BROTLI_BSDIFF", ALG_BROTLI));
+        // DEMOTED: assert!(is_alg("BROTLI_BSDIFF", ALG_BROTLI));
         // Negative cases
-        assert!(!is_alg("REPLACE_BROT", ALG_BZIP2));
-        assert!(!is_alg("REPLACE_BZ", ALG_BROTLI));
+        // DEMOTED: assert!(!is_alg("REPLACE_BROT", ALG_BZIP2)); // brotli demoted
+        // DEMOTED: assert!(!is_alg("REPLACE_BZ", ALG_BROTLI)); // brotli demoted
     }
 
     #[test]
@@ -1861,7 +1722,7 @@ mod tests {
         // Now it returns 6 (the gzip default), matching the Kotlin convention.
         assert_eq!(resolve_level("gzip", Some(0)), 6); // 0 = default → 6
         assert_eq!(resolve_level("xz", None), 6);
-        assert_eq!(resolve_level("brotli", None), 6);
+        // DEMOTED: assert_eq!(resolve_level("brotli", None), 6);
         assert_eq!(resolve_level("bzip2", None), 9);
         assert_eq!(resolve_level("lz4", None), 4);
     }
@@ -1887,22 +1748,19 @@ mod tests {
         }
     }
 
-    /// Verify that xz and brotli can still use explicit level 0 (not just default).
-    /// For xz, level 0 is valid (fastest/no compression). For brotli, quality 0 is valid.
+    /// Verify that xz can still use explicit level 0 (not just default).
+    /// For xz, level 0 is valid (fastest/no compression).
     /// The fix only changes the semantics of Some(0) — callers who want literal level 0
-    /// for xz/brotli must now pass Some(0) AFTER the resolve_level fix, which treats it
-    /// as default. To use literal level 0 for xz/brotli, the caller must pass it directly
+    /// for xz must now pass Some(0) AFTER the resolve_level fix, which treats it
+    /// as default. To use literal level 0 for xz, the caller must pass it directly
     /// (this is acceptable because no JNI entry point ever passes Some(0)).
+    /// DEMOTED: brotli explicit level tests removed (brotli demoted from APK build).
     #[test]
-    fn test_resolve_level_explicit_levels_for_xz_brotli() {
+    fn test_resolve_level_explicit_levels_for_xz() {
         // Explicit level 1 for xz (not default, not level 0)
         assert_eq!(resolve_level("xz", Some(1)), 1);
         // Explicit level 9 for xz
         assert_eq!(resolve_level("xz", Some(9)), 9);
-        // Explicit quality 1 for brotli
-        assert_eq!(resolve_level("brotli", Some(1)), 1);
-        // Explicit quality 11 for brotli
-        assert_eq!(resolve_level("brotli", Some(11)), 11);
     }
 
     #[test]
@@ -1948,15 +1806,6 @@ mod tests {
         let compressed = compress(data, "xz", None).unwrap();
         assert!(!compressed.is_empty());
         let decompressed = decompress(&compressed, "xz").unwrap();
-        assert_eq!(data.to_vec(), decompressed);
-    }
-
-    #[test]
-    fn test_compress_decompress_brotli() {
-        let data = b"Hello, OTAku! This is a test of brotli compression.";
-        let compressed = compress(data, "brotli", None).unwrap();
-        assert!(!compressed.is_empty());
-        let decompressed = decompress(&compressed, "brotli").unwrap();
         assert_eq!(data.to_vec(), decompressed);
     }
 
@@ -2028,13 +1877,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_none() {
-        let data = b"Hello, OTAku!";
-        let result = compress(data, "none", None).unwrap();
-        assert_eq!(data.to_vec(), result);
-    }
-
-    #[test]
     fn test_decompress_auto() {
         let data = b"Auto-detect test data for compression.";
         let compressed = compress(data, "gzip", None).unwrap();
@@ -2054,16 +1896,16 @@ mod tests {
         assert_eq!(detect_compression(0), ALG_NONE); // REPLACE
         assert_eq!(detect_compression(8), ALG_XZ); // REPLACE_XZ
         assert_eq!(detect_compression(12), ALG_BZIP2); // REPLACE_BZ
-        assert_eq!(detect_compression(13), ALG_BROTLI); // REPLACE_BROT
+        assert_eq!(detect_compression(13), ALG_NONE); // REPLACE_BROT (brotli demoted)
         assert_eq!(detect_compression(14), ALG_GZIP); // PUIGZIP
-        assert_eq!(detect_compression(23), ALG_BROTLI); // BROTLI_BSDIFF
+        assert_eq!(detect_compression(23), ALG_NONE); // BROTLI_BSDIFF (brotli demoted)
         assert_eq!(detect_compression(21), ALG_NONE); // ZERO
 
         assert_eq!(operation_type_for_algorithm("none"), 0);   // REPLACE
         assert_eq!(operation_type_for_algorithm("bzip2"), 12); // REPLACE_BZ
         assert_eq!(operation_type_for_algorithm("xz"), 8);     // REPLACE_XZ
         assert_eq!(operation_type_for_algorithm("gzip"), 14); // PUIGZIP
-        assert_eq!(operation_type_for_algorithm("brotli"), 13); // REPLACE_BROT
+        // DEMOTED: assert_eq!(operation_type_for_algorithm("brotli"), 13); // REPLACE_BROT (brotli demoted → returns 0)
     }
 
     #[test]

@@ -22,7 +22,7 @@ lz4_flex = { version = "0.14", default-features = false, features = ["frame"] }
 # Changelog: https://github.com/gendx/bzip2-rs/releases
 bzip2 = "0.6"
 xz2 = "0.1"
-brotli = "6.0"
+# DEMOTED: brotli = "6.0" — removed from APK build (compress + decompress).
 # ZSTD (Zstandard): high compression ratio with fast decompression.
 # Uses libzstd-sys (C bindings to Facebook's zstd library) — the same
 # library used by RapidFlasher. Cross-compiles to Android NDK (arm64/armv7)

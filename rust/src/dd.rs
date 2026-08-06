@@ -13,8 +13,8 @@
 //!   Data:
 //!     each partition compressed, padded to 4096 alignment
 //!
-//! Compress IDs (internal binary format — UI no longer exposes "none"):
-//!   0 = none (internal),  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli,  5 = lz4,  6 = zstd
+//! Compress IDs (internal binary format — UI no longer exposes "none" or "brotli"):
+//!   0 = none (internal),  1 = gzip,  2 = bzip2,  3 = xz,  4 = brotli (DEMOTED),  5 = lz4,  6 = zstd
 //!
 //! Ported from Python modes/dd.py (849 lines) to Rust with identical semantics.
 
@@ -24,7 +24,7 @@ use std::path::Path;
 
 use crate::compression::{
     compress_id, hash_and_compress_file_to_writer_with_progress, is_alg, resolve_level,
-    ALG_GZIP, ALG_BZIP2, ALG_XZ, ALG_BROTLI, ALG_LZ4, ALG_ZSTD,
+    ALG_GZIP, ALG_BZIP2, ALG_XZ, ALG_LZ4, ALG_ZSTD,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ fn decomp_cmd_for_id(compress_id: u16) -> &'static str {
         1 => "gzip",
         2 => "bzip2",
         3 => "xz",
-        4 => "brotli",
+        4 => "brotli_demoted",  // DEMOTED: brotli removed from APK build
         5 => "lz4",
         6 => "zstd",
         _ => "cat",
@@ -1997,7 +1997,7 @@ ui_print "  ✓ Free space check complete"
         1 => r#""gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc""#,
         2 => r#""bzip2 -dc" "bzcat" "busybox bzip2 -dc""#,
         3 => r#""xz -T0 -dc" "xz -dc" "xzcat" "busybox xz -dc""#,
-        4 => r#""busybox brotli -dc""#,
+        4 => "",  // DEMOTED: brotli removed — no fallback available
         5 => r#""lz4 -dc" "lz4 -d" "busybox lz4 -dc""#,
         6 => r#""zstd -dc" "zstdcat" "busybox zstd -dc""#,
         _ => "",
@@ -2732,10 +2732,9 @@ pub fn run_dd_build(
         };
     }
 
-    // Validate compression algorithm — "none" removed from user-facing options.
-    // All 6 algorithms: zstd, brotli, xz, bzip2, gzip, lz4 (ordered by ratio).
+    // Validate compression algorithm — "none" and "brotli" removed from user-facing options.
+    // All 5 algorithms: zstd, xz, bzip2, gzip, lz4 (ordered by ratio).
     let is_valid_compression = is_alg(compression, ALG_ZSTD)
-        || is_alg(compression, ALG_BROTLI)
         || is_alg(compression, ALG_XZ)
         || is_alg(compression, ALG_BZIP2)
         || is_alg(compression, ALG_GZIP)
@@ -2745,7 +2744,7 @@ pub fn run_dd_build(
         return DdBuildResult {
             success: false,
             output: format!(
-                "[!] Error: unsupported compression '{}'. Supported: zstd, brotli, xz, bzip2, gzip, lz4",
+                "[!] Error: unsupported compression '{}'. Supported: zstd, xz, bzip2, gzip, lz4",
                 compression
             ),
             zip_path: None,
@@ -2881,7 +2880,7 @@ pub fn run_dd_build(
         ));
 
         // Warn about high compression levels on mobile
-        if (compress_name == "xz" || compress_name == "brotli") && effective_level >= 7 {
+        if compress_name == "xz" && effective_level >= 7 {
             lines.push(format!(
                 "  ! {} level {} is very slow on mobile. Level 6 recommended.",
                 compress_name, effective_level
@@ -3306,7 +3305,7 @@ mod tests {
         assert_eq!(decomp_cmd_for_id(1), "gzip");
         assert_eq!(decomp_cmd_for_id(2), "bzip2");
         assert_eq!(decomp_cmd_for_id(3), "xz");
-        assert_eq!(decomp_cmd_for_id(4), "brotli");
+        assert_eq!(decomp_cmd_for_id(4), "brotli_demoted");
         assert_eq!(decomp_cmd_for_id(5), "lz4");
         assert_eq!(decomp_cmd_for_id(6), "zstd");
     }
