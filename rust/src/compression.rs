@@ -2,7 +2,8 @@
 //!
 //! All algorithms are statically compiled — no runtime dependency checks needed.
 //! Supported: gzip (flate2/miniz_oxide), lz4 (lz4_flex/frame), bzip2, xz (xz2/liblzma), zstd (libzstd-sys).
-//! "none" is internal identity only (not user-selectable). "brotli" removed from APK build.
+//! brotli: removed from APK build (demoted — error on compress/decompress).
+//! "none": internal identity only (not user-selectable in UI).
 //!
 //! Ported from Python compression.py to Rust with identical semantics.
 
@@ -175,11 +176,11 @@ pub fn detect_from_data(data: &[u8]) -> &'static str {
 ///
 /// # Arguments
 /// * `data` - Raw data to compress
-/// * `algorithm` - One of "none", "gzip", "bzip2", "xz"
+/// * `algorithm` - One of "zstd", "xz", "bzip2", "gzip", "lz4"
 /// * `level` - Compression level. None = use algorithm default.
 ///
 /// # Returns
-/// Compressed data (or data unchanged for "none")
+/// Compressed data
 ///
 /// Note: Only used in tests. Production code uses the streaming
 /// hash_and_compress_file_to_writer_with_progress path.
@@ -213,7 +214,7 @@ pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<
 ///
 /// # Arguments
 /// * `data` - Compressed (or raw) data
-/// * `algorithm` - One of "none", "gzip", "bzip2", "xz", "auto"
+/// * `algorithm` - One of "zstd", "xz", "bzip2", "gzip", "lz4", "auto"
 ///
 /// "auto" attempts to detect the format from magic bytes.
 pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
