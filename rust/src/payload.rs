@@ -15,9 +15,11 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::compression::{
-    decompress, decompress_to_writer, detect_compression, detect_from_data,
+    decompress_to_writer, detect_compression, detect_from_data,
     hash_and_compress_file_to_writer, operation_type_for_algorithm,
 };
+#[cfg(test)]
+use crate::compression::decompress;
 use crate::proto::{
     build_extent, build_manifest, build_partition_info, build_partition_update,
     build_payload_header, build_replace_operation, decode_manifest, decode_payload_header,
@@ -224,6 +226,9 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 ///
 /// For large partitions, prefer `extract_and_decompress_partition_to_writer`
 /// which streams decompressed chunks to a file, using only ~8MB RAM.
+// DEMOTED: gate with #[cfg(test)] — zero production callers.
+// Deprecated since 0.4.0 (OOM-unsafe). Use extract_and_decompress_partition_to_writer instead.
+#[cfg(test)]
 #[deprecated(
     since = "0.4.0",
     note = "OOM-unsafe: materializes entire partition in RAM. Use extract_and_decompress_partition_to_writer instead."
