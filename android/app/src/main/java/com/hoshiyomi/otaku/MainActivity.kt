@@ -15,6 +15,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.DocumentsContract
 import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Toast
