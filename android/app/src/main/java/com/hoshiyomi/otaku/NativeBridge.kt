@@ -93,7 +93,7 @@ object NativeBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Payload Operations (Phase 2)
+    //  Payload Operations (Phase 2) — ⚠️ UNUSED, available for future integration
     // ═══════════════════════════════════════════════════════════════
 
     /**
@@ -105,6 +105,7 @@ object NativeBridge {
      * @param path Absolute path to the payload.bin file
      * @return PayloadResult with header, manifest, and partition info
      */
+    @Deprecated(message = "Unused - payload operations not yet wired into the Android UI. Available for future Phase 2 integration.")
     fun readPayload(path: String): PayloadResult {
         if (!isLoaded) {
             return PayloadResult.error("Native library not loaded: $loadError")
@@ -132,6 +133,7 @@ object NativeBridge {
      * @param outputPath Absolute path for the output .img file
      * @return ExtractResult with success/error and file info
      */
+    @Deprecated(message = "Unused - payload operations not yet wired into the Android UI. Available for future Phase 2 integration.")
     fun extractPartition(
         payloadPath: String,
         partitionName: String,
@@ -163,6 +165,7 @@ object NativeBridge {
      * @param minorVersion Payload minor version (default 0)
      * @return WritePayloadResult with success/error and partition summaries
      */
+    @Deprecated(message = "Unused - payload operations not yet wired into the Android UI. Available for future Phase 2 integration.")
     fun writePayload(
         images: Map<String, String>,
         compression: String = "gzip",
@@ -195,6 +198,7 @@ object NativeBridge {
      * @param path Absolute path to the payload.bin file
      * @return VerifyResult with success/error and diagnostic info
      */
+    @Deprecated(message = "Unused - payload operations not yet wired into the Android UI. Available for future Phase 2 integration.")
     fun verifyPayload(path: String): VerifyResult {
         if (!isLoaded) {
             return VerifyResult(error = "Native library not loaded: $loadError")
@@ -208,7 +212,7 @@ object NativeBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Compression Operations (Phase 2)
+    //  Compression Operations (Phase 2) — ⚠️ UNUSED, available for future integration
     // ═══════════════════════════════════════════════════════════════
 
     /**
@@ -223,6 +227,7 @@ object NativeBridge {
      * @param level Compression level (0 = algorithm default)
      * @return CompressResult with success/error and size info
      */
+    @Deprecated(message = "Unused - standalone compression not wired into the Android UI (OTABridge.dd handles compression internally). Available for future direct-compress feature.")
     fun compress(
         inputPath: String,
         outputPath: String,
@@ -248,6 +253,7 @@ object NativeBridge {
      * @param algorithm Decompression algorithm, or "auto" for auto-detect
      * @return CompressResult with success/error and size info
      */
+    @Deprecated(message = "Unused - standalone decompression not wired into the Android UI. Available for future direct-decompress feature.")
     fun decompress(
         inputPath: String,
         outputPath: String,
@@ -417,6 +423,7 @@ object NativeBridge {
         val nativeVersion: String
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge payload functions. Available for future Phase 2 integration.")
     data class PayloadResult(
         val success: Boolean,
         val header: PayloadHeaderInfo? = null,
@@ -430,6 +437,7 @@ object NativeBridge {
         }
     }
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge payload functions. Available for future Phase 2 integration.")
     data class PayloadHeaderInfo(
         val version: Long,
         val manifestLen: Long,
@@ -437,6 +445,7 @@ object NativeBridge {
         val minorVersion: Int
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge payload functions. Available for future Phase 2 integration.")
     data class ManifestInfo(
         val blockSize: Long,
         val minorVersion: Int,
@@ -445,6 +454,7 @@ object NativeBridge {
         val hasSourceMetadata: Boolean
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge payload functions. Available for future Phase 2 integration.")
     data class PartitionInfo(
         val partitionName: String,
         val runPostinstall: Boolean,
@@ -453,6 +463,7 @@ object NativeBridge {
         val oldPartitionInfo: PartitionInfoData? = null
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge payload functions. Available for future Phase 2 integration.")
     data class OpInfo(
         val type: Int,
         val typeName: String,
@@ -461,11 +472,13 @@ object NativeBridge {
         val dstLength: Int
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge payload functions. Available for future Phase 2 integration.")
     data class PartitionInfoData(
         val partitionSize: Long,
         val hash: String
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge extractPartition function. Available for future Phase 2 integration.")
     data class ExtractResult(
         val success: Boolean,
         val partition: String = "",
@@ -480,6 +493,7 @@ object NativeBridge {
         }
     }
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge writePayload function. Available for future Phase 2 integration.")
     data class WritePayloadResult(
         val success: Boolean,
         val output: String = "",
@@ -494,6 +508,7 @@ object NativeBridge {
         }
     }
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge writePayload function. Available for future Phase 2 integration.")
     data class PartitionSummary(
         val name: String,
         val originalSize: Long,
@@ -505,12 +520,14 @@ object NativeBridge {
         val sha256: String
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge verifyPayload function. Available for future Phase 2 integration.")
     data class VerifyResult(
         val success: Boolean = false,
         val output: String = "",
         val error: String? = null
     )
 
+    @Deprecated(message = "Unused - associated with dead NativeBridge compress/decompress functions. Available for future direct-compress feature.")
     data class CompressResult(
         val success: Boolean,
         val inputPath: String = "",
@@ -569,6 +586,7 @@ object NativeBridge {
         )
     }
 
+    @Deprecated(message = "Unused - only called by dead NativeBridge.readPayload.")
     private fun parsePayloadResult(jsonStr: String): PayloadResult {
         val json = JSONObject(jsonStr)
         if (!json.optBoolean("success", false)) {
@@ -622,6 +640,7 @@ object NativeBridge {
         )
     }
 
+    @Deprecated(message = "Unused - only called by dead NativeBridge.extractPartition.")
     private fun parseExtractResult(jsonStr: String): ExtractResult {
         val json = JSONObject(jsonStr)
         return if (json.optBoolean("success", false)) {
@@ -638,6 +657,7 @@ object NativeBridge {
         }
     }
 
+    @Deprecated(message = "Unused - only called by dead NativeBridge.writePayload.")
     private fun parseWritePayloadResult(jsonStr: String): WritePayloadResult {
         val json = JSONObject(jsonStr)
         if (!json.optBoolean("success", false)) {
@@ -667,6 +687,7 @@ object NativeBridge {
         )
     }
 
+    @Deprecated(message = "Unused - only called by dead NativeBridge.verifyPayload.")
     private fun parseVerifyResult(jsonStr: String): VerifyResult {
         val json = JSONObject(jsonStr)
         return VerifyResult(
@@ -676,6 +697,7 @@ object NativeBridge {
         )
     }
 
+    @Deprecated(message = "Unused - only called by dead NativeBridge.compress/decompress.")
     private fun parseCompressResult(jsonStr: String): CompressResult {
         val json = JSONObject(jsonStr)
         return if (json.optBoolean("success", false)) {
@@ -764,12 +786,15 @@ object NativeBridge {
     private external fun nativeCheckDeps(): String
 
     // Payload Operations
+    /** @deprecated Unused - only called by dead NativeBridge.readPayload. */
     private external fun nativeReadPayload(path: String): String
+    /** @deprecated Unused - only called by dead NativeBridge.extractPartition. */
     private external fun nativeExtractPartition(
         payloadPath: String,
         partitionName: String,
         outputPath: String
     ): String
+    /** @deprecated Unused - only called by dead NativeBridge.writePayload. */
     private external fun nativeWritePayload(
         imagesJson: String,
         compression: String,
@@ -778,15 +803,18 @@ object NativeBridge {
         blockSize: Int,
         minorVersion: Int
     ): String
+    /** @deprecated Unused - only called by dead NativeBridge.verifyPayload. */
     private external fun nativeVerifyPayload(path: String): String
 
     // Compression Operations
+    /** @deprecated Unused - only called by dead NativeBridge.compress. */
     private external fun nativeCompress(
         inputPath: String,
         outputPath: String,
         algorithm: String,
         level: Int
     ): String
+    /** @deprecated Unused - only called by dead NativeBridge.decompress. */
     private external fun nativeDecompress(
         inputPath: String,
         outputPath: String,

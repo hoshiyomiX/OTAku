@@ -51,6 +51,7 @@ object SuiseiColors {
      * Source: official character art / merchandise. This is the most commonly
      * cited hex for her hair/accessory blue.
      */
+    @Deprecated(message = "Unused - not called from any Kotlin code. Available for future dynamic-theming UI features.")
     const val SUISEI_BLUE_SEED = 0xFF00B0F0.toInt()
 
     /**
@@ -80,6 +81,7 @@ object SuiseiColors {
      * @param context Any context — used to resolve the system color resource
      * @return The accent color as a 0xAARRGGBB int (alpha always 0xFF)
      */
+    @Deprecated(message = "Unused - not called from any Kotlin code outside SuiseiColors. Available for future dynamic-theming UI features.")
     @ColorInt
     fun getSystemAccentColor(context: Context): Int {
         if (!isDynamicColorAvailable) {
@@ -108,6 +110,7 @@ object SuiseiColors {
      * @param context Any context
      * @return The container color as a 0xAARRGGBB int
      */
+    @Deprecated(message = "Unused - not called from any Kotlin code. Available for future dynamic-theming UI features.")
     @ColorInt
     fun getSystemAccentContainerColor(context: Context): Int {
         if (!isDynamicColorAvailable) {
@@ -154,6 +157,7 @@ object SuiseiColors {
      *   - "Material You (system accent)" — API 31+ with dynamic color enabled
      *   - "Suisei Blue (default)"        — fallback on older devices or user-disabled
      */
+    @Deprecated(message = "Unused - not called from any Kotlin code. Available for future diagnostics/about-screen UI.")
     fun describeColorSource(prefs: android.content.SharedPreferences): String {
         return if (shouldUseDynamicTheme(prefs)) {
             "Material You (system accent)"
@@ -170,6 +174,7 @@ object SuiseiColors {
      * automatically for theme attributes, but utility code that resolves
      * colors directly needs to check.
      */
+    @Deprecated(message = "Unused - not called from any Kotlin code. Available for future dark-mode-aware color resolution.")
     fun isNightMode(context: Context): Boolean {
         val nightMode = context.resources.configuration.uiMode and
             Configuration.UI_MODE_NIGHT_MASK

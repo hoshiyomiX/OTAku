@@ -20,6 +20,7 @@ data class OTAResult(
     val exitCode: Int = 0,
     val durationMs: Long = 0
 ) {
+    @Deprecated(message = "Unused - not referenced from any Kotlin code. Use 'result.success' or 'result.error' directly instead.")
     val hasError: Boolean get() = !success || !error.isNullOrBlank()
 
     companion object {

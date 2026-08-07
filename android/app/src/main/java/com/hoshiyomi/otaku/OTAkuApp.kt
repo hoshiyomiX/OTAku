@@ -10,12 +10,14 @@ class OTAkuApp : Application() {
         const val CHANNEL_ID = "otaku_service"
         const val CHANNEL_NAME = "OTAku Operations"
         const val CHANNEL_DESC = "Background OTAku processing notifications"
-        lateinit var instance: OTAkuApp
+        @Deprecated(message = "Unused - not referenced from any Kotlin code. Available for future application-scoped context access.")
+    lateinit var instance: OTAkuApp
             private set
     }
 
     override fun onCreate() {
         super.onCreate()
+        // instance retained for @Deprecated availability — do not remove assignment
         instance = this
         createNotificationChannel()
     }
