@@ -9,6 +9,10 @@
 
 use std::io::{Read, Write};
 
+use crate::proto::{
+    OP_BROTLI_BSDIFF, OP_PUIGZIP, OP_REPLACE, OP_REPLACE_BROT, OP_REPLACE_BZ, OP_REPLACE_XZ,
+};
+
 // ---------------------------------------------------------------------------
 //  Algorithm constants
 // ---------------------------------------------------------------------------
@@ -612,6 +616,9 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+// Production code uses the streaming hash inside
+// hash_and_compress_file_to_writer_with_progress.
+
 // ---------------------------------------------------------------------------
 //  Streaming compression with progress
 // ---------------------------------------------------------------------------
@@ -969,6 +976,9 @@ pub fn hash_and_compress_file(
 
     Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
+
+// The streaming variant hash_and_compress_file_to_writer_with_progress writes
+// compressed chunks directly to the output writer (avoids OOM on Android).
 
 // ---------------------------------------------------------------------------
 //  Sha256Writer — wraps a Write to compute SHA-256 of bytes written through it
@@ -1566,13 +1576,13 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
 /// Matches Python compression.py detect_compression().
 pub fn detect_compression(operation_type: u32) -> &'static str {
     match operation_type {
-        0 => ALG_NONE,       // REPLACE
-        8 => ALG_XZ,         // REPLACE_XZ
-        12 => ALG_BZIP2,     // REPLACE_BZ
-        13 => ALG_NONE,      // REPLACE_BROT — brotli demoted, treat as uncompressed
-        14 => ALG_GZIP,      // PUIGZIP
-        23 => ALG_NONE,      // BROTLI_BSDIFF — brotli demoted, treat as uncompressed
-        21 | 22 => ALG_NONE, // ZERO / DISCARD
+        OP_REPLACE => ALG_NONE,          // REPLACE
+        OP_REPLACE_XZ => ALG_XZ,         // REPLACE_XZ
+        OP_REPLACE_BZ => ALG_BZIP2,      // REPLACE_BZ
+        OP_REPLACE_BROT => ALG_NONE,     // REPLACE_BROT — brotli demoted, treat as uncompressed
+        OP_PUIGZIP => ALG_GZIP,          // PUIGZIP
+        OP_BROTLI_BSDIFF => ALG_NONE,    // BROTLI_BSDIFF — brotli demoted, treat as uncompressed
+        21 | 22 => ALG_NONE,             // ZERO / DISCARD (OP_ZERO / OP_DISCARD)
         _ => ALG_NONE,
     }
 }
@@ -1581,24 +1591,25 @@ pub fn detect_compression(operation_type: u32) -> &'static str {
 /// Matches Python compression.py operation_type_for_algorithm().
 pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
     if is_alg(algorithm, ALG_NONE) {
-        return 0; // REPLACE
+        return OP_REPLACE; // REPLACE
     }
     if is_alg(algorithm, ALG_BZIP2) {
-        return 12; // REPLACE_BZ
+        return OP_REPLACE_BZ; // REPLACE_BZ
     }
     if is_alg(algorithm, ALG_GZIP) {
-        return 14; // PUIGZIP
+        return OP_PUIGZIP; // PUIGZIP
     }
     if is_alg(algorithm, ALG_XZ) {
-        return 8; // REPLACE_XZ
+        return OP_REPLACE_XZ; // REPLACE_XZ
     }
+    // DEMOTED: if is_alg(algorithm, ALG_BROTLI) { return OP_REPLACE_BROT; } — brotli removed from APK build
     if is_alg(algorithm, ALG_LZ4) {
-        return 0; // LZ4 has no AOSP operation type; use REPLACE (0) as fallback
+        return OP_REPLACE; // LZ4 has no AOSP operation type; use REPLACE as fallback
     }
     if is_alg(algorithm, ALG_ZSTD) {
-        return 0; // ZSTD has no AOSP operation type; use REPLACE (0) as fallback
+        return OP_REPLACE; // ZSTD has no AOSP operation type; use REPLACE as fallback
     }
-    0
+    OP_REPLACE
 }
 
 // ---------------------------------------------------------------------------
@@ -1829,18 +1840,19 @@ mod tests {
 
     #[test]
     fn test_operation_type_mapping() {
-        assert_eq!(detect_compression(0), ALG_NONE); // REPLACE
-        assert_eq!(detect_compression(8), ALG_XZ); // REPLACE_XZ
-        assert_eq!(detect_compression(12), ALG_BZIP2); // REPLACE_BZ
-        assert_eq!(detect_compression(13), ALG_NONE); // REPLACE_BROT (brotli demoted)
-        assert_eq!(detect_compression(14), ALG_GZIP); // PUIGZIP
-        assert_eq!(detect_compression(23), ALG_NONE); // BROTLI_BSDIFF (brotli demoted)
-        assert_eq!(detect_compression(21), ALG_NONE); // ZERO
+        assert_eq!(detect_compression(OP_REPLACE), ALG_NONE); // REPLACE
+        assert_eq!(detect_compression(OP_REPLACE_XZ), ALG_XZ); // REPLACE_XZ
+        assert_eq!(detect_compression(OP_REPLACE_BZ), ALG_BZIP2); // REPLACE_BZ
+        assert_eq!(detect_compression(OP_REPLACE_BROT), ALG_NONE); // REPLACE_BROT (brotli demoted)
+        assert_eq!(detect_compression(OP_PUIGZIP), ALG_GZIP); // PUIGZIP
+        assert_eq!(detect_compression(OP_BROTLI_BSDIFF), ALG_NONE); // BROTLI_BSDIFF (brotli demoted)
+        assert_eq!(detect_compression(21), ALG_NONE); // ZERO (OP_ZERO)
 
-        assert_eq!(operation_type_for_algorithm("none"), 0);   // REPLACE
-        assert_eq!(operation_type_for_algorithm("bzip2"), 12); // REPLACE_BZ
-        assert_eq!(operation_type_for_algorithm("xz"), 8);     // REPLACE_XZ
-        assert_eq!(operation_type_for_algorithm("gzip"), 14); // PUIGZIP
+        assert_eq!(operation_type_for_algorithm("none"), OP_REPLACE);   // REPLACE
+        assert_eq!(operation_type_for_algorithm("bzip2"), OP_REPLACE_BZ); // REPLACE_BZ
+        assert_eq!(operation_type_for_algorithm("xz"), OP_REPLACE_XZ);     // REPLACE_XZ
+        assert_eq!(operation_type_for_algorithm("gzip"), OP_PUIGZIP); // PUIGZIP
+        // DEMOTED: assert_eq!(operation_type_for_algorithm("brotli"), OP_REPLACE_BROT); // REPLACE_BROT (brotli demoted → returns OP_REPLACE)
     }
 
     #[test]

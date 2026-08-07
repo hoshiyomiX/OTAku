@@ -11,17 +11,29 @@ use prost::Message;
 //  AOSP InstallOperation type enum
 // ---------------------------------------------------------------------------
 
+/// REPLACE — raw data replacement (no compression).
 pub const OP_REPLACE: u32 = 0;
+/// MOVE — block-level move within the same partition.
 pub const OP_MOVE: u32 = 1;
+/// BSDIFF — bsdiff patch against source partition.
 pub const OP_BSDIFF: u32 = 2;
+/// SOURCE_COPY — block-level copy from source partition.
 pub const OP_SOURCE_COPY: u32 = 3;
+/// SOURCE_BSDIFF — bsdiff patch using source extents.
 pub const OP_SOURCE_BSDIFF: u32 = 4;
+/// REPLACE_XZ — XZ-compressed replacement data.
 pub const OP_REPLACE_XZ: u32 = 8;
+/// REPLACE_BROT — Brotli-compressed replacement (DEMOTED: brotli removed from APK build).
 pub const OP_REPLACE_BROT: u32 = 13;
+/// REPLACE_BZ — Bzip2-compressed replacement data.
 pub const OP_REPLACE_BZ: u32 = 12;
+/// PUIGZIP — Gzip-compressed replacement data (AOSP name for gzip operations).
 pub const OP_PUIGZIP: u32 = 14;
+/// ZERO — zero-fill the destination extents.
 pub const OP_ZERO: u32 = 21;
+/// DISCARD — discard the destination extents (no data needed).
 pub const OP_DISCARD: u32 = 22;
+/// BROTLI_BSDIFF — Brotli-compressed bsdiff (DEMOTED: brotli removed from APK build).
 pub const OP_BROTLI_BSDIFF: u32 = 23;
 
 pub const OP_TYPE_NAMES: &[(u32, &str)] = &[
