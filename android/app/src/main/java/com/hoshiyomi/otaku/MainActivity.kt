@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.DocumentsContract
 import android.provider.Settings
@@ -2672,6 +2673,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        cacheLogViews()  // Cache log views for efficient appendLogLineUI
         activityRef = WeakReference(this)
         // Restore persisted log text on Activity recreation
         // Always restore from the companion buffer to ensure logs survive
@@ -2946,33 +2948,55 @@ class MainActivity : AppCompatActivity() {
     //  Log Level System
     // ═══════════════════════════════════════════════════════════════
 
-    enum class LogLevel(val tag: String, val colorRes: Int) {
-        DEBUG("DEBUG", R.color.log_debug),
-        INFO("INFO", R.color.log_info),
-        WARN("WARN", R.color.log_warning),
-        ERROR("ERR ", R.color.log_error),
-        SUCCESS("OK  ", R.color.log_success),
-        PLAIN("", 0),
+    enum class LogLevel(val tag: String, val colorRes: Int, val priority: Int) {
+        DEBUG("DBG ", R.color.log_debug,    android.util.Log.VERBOSE),
+        INFO("INFO", R.color.log_info,     android.util.Log.INFO),
+        WARN("WARN", R.color.log_warning,  android.util.Log.WARN),
+        ERROR("ERR ", R.color.log_error,   android.util.Log.ERROR),
+        SUCCESS("OK  ", R.color.log_success, android.util.Log.INFO),
+        PLAIN("", 0, android.util.Log.DEBUG),
     }
+
+    /** Cached timestamp formatter — avoids allocating SimpleDateFormat per log line. */
+    private val logTimeFormat = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+
+    /** Cached log TextView — avoids findViewById per log line. */
+    private var cachedLogView: android.widget.TextView? = null
+    /** Cached log ScrollView — avoids findViewById per scroll. */
+    private var cachedScrollView: android.widget.ScrollView? = null
+    /** Last scroll-to-bottom timestamp — throttle to avoid jank during rapid builds. */
+    private var lastScrollTime: Long = 0L
+
+    /** Resolve and cache log view references. Call once in onResume or after layout. */
+    private fun cacheLogViews() {
+        cachedLogView = findViewById(R.id.textViewLog)
+        cachedScrollView = findViewById(R.id.scrollViewLog)
+    }
+
+    // Convenience log methods — shorter call sites, Logcat alongside UI
+    private fun logInfo(text: String)    = showLog(text, LogLevel.INFO)
+    private fun logWarn(text: String)    = showLog(text, LogLevel.WARN)
+    private fun logError(text: String)   = showLog(text, LogLevel.ERROR)
+    private fun logSuccess(text: String) = showLog(text, LogLevel.SUCCESS)
+    private fun logDebug(text: String)   = showLog(text, LogLevel.DEBUG)
 
     /**
      * UI-only log append — does NOT persist to savedLogText.
      * Caller must persist separately (via savedLogText.append or showLog).
      * Must be called on the UI thread (wrap in runOnUiThread).
      *
-     * Used by build callbacks (onOutputLine, onProgress) to decouple
-     * persistence (always runs) from UI update (only if Activity alive).
-     * Fix K1+K3: previously callbacks called showLog() which is gated by
-     * activityRef, losing both persist AND UI when app was backgrounded.
+     * Optimizations over the original implementation:
+     *   - Cached SimpleDateFormat (companion val) instead of per-call allocation
+     *   - Cached TextView/ScrollView instead of per-call findViewById
+     *   - Throttled auto-scroll (every ~100ms) to avoid jank during rapid builds
      */
     private fun appendLogLineUI(line: String, level: LogLevel = LogLevel.PLAIN) {
-        val textView = findViewById<android.widget.TextView>(R.id.textViewLog) ?: return
+        val textView = cachedLogView ?: return
 
         if (level == LogLevel.PLAIN) {
             textView.append(line)
         } else {
-            val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-            val timestamp = sdf.format(java.util.Date())
+            val timestamp = logTimeFormat.format(java.util.Date())
             val prefix = "[$timestamp] [${level.tag}] "
             val colored = SpannableString("$prefix$line")
             try {
@@ -2984,13 +3008,18 @@ class MainActivity : AppCompatActivity() {
             textView.append(colored)
         }
 
-        // Scroll to bottom WITHOUT triggering parent NestedScrollView
-        val scrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
-        scrollView?.post {
-            val child = scrollView.getChildAt(0)
-            if (child != null) {
-                val target = child.bottom - scrollView.height
-                scrollView.smoothScrollTo(0, if (target > 0) target else 0)
+        // Throttled scroll-to-bottom — only scroll every 100ms to avoid jank
+        // during rapid build output (e.g. compression progress at 500ms intervals)
+        val now = System.currentTimeMillis()
+        if (now - lastScrollTime >= 100L) {
+            lastScrollTime = now
+            val scrollView = cachedScrollView ?: return
+            scrollView.post {
+                val child = scrollView.getChildAt(0)
+                if (child != null) {
+                    val target = child.bottom - scrollView.height
+                    scrollView.smoothScrollTo(0, if (target > 0) target else 0)
+                }
             }
         }
     }
@@ -3000,8 +3029,21 @@ class MainActivity : AppCompatActivity() {
         // Persist to companion object (survives Activity recreation)
         appendToSavedLog(line)
 
-        runOnUiThread {
+        // Mirror to Logcat for diagnostics (visible in `adb logcat -s OTAku`)
+        when (level) {
+            LogLevel.ERROR   -> Log.e("OTAku", text)
+            LogLevel.WARN    -> Log.w("OTAku", text)
+            LogLevel.INFO    -> Log.i("OTAku", text)
+            LogLevel.DEBUG   -> Log.d("OTAku", text)
+            LogLevel.SUCCESS -> Log.i("OTAku", "\u2713 $text")
+            LogLevel.PLAIN   -> Log.d("OTAku", text)
+        }
+
+        // Skip handler posting if already on UI thread
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             appendLogLineUI(line, level)
+        } else {
+            runOnUiThread { appendLogLineUI(line, level) }
         }
     }
 
