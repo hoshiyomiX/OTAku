@@ -206,158 +206,28 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 //  EXTRACT — partition extraction
 // ---------------------------------------------------------------------------
 
-/// Extract, detect compression, and decompress a partition image.
-///
-/// This is the primary extraction method — reads each operation's data,
-/// detects compression from the operation type and magic bytes, and
-/// decompresses to produce the final partition image.
-///
-/// **OOM WARNING**: This function materializes the entire decompressed
-/// partition image in RAM as a `Vec<u8>`. For large dynamic partitions
-/// (system: 2-5GB, vendor: 1-2GB, product: 1-3GB), this can exceed
-/// Android's 256-512MB per-app heap limit and crash the process.
-///
-/// For large partitions, prefer `extract_and_decompress_partition_to_writer`
-/// which streams decompressed chunks to a file, using only ~8MB RAM.
-/// Deprecated since 0.4.0 (OOM-unsafe). Use extract_and_decompress_partition_to_writer instead.
-#[cfg(test)]
-#[deprecated(
-    since = "0.4.0",
-    note = "OOM-unsafe: materializes entire partition in RAM. Use extract_and_decompress_partition_to_writer instead."
-)]
-pub fn extract_and_decompress_partition(
-    payload_info: &PayloadInfo,
-    partition_name: &str,
-) -> Result<Vec<u8>, String> {
-    let partition = find_partition(&payload_info.manifest, partition_name)?;
-    let block_size = payload_info.manifest.block_size;
-
-    let mut file =
-        BufReader::new(File::open(&payload_info.file_path).map_err(|e| format!("{}", e))?);
-    let mut output_chunks: Vec<Vec<u8>> = Vec::new();
-
-    for op in &partition.install_operations {
-        let op_type = op.r#type;
-
-        // ZERO: fill with zeros
-        if op_type == OP_ZERO {
-            // BUG FIX (O-3): Use checked_add to detect overflow in sum of num_blocks.
-            // A corrupt manifest with many large extents could wrap the u64 sum.
-            let total_blocks: u64 = op.dst_extents.iter().try_fold(0u64, |acc, e| acc.checked_add(e.num_blocks))
-                .ok_or_else(|| "Extent num_blocks sum overflow in ZERO operation".to_string())?;
-            // BUG FIX: Validate multiplication doesn't overflow and result
-            // fits in usize. A corrupt manifest with huge num_blocks could
-            // cause overflow → panic, or produce an enormous allocation → OOM.
-            let zero_bytes = total_blocks.checked_mul(block_size)
-                .ok_or_else(|| format!("ZERO operation overflow: {} blocks * {} block_size", total_blocks, block_size))?;
-            if zero_bytes > isize::MAX as u64 {
-                return Err(format!("ZERO operation too large: {} bytes exceeds allocation limit", zero_bytes));
-            }
-            output_chunks.push(vec![0u8; zero_bytes as usize]);
-            continue;
-        }
-
-        // DISCARD: no data
-        if op_type == OP_DISCARD {
-            continue;
-        }
-
-        // Read compressed/raw data
-        if op.data_length == 0 {
-            continue;
-        }
-
-        // BUG FIX (NEW-2): Validate data_length before allocating.
-        if op.data_length > MAX_OP_DATA_SIZE {
-            return Err(format!(
-                "Operation data_length {} exceeds {} MB limit — possible corrupt payload",
-                op.data_length, MAX_OP_DATA_SIZE / (1024 * 1024)
-            ));
-        }
-        if payload_info.data_offset + op.data_offset + op.data_length > payload_info.file_size {
-            return Err(format!(
-                "Operation data extends beyond file (offset={}, length={}, file_size={})",
-                op.data_offset, op.data_length, payload_info.file_size
-            ));
-        }
-
-        file.seek(SeekFrom::Start(payload_info.data_offset + op.data_offset))
-            .map_err(|e| format!("Seek error: {}", e))?;
-        let mut compressed_data = vec![0u8; op.data_length as usize];
-        file.read_exact(&mut compressed_data)
-            .map_err(|e| format!("Read error at offset {}: {}", op.data_offset, e))?;
-
-        // BUG FIX (NEW-4): When auto-detection returns ALG_NONE (no magic bytes
-        // matched), decompress() returns Ok(raw_data). If the operation type
-        // indicates compression (REPLACE_XZ, PUIGZIP, etc.), this means the
-        // magic bytes were corrupted and we should use the operation-type hint
-        // instead of silently returning compressed data as-is.
-        let decompressed = {
-            let auto_result = decompress(&compressed_data, "auto");
-            match &auto_result {
-                Ok(data) if data.len() == compressed_data.len() => {
-                    // Auto returned data unchanged — might be wrong detection.
-                    // Try operation-type hint if it indicates compression.
-                    let alg = detect_compression(op_type);
-                    if alg != "none" {
-                        match decompress(&compressed_data, alg) {
-                            Ok(d) => d,
-                            Err(_) => auto_result?,
-                        }
-                    } else {
-                        auto_result?
-                    }
-                }
-                _ => auto_result.unwrap_or_else(|_| {
-                    let alg = detect_compression(op_type);
-                    decompress(&compressed_data, alg).unwrap_or_else(|_| compressed_data.clone())
-                }),
-            }
-        };
-
-        // If dst_extents are specified, pad or truncate to expected size.
-        let mut result = decompressed;
-        if !op.dst_extents.is_empty() {
-            // BUG FIX (F-1): Validate num_blocks * block_size doesn't overflow,
-            // matching the ZERO-path fix. Also guard `as usize` against 32-bit truncation.
-            // BUG FIX (O-3): Use try_fold instead of .sum() to detect overflow in
-            // the sum of individual extent sizes.
-            let expected_size: u64 = op
-                .dst_extents
-                .iter()
-                .map(|e| e.num_blocks.checked_mul(block_size)
-                    .ok_or_else(|| format!("Extent overflow: {} blocks * {} block_size", e.num_blocks, block_size)))
-                .collect::<Result<Vec<u64>, _>>()?
-                .into_iter()
-                .try_fold(0u64, |acc, v| acc.checked_add(v))
-                .ok_or_else(|| "Extent size sum overflow".to_string())?;
-            if expected_size > isize::MAX as u64 {
-                return Err(format!("Expected size too large: {} bytes", expected_size));
-            }
-            if result.len() < expected_size as usize {
-                result.resize(expected_size as usize, 0u8);
-            } else if result.len() > expected_size as usize {
-                result.truncate(expected_size as usize);
-            }
-        }
-
-        output_chunks.push(result);
-    }
-
-    Ok(output_chunks.into_iter().flatten().collect())
-}
+// /// Extract the raw (compressed) data blobs for a partition.
+// ///
+// /// Reads the data blob for each InstallOperation in the partition's
+// /// operation list and returns the concatenation.
+// REMOVED: extract_partition_data() — dead function (zero callers).
+// Superseded by extract_and_decompress_partition_to_writer() for OOM safety.
+//
+// REMOVED: extract_and_decompress_partition() — dead function (zero callers, even in tests).
+// Was OOM-unsafe: materialized entire partition in RAM as Vec<u8>.
+// Replaced by extract_and_decompress_partition_to_writer() which streams
+// decompressed chunks to a writer, using only ~8MB RAM.
+// Deprecated since 0.4.0, gated with #[cfg(test)] since earlier cleanup,
+// but never called even in tests — removed entirely.
 
 /// Extract and decompress a partition image, streaming to a writer.
 ///
-/// This is the OOM-safe variant of `extract_and_decompress_partition`.
 /// Instead of accumulating the entire decompressed image in RAM as a
 /// `Vec<u8>` (which can be 2-5GB for system.img), it writes decompressed
 /// chunks to the provided writer as they are produced.
 ///
 /// # Memory usage
 /// Peak RAM: ~8MB per operation (compressed chunk read + decompression buffer).
-/// Compare: `extract_and_decompress_partition` holds the entire decompressed
-/// image in RAM, which can be 2-5GB for system.img.
 ///
 /// # Returns
 /// Total bytes written to the writer (the decompressed partition size).
