@@ -76,9 +76,11 @@ class MainActivity : AppCompatActivity() {
         private val buildScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
         // Partition image list — moved to companion so it survives Activity recreation
-        // (theme switch via AppCompatDelegate.setDefaultNightMode triggers recreation
-        // since configChanges doesn't include uiMode). Previously this was an instance
-        // member, so switching theme would clear the list and force the user to re-pick.
+        // (theme switch via AppCompatDelegate.setDefaultNightMode). configChanges
+        // includes uiMode, so the Activity is NOT auto-recreated — cycleTheme()
+        // and onConfigurationChanged handle this by calling recreate() explicitly.
+        // Previously this was an instance member, so switching theme would clear
+        // the list and force the user to re-pick.
         @Volatile
         private var imageFiles: MutableList<Pair<String, String>> = mutableListOf() // (name, path)
 
@@ -619,7 +621,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Cycle theme: System -> Light -> Dark -> System */
+    /** Cycle theme: System -> Light -> Dark -> System
+     *
+     * After updating the preference and delegate mode, calls recreate()
+     * instead of invalidateOptionsMenu(). Because configChanges includes
+     * uiMode, AppCompatDelegate.setDefaultNightMode does NOT trigger
+     * automatic Activity recreation — the theme would only update the
+     * delegate internal state but the views would stay in the old mode.
+     * Explicit recreate() forces a full layout pass with the new night
+     * mode. Companion object state (imageFiles, savedLogText, etc.)
+     * survives recreation, so no data is lost.
+     */
     private fun cycleTheme() {
         val current = prefs.getString("pref_theme_mode", "system") ?: "system"
         val next = when (current) {
@@ -629,7 +641,7 @@ class MainActivity : AppCompatActivity() {
         }
         prefs.edit { putString("pref_theme_mode", next) }
         applyTheme()
-        invalidateOptionsMenu()
+        recreate()
     }
 
     /**
@@ -2810,11 +2822,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var lastUiMode: Int = 0  // tracks uiMode for theme-change detection
+
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Handle floating window resize / multi-window mode / theme change
-        // without Activity recreation. This prevents memory spikes from
-        // savedLogText.toString() full copy that would occur on recreate.
+        // Handle floating window resize / multi-window mode without Activity
+        // recreation. Companion object state (imageFiles, savedLogText, etc.)
+        // survives recreation, so the previous concern about memory spikes
+        // from savedLogText.toString() no longer applies — data is in the
+        // companion object, not the instance Bundle.
+
+        // Detect uiMode change (e.g. system dark mode toggle or our own
+        // cycleTheme() call). Because configChanges includes uiMode, the
+        // framework does NOT auto-recreate — we must do it explicitly to
+        // fully apply the new night mode to all views.
+        val newUiMode = newConfig.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        if (lastUiMode != 0 && newUiMode != lastUiMode) {
+            recreate()
+            return  // recreate() handles everything — skip layout patching
+        }
+        lastUiMode = newUiMode
+
         // Re-layout progress bars if a build is in progress.
         if (isBuilding && imageFiles.isNotEmpty()) {
             setupSplitProgressBar(imageFiles.map { it.first })

@@ -40,8 +40,7 @@
             app:subtitle="@string/toolbar_subtitle"
             app:titleTextColor="?attr/colorOnSurface"
             app:subtitleTextColor="?attr/colorOnSurfaceVariant"
-            app:menu="@menu/toolbar_menu"
-            style="@style/Widget.OTAku.Toolbar" />
+                style="@style/Widget.OTAku.Toolbar" />
 
     </com.google.android.material.appbar.AppBarLayout>
 
