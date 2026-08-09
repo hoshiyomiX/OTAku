@@ -958,7 +958,7 @@ class MainActivity : AppCompatActivity() {
         val toggleBtn = findViewById<android.widget.ImageView>(R.id.buttonToggleLog)
         toggleBtn?.contentDescription = "Toggle log panel"  // accessibility
         val logDivider = findViewById<View>(R.id.logDivider)
-        val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
+        val logScrollView = findViewById<androidx.core.widget.NestedScrollView>(R.id.scrollViewLog)
         val parentLayout = logCard?.parent as? android.widget.LinearLayout
 
         // Mini floating logs header — shown ONLY when logCard is collapsed.
@@ -2871,11 +2871,33 @@ class MainActivity : AppCompatActivity() {
         lastUiMode = newUiMode
 
         // Re-layout progress bars if a build is in progress.
+        // IMPL-001 (UI-001 fix): Save progress state before setupSplitProgressBar
+        // because it resets partitionProgress to IntArray(count) (all zeros).
+        // Without this, a config change (e.g. floating window resize) during
+        // an active build would reset all progress bars to 0%, making it
+        // appear as if the build restarted from scratch.
         if (isBuilding && imageFiles.isNotEmpty()) {
+            val savedProgress = partitionProgress.copyOf()
+            val savedIndex = currentPartitionIndex
             setupSplitProgressBar(imageFiles.map { it.first })
+            savedProgress.copyInto(partitionProgress)
+            currentPartitionIndex = savedIndex
+            // Re-render progress bars with restored values
+            val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
+            if (barRow != null) {
+                for (i in 0 until partitionCount) {
+                    val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                    if (bar != null) {
+                        bar.isIndeterminate = false
+                        bar.progress = partitionProgress[i]
+                    }
+                }
+            }
         }
         // Scroll log to bottom (layout may have shifted)
-        val scrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
+        // IMPL-003 (BUG-02 fix): Use NestedScrollView type instead of ScrollView
+        val scrollView = findViewById<androidx.core.widget.NestedScrollView>(R.id.scrollViewLog)
         scrollView?.post {
             val child = scrollView.getChildAt(0)
             if (child != null) {
@@ -3026,8 +3048,8 @@ class MainActivity : AppCompatActivity() {
 
     /** Cached log TextView — avoids findViewById per log line. */
     private var cachedLogView: android.widget.TextView? = null
-    /** Cached log ScrollView — avoids findViewById per scroll. */
-    private var cachedScrollView: android.widget.ScrollView? = null
+    /** Cached log NestedScrollView — avoids findViewById per scroll. */
+    private var cachedScrollView: androidx.core.widget.NestedScrollView? = null
     /** Last scroll-to-bottom timestamp — throttle to avoid jank during rapid builds. */
     private var lastScrollTime: Long = 0L
 

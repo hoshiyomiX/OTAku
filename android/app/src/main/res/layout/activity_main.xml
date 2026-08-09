@@ -14,7 +14,7 @@
     │     Level / Output                      │
     │   [BUILD OTA NOW] + ProgressBar         │
     │   Log Card (below Build button)         │
-    │     Header + Copy/Clear + ScrollView    │
+    │     Header + Copy/Clear + NestedScrollView │
     │ ↓ 88dp bottom padding (FAB clearance)  │
     └─────────────────────────────────────────┘
 -->
@@ -661,7 +661,12 @@
                 <!-- Standalone scrollable log — visibility toggled by header click.
                      When collapsed (GONE), the log card shrinks to just the header bar,
                      giving the settings NestedScrollView more space. -->
-                <ScrollView
+                <!-- IMPL-002 (BUG-02 fix): Use NestedScrollView instead of plain
+                     ScrollView for proper nested scrolling coordination with the
+                     settings NestedScrollView above. Without this, scrolling the
+                     log panel and settings panel simultaneously can cause jitter
+                     or missed scroll events on the outer layout. -->
+                <androidx.core.widget.NestedScrollView
                     android:id="@+id/scrollViewLog"
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
@@ -669,7 +674,6 @@
                     android:fillViewport="true"
                     android:scrollbars="vertical"
                     android:fadeScrollbars="true"
-                    
                     android:scrollbarSize="4dp">
 
                     <TextView
@@ -684,7 +688,7 @@
                         android:typeface="monospace"
                         android:textIsSelectable="true" />
 
-                </ScrollView>
+                </androidx.core.widget.NestedScrollView>
 
             </LinearLayout>
 
