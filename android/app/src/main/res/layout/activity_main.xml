@@ -64,7 +64,7 @@
             android:fillViewport="true"
             android:scrollbars="vertical"
             android:fadeScrollbars="true"
-            android:scrollbarThumbVertical="@android:color/darker_gray"
+            
             android:scrollbarSize="4dp">
 
             <LinearLayout
@@ -669,7 +669,7 @@
                     android:fillViewport="true"
                     android:scrollbars="vertical"
                     android:fadeScrollbars="true"
-                    android:scrollbarThumbVertical="@android:color/darker_gray"
+                    
                     android:scrollbarSize="4dp">
 
                     <TextView

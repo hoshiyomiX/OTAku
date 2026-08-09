@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
 
     private var selectedCompression: String = "gzip"
     private var selectedCompressionLevel: Int = 0  // 0 = default (best)
+    @Volatile
     private var isExecuting = false
     companion object {
         // Application-scoped coroutine scope for long-running build operations.
@@ -797,9 +798,20 @@ class MainActivity : AppCompatActivity() {
         ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
         spinner.adapter = adapter
 
+        // Restore persisted compression selection (survives Activity recreation from
+        // theme switch, config change, etc). Without this, recreate() resets the
+        // spinner to position 0 and selectedCompression to the default "gzip".
+        val savedCompression = prefs.getString("pref_compression", "gzip") ?: "gzip"
+        val savedPosition = OTABridge.COMPRESSION_ALGORITHMS.indexOf(savedCompression)
+        if (savedPosition >= 0) {
+            spinner.setSelection(savedPosition)
+            selectedCompression = savedCompression
+        }
+
         spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 selectedCompression = OTABridge.COMPRESSION_ALGORITHMS[position]
+                prefs.edit { putString("pref_compression", selectedCompression) }
                 updateCompressionLevelSpinner()
                 updateOutputPreview()
             }
@@ -837,6 +849,7 @@ class MainActivity : AppCompatActivity() {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val items = getCurrentLevelItems()
                 selectedCompressionLevel = if (position < items.size) items[position] else 0
+                prefs.edit { putInt("pref_compression_level", selectedCompressionLevel) }
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
@@ -943,6 +956,7 @@ class MainActivity : AppCompatActivity() {
         val logCard = findViewById<com.google.android.material.card.MaterialCardView>(R.id.logCard)
         val logHeader = findViewById<View>(R.id.logHeaderBar)
         val toggleBtn = findViewById<android.widget.ImageView>(R.id.buttonToggleLog)
+        toggleBtn?.contentDescription = "Toggle log panel"  // accessibility
         val logDivider = findViewById<View>(R.id.logDivider)
         val logScrollView = findViewById<android.widget.ScrollView>(R.id.scrollViewLog)
         val parentLayout = logCard?.parent as? android.widget.LinearLayout
@@ -2589,6 +2603,7 @@ class MainActivity : AppCompatActivity() {
                     // "Type mismatch: inferred type is Float but Int was expected")
                     iconSize = dpToPx(18)
                     text = null  // icon-only button
+                    contentDescription = "Remove $name partition"  // accessibility
                     insetTop = 0
                     insetBottom = 0
                     minimumWidth = 0
@@ -2981,6 +2996,15 @@ class MainActivity : AppCompatActivity() {
             }
             findViewById<View>(R.id.buttonAddImages)?.isEnabled = !executing
             findViewById<View>(R.id.buttonRemoveAll)?.isEnabled = !executing
+            // Disable all input controls during build to prevent user from
+            // changing settings that have no effect on the running build
+            // but would mislead them into thinking they do.
+            findViewById<View>(R.id.buttonBrowseOutput)?.isEnabled = !executing
+            findViewById<android.widget.Spinner>(R.id.spinnerCompression)?.isEnabled = !executing
+            findViewById<android.widget.Spinner>(R.id.spinnerCompressionLevel)?.isEnabled = !executing
+            findViewById<View>(R.id.editTextDevice)?.isEnabled = !executing
+            findViewById<View>(R.id.buttonAutoDetect)?.isEnabled = !executing
+            findViewById<View>(R.id.editTextCustomFilename)?.isEnabled = !executing
         }
     }
 
