@@ -397,11 +397,22 @@ class MainActivity : AppCompatActivity() {
         //   - Theme.OTAku (default teal, with Material You overrides on API 31+)
         //   - Theme.OTAku.Suisei (Suisei Blue fallback on API 26-30 or user-disabled)
         // applyTheme() (light/dark/system night mode) must run BEFORE setTheme()
-        // because AppCompatDelegate.setDefaultNightMode triggers Activity recreation.
+        // and setContentView(). Because configChanges includes uiMode,
+        // AppCompatDelegate.setDefaultNightMode does NOT trigger automatic
+        // Activity recreation — the delegate updates internal state only.
+        // Explicit recreate() in cycleTheme() / onConfigurationChanged()
+        // handles the full theme switch.
         applyTheme()
         applyDynamicTheme()
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Initialize lastUiMode from the current configuration so that the FIRST
+        // system dark mode change is detected by onConfigurationChanged().
+        // Without this, lastUiMode starts at 0 and the condition
+        // "lastUiMode != 0" always fails on the first config change,
+        // causing the first system dark/light toggle to be silently missed.
+        lastUiMode = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
 
         inputDir = File(filesDir, "input").also { it.mkdirs() }
         outputDir = File("/storage/emulated/0/OTAku").also { it.mkdirs() }
