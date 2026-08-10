@@ -20,4 +20,15 @@
     <color name="log_background">#1E1E1E</color>
     <color name="log_text">#D4D4D4</color>
     <color name="log_divider">#333333</color>
+
+    <!-- IMPL-006 (theme toggle fix): Log level colors for dark mode.
+         Light mode uses muted tones (#80CBC4 teal for info, #9E9E9E gray
+         for debug) which have insufficient contrast on the dark #1E1E1E
+         log background. Dark mode overrides use brighter, more saturated
+         versions that maintain the same hue but pass WCAG AA contrast
+         (≥4.5:1 for normal text on dark bg).
+         Error/Success/Warning colors (#F44336, #4CAF50, #FF9800) already
+         have excellent contrast on dark bg and don't need overrides. -->
+    <color name="log_info">#A7E8DB</color>     <!-- bright teal — was #80CBC4 (too muted on dark) -->
+    <color name="log_debug">#BDBDBD</color>    <!-- light gray — was #9E9E9E (too dark on dark) -->
 </resources>

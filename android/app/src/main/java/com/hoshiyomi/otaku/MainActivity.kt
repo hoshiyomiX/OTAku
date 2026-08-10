@@ -184,6 +184,14 @@ class MainActivity : AppCompatActivity() {
         // Only log once per continuous build session, not on every Activity recreation.
         @Volatile private var resumedWhileBuildingLogged = false
 
+        // IMPL-004 (theme toggle fix): Flag to prevent double recreate().
+        // When cycleTheme() calls applyTheme() + recreate(), the delegate may
+        // also trigger onConfigurationChanged() → recreate(). This flag tells
+        // onConfigurationChanged() to skip its own recreate() because
+        // cycleTheme() already handled it. Cleared in onCreate() of the new
+        // Activity instance as a safety net.
+        @Volatile var themeSwitchInProgress = false
+
         /** Show ongoing progress notification with determinate progress bar. */
         fun showProgressNotification(message: String, percent: Int) {
             val ctx = appContext ?: return
@@ -414,6 +422,12 @@ class MainActivity : AppCompatActivity() {
         // "lastUiMode != 0" always fails on the first config change,
         // causing the first system dark/light toggle to be silently missed.
         lastUiMode = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        // IMPL-004 safety net: clear themeSwitchInProgress in onCreate() of
+        // the new Activity instance. If cycleTheme() set the flag but
+        // onConfigurationChanged() never ran to clear it (e.g., the config
+        // change was batched with the recreation), this ensures the flag
+        // doesn't stay true and suppress a future legitimate recreate().
+        themeSwitchInProgress = false
 
         inputDir = File(filesDir, "input").also { it.mkdirs() }
         outputDir = File("/storage/emulated/0/OTAku").also { it.mkdirs() }
@@ -637,14 +651,28 @@ class MainActivity : AppCompatActivity() {
 
     /** Cycle theme: System -> Light -> Dark -> System
      *
-     * After updating the preference and delegate mode, calls recreate()
-     * instead of invalidateOptionsMenu(). Because configChanges includes
-     * uiMode, AppCompatDelegate.setDefaultNightMode does NOT trigger
-     * automatic Activity recreation — the theme would only update the
-     * delegate internal state but the views would stay in the old mode.
-     * Explicit recreate() forces a full layout pass with the new night
-     * mode. Companion object state (imageFiles, savedLogText, etc.)
-     * survives recreation, so no data is lost.
+     * IMPL-004/IMPL-005 (theme toggle fix): Sets themeSwitchInProgress
+     * flag before applyTheme() + recreate() to prevent double recreation.
+     *
+     * Without the flag, the sequence is:
+     *   1. applyTheme() → setDefaultNightMode() → may trigger onConfigurationChanged()
+     *   2. onConfigurationChanged() detects uiMode change → calls recreate()
+     *   3. cycleTheme() also calls recreate()
+     *   = double recreate → visual flicker, broken colors
+     *
+     * With the flag:
+     *   1. themeSwitchInProgress = true
+     *   2. applyTheme() → setDefaultNightMode()
+     *   3. onConfigurationChanged() sees flag → skips recreate()
+     *   4. cycleTheme() calls recreate() — single, clean recreation
+     *   5. onCreate() of new instance clears flag
+     *
+     * Because configChanges includes uiMode, AppCompatDelegate.setDefaultNightMode
+     * does NOT trigger automatic Activity recreation — the theme would only update
+     * the delegate internal state but the views would stay in the old mode.
+     * Explicit recreate() forces a full layout pass with the new night mode.
+     * Companion object state (imageFiles, savedLogText, etc.) survives recreation,
+     * so no data is lost.
      */
     private fun cycleTheme() {
         val current = prefs.getString("pref_theme_mode", "system") ?: "system"
@@ -654,6 +682,7 @@ class MainActivity : AppCompatActivity() {
             else -> "system"
         }
         prefs.edit { putString("pref_theme_mode", next) }
+        themeSwitchInProgress = true
         applyTheme()
         recreate()
     }
@@ -2884,12 +2913,35 @@ class MainActivity : AppCompatActivity() {
         // from savedLogText.toString() no longer applies — data is in the
         // companion object, not the instance Bundle.
 
-        // Detect uiMode change (e.g. system dark mode toggle or our own
-        // cycleTheme() call). Because configChanges includes uiMode, the
-        // framework does NOT auto-recreate — we must do it explicitly to
-        // fully apply the new night mode to all views.
+        // IMPL-004/IMPL-005 (theme toggle fix): Detect uiMode change with
+        // double-recreate prevention and explicit-override awareness.
+        //
+        // Three cases:
+        //   1. cycleTheme() just called applyTheme()+recreate() — our flag
+        //      is set → skip this onConfigurationChanged's recreate() to
+        //      avoid double recreation (visual flicker, broken colors).
+        //   2. System dark mode changed AND app follows system ("system"
+        //      mode) → recreate() needed to apply the new mode.
+        //   3. System dark mode changed BUT app has explicit light/dark
+        //      override → skip recreate(). The delegate's
+        //      setDefaultNightMode() override is authoritative; the
+        //      system uiMode change doesn't affect visual output, and
+        //      an unnecessary recreate() just causes flicker.
         val newUiMode = newConfig.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
         if (lastUiMode != 0 && newUiMode != lastUiMode) {
+            if (themeSwitchInProgress) {
+                // Case 1: cycleTheme() already called recreate() — skip
+                themeSwitchInProgress = false
+                lastUiMode = newUiMode
+                return
+            }
+            val themeMode = prefs.getString("pref_theme_mode", "system") ?: "system"
+            if (themeMode != "system") {
+                // Case 3: explicit override — system change doesn't affect us
+                lastUiMode = newUiMode
+                return
+            }
+            // Case 2: system mode change while following system → recreate
             recreate()
             return  // recreate() handles everything — skip layout patching
         }

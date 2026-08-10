@@ -93,7 +93,11 @@
     <!-- ═══════════════════════════════════════════════════════════════ -->
 
     <!-- Chip backgrounds -->
+    <!-- IMPL-007: Deprecated — chip background now uses @color/chip_background
+         ColorStateList (colorSurfaceVariant/colorPrimaryContainer) for theme-awareness.
+         Kept for reference; safe to remove in next major version. -->
     <color name="chip_selected_bg">#E0F2F1</color>
+    <!-- IMPL-007: Deprecated — same reason as chip_selected_bg above. -->
     <color name="chip_default_bg">#F5F5F5</color>
 
     <!-- Log output — light theme: light bg + dark text.
@@ -124,6 +128,9 @@
     <color name="status_error">#F44336</color>
 
     <!-- Card colors -->
+    <!-- Card border — unused in current code. When needed, prefer
+         ?attr/colorOutlineVariant for theme-awareness (teal/Suisei/dark).
+         Kept for reference; safe to remove. -->
     <color name="card_border">#E0E0E0</color>
 
     <!-- Launcher icon background -->

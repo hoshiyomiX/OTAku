@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- IMPL-007 (theme toggle fix): Chip background ColorStateList.
+     Replaces hardcoded @color/chip_default_bg and @color/chip_selected_bg
+     which were teal-specific and didn't adapt to the Suisei Blue theme.
+
+     Default state: colorSurfaceVariant (teal-tinted gray in teal theme,
+     blue-tinted gray in Suisei theme, auto dark/light).
+     Checked state: colorPrimaryContainer (bright teal in teal theme,
+     bright blue in Suisei theme, auto dark/light).
+
+     Both attributes resolve via the active theme (Theme.OTAku or
+     Theme.OTAku.Suisei) and night mode qualifiers. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_checked="true" android:color="?attr/colorPrimaryContainer" />
+    <item android:color="?attr/colorSurfaceVariant" />
+</selector>

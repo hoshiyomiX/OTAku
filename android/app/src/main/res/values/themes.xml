@@ -200,8 +200,14 @@
     </style>
 
     <!-- Chip style -->
+    <!-- IMPL-007 (theme toggle fix): Chip style uses theme attributes for
+         background color so chips adapt to both teal and Suisei Blue themes.
+         Previous: hardcoded @color/chip_default_bg (always gray, didn't
+         match Suisei Blue palette). Now: @color/chip_background which is
+         a ColorStateList resolving colorSurfaceVariant (default) and
+         colorPrimaryContainer (checked) per active theme. -->
     <style name="Widget.OTAku.Chip" parent="Widget.Material3.Chip.Filter">
-        <item name="chipBackgroundColor">@color/chip_default_bg</item>
+        <item name="chipBackgroundColor">@color/chip_background</item>
         <item name="chipStrokeColor">?attr/colorOutlineVariant</item>
         <item name="chipStrokeWidth">1dp</item>
         <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
