@@ -466,6 +466,7 @@ class MainActivity : AppCompatActivity() {
         setupOutputField()
         setupCustomFilenameField()
         setupThemeToggle()
+        setupBackPressedHandler()  // BUG-H07: OnBackPressedDispatcher
         updateOutputPreview()  // Show default filename preview immediately
         updateBuildButtonState()  // Disable Build button until partitions are added
 
@@ -942,7 +943,8 @@ class MainActivity : AppCompatActivity() {
             val initBanner = buildInitBanner()
             savedLogText.setLength(0)
             appendToSavedLog(initBanner)
-            findViewById<android.widget.TextView>(R.id.textViewLog).text = initBanner
+            // BUG-H02 fix: Null-safe access to textViewLog
+            findViewById<android.widget.TextView>(R.id.textViewLog)?.text = initBanner
         }
 
         // ── Log panel expand/collapse — SystemUI-style pull/push ──
@@ -1807,8 +1809,9 @@ class MainActivity : AppCompatActivity() {
         outputDirPath = resolvedPath
         prefs.edit { putString("output_dir", resolvedPath) }
         runOnUiThread {
+            // BUG-H02 fix: Use null-safe operator to prevent NPE if view not found
             findViewById<android.widget.EditText>(R.id.editTextOutput)
-                .setText(resolvedPath)
+                ?.setText(resolvedPath)
             showLog("Output directory: $resolvedPath")
             updateOutputPreview()
         }
@@ -2148,17 +2151,33 @@ class MainActivity : AppCompatActivity() {
     //  Execution — Build to OTA ZIP
     // ═══════════════════════════════════════════════════════════════
 
-    override fun onBackPressed() {
-        if (isBuilding) {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Build in Progress")
-                .setMessage("The build operation is running in the background " +
-                    "and will continue even if you leave the app.")
-                .setPositiveButton("Stay", null)
-                .show()
-        } else {
-            super.onBackPressed()
-        }
+    // BUG-H07 fix: Use OnBackPressedDispatcher instead of deprecated onBackPressed().
+    // onBackPressed() is deprecated since API 33 (Android 13) — on API 33+ devices
+    // it may not be called, so the "Build in Progress" dialog protection would be
+    // silently bypassed, allowing the user to back out during a build without warning.
+    // OnBackPressedDispatcher works on all API levels and supports predictive back.
+    private var backPressedCallback: androidx.activity.OnBackPressedCallback? = null
+
+    private fun setupBackPressedHandler() {
+        backPressedCallback?.remove()
+        backPressedCallback = onBackPressedDispatcher.addCallback(this,
+            object : androidx.activity.OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (isBuilding) {
+                        MaterialAlertDialogBuilder(this@MainActivity)
+                            .setTitle("Build in Progress")
+                            .setMessage("The build operation is running in the background " +
+                                "and will continue even if you leave the app.")
+                            .setPositiveButton("Stay", null)
+                            .show()
+                    } else {
+                        // Not building — allow back navigation
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                    }
+                }
+            }
+        )
     }
 
     private fun onBuildClicked() {
@@ -2324,7 +2343,12 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 try {
-                    // Read ROM name and Maker from UI inputs
+                    // BUG-H01 fix: Read ROM name and Maker on the UI thread BEFORE
+                    // passing to OTABridge.dd(). The outer buildScope runs on
+                    // Dispatchers.Default — accessing View properties from a non-UI
+                    // thread can throw CalledFromWrongThreadException or return stale
+                    // values. These values are captured here while still on Main
+                    // (the withContext(Dispatchers.Main) block wraps the entire build).
                     val romName = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextRomName)?.text?.toString()?.trim() ?: ""
                     val maker = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextMaker)?.text?.toString()?.trim() ?: ""
 
@@ -2546,7 +2570,8 @@ class MainActivity : AppCompatActivity() {
                 val row = android.widget.LinearLayout(this).apply {
                     orientation = android.widget.LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(8, 4, 4, 4)
+                    // BUG-M08 fix: Use dpToPx for density-independent padding
+                    setPadding(dpToPx(8), dpToPx(4), dpToPx(4), dpToPx(4))
                 }
 
                 val label = android.widget.TextView(this).apply {
@@ -3043,8 +3068,10 @@ class MainActivity : AppCompatActivity() {
         PLAIN("", 0, android.util.Log.DEBUG),
     }
 
-    /** Cached timestamp formatter — avoids allocating SimpleDateFormat per log line. */
-    private val logTimeFormat = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+    /** BUG-M15 fix: Use DateTimeFormatter instead of SimpleDateFormat.
+     * SimpleDateFormat is NOT thread-safe — concurrent calls from UI + IO coroutines
+     * can produce corrupted timestamps. DateTimeFormatter is immutable and thread-safe. */
+    private val logTimeFormat = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss", java.util.Locale.US)
 
     /** Cached log TextView — avoids findViewById per log line. */
     private var cachedLogView: android.widget.TextView? = null
@@ -3082,7 +3109,7 @@ class MainActivity : AppCompatActivity() {
         if (level == LogLevel.PLAIN) {
             textView.append(line)
         } else {
-            val timestamp = logTimeFormat.format(java.util.Date())
+            val timestamp = logTimeFormat.format(java.time.LocalTime.now())
             val prefix = "[$timestamp] [${level.tag}] "
             val colored = SpannableString("$prefix$line")
             try {

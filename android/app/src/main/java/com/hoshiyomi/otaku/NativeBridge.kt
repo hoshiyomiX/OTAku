@@ -26,6 +26,7 @@ object NativeBridge {
         private set
 
     /** Error message if native library failed to load. */
+    @Volatile
     var loadError: String? = null
         private set
 
