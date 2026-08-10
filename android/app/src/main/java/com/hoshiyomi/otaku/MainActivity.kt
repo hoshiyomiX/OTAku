@@ -391,14 +391,19 @@ class MainActivity : AppCompatActivity() {
         // at app launch, then transitions smoothly to the main theme.
         val splashScreen = installSplashScreen()
 
-        // Keep splash visible for at least 2 seconds so the icon is visible
-        // before transitioning to the main activity. Without this, the splash
-        // disappears almost instantly on fast devices.
-        var keepSplash = true
-        splashScreen.setKeepOnScreenCondition { keepSplash }
-        lifecycleScope.launch {
-            delay(2000L) // 2 seconds
-            keepSplash = false
+        // IMPL-003 (theme switch speed): Skip splash screen on Activity recreation.
+        // When cycleTheme() calls recreate(), savedInstanceState is non-null.
+        // The splash would add 2 seconds of unnecessary delay — the user just
+        // wants to see the new theme, not stare at the splash again.
+        // On cold start (savedInstanceState == null), show splash for 2 seconds.
+        val isRecreation = savedInstanceState != null
+        if (!isRecreation) {
+            var keepSplash = true
+            splashScreen.setKeepOnScreenCondition { keepSplash }
+            lifecycleScope.launch {
+                delay(2000L) // 2 seconds
+                keepSplash = false
+            }
         }
 
         // Apply theme BEFORE setContentView.
@@ -595,10 +600,18 @@ class MainActivity : AppCompatActivity() {
      *
      * Decision tree:
      *   - API 31+ (Android 12, Material You available) AND user hasn't disabled
-     *     dynamic color → use Theme.OTAku (default teal, which Material You
+     *     dynamic color AND system accent is NOT generic cyan
+     *     → use Theme.OTAku (default teal, which Material You
      *     will override at runtime via DynamicColors.applyToActivityIfAvailable)
      *   - API 26-30 (Material You unavailable) OR user disabled dynamic color
+     *     OR system accent is generic cyan (hue 175-200°, sat>40%, lightness>30%)
      *     → use Theme.OTAku.Suisei (Suisei Blue fallback palette #00B0F0)
+     *
+     * IMPL-002 (cyan detection): Many stock Android devices use a generic cyan
+     * accent (#00BCD4 Material Cyan or similar) as the default Material You
+     * wallpaper color. This looks generic and clashes with OTAku's identity.
+     * When isCyanLike() detects a generic cyan, we fall back to Suisei Blue
+     * instead — preserving the distinctive brand feel.
      *
      * Must be called BEFORE setContentView() so the theme attributes are
      * resolved correctly during view inflation.
@@ -610,22 +623,24 @@ class MainActivity : AppCompatActivity() {
     private fun applyDynamicTheme() {
         val useDynamic = SuiseiColors.shouldUseDynamicTheme(prefs)
         if (useDynamic) {
-            // Use default Theme.OTAku — Material You will override at runtime.
-            setTheme(R.style.Theme_OTAku)
-            // Apply Material You dynamic colors (API 31+ only; no-op below)
-            // DynamicColors is from com.google.android.material:material:1.11+.
-            // Safe to call on all API levels — it checks internally.
-            try {
-                com.google.android.material.color.DynamicColors
-                    .applyToActivityIfAvailable(this)
-            } catch (_: Throwable) {
-                // Defensive: if Material library is older than expected,
-                // fall through silently. Theme.OTAku still works.
+            // Check if the system accent is generic cyan — if so, prefer Suisei Blue.
+            val systemAccent = SuiseiColors.getSystemAccentColor(this)
+            if (!SuiseiColors.isCyanLike(systemAccent)) {
+                // System has a distinctive accent (not generic cyan) — use Material You.
+                setTheme(R.style.Theme_OTAku)
+                try {
+                    com.google.android.material.color.DynamicColors
+                        .applyToActivityIfAvailable(this)
+                } catch (_: Throwable) {
+                    // Defensive: if Material library is older than expected,
+                    // fall through silently. Theme.OTAku still works.
+                }
+                return
             }
-        } else {
-            // Use Suisei Blue fallback palette.
-            setTheme(R.style.Theme_OTAku_Suisei)
+            // System accent is generic cyan — fall through to Suisei Blue.
         }
+        // Use Suisei Blue fallback palette (API <31, dynamic disabled, or cyan accent).
+        setTheme(R.style.Theme_OTAku_Suisei)
     }
 
     override fun onCreateOptionsMenu(menu: android.view.Menu?): Boolean {
@@ -685,6 +700,13 @@ class MainActivity : AppCompatActivity() {
         themeSwitchInProgress = true
         applyTheme()
         recreate()
+        // IMPL-004 (smooth theme transition): Apply a crossfade animation
+        // so the theme switch feels instant rather than a jarring cut.
+        // overridePendingTransition must be called immediately after recreate().
+        // 0 = no exit animation (old activity fades instantly),
+        // android.R.anim.fade_in = new activity fades in smoothly.
+        @Suppress("DEPRECATION")
+        overridePendingTransition(android.R.anim.fade_in, 0)
     }
 
     /**
@@ -2943,6 +2965,8 @@ class MainActivity : AppCompatActivity() {
             }
             // Case 2: system mode change while following system → recreate
             recreate()
+            @Suppress("DEPRECATION")
+            overridePendingTransition(android.R.anim.fade_in, 0)
             return  // recreate() handles everything — skip layout patching
         }
         lastUiMode = newUiMode
