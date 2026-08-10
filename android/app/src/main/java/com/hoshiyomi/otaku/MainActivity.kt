@@ -406,19 +406,37 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Apply theme BEFORE setContentView.
-        // applyDynamicTheme() always uses Theme.OTAku.Suisei (Suisei Blue #00B0F0)
-        // as the base theme. On API 31+, DynamicColors overlays Material You accent
-        // on top. On API 26-30, Suisei Blue is the fallback (no teal/cyan default).
-        // applyTheme() (light/dark/system night mode) must run BEFORE setTheme()
-        // and setContentView(). Because configChanges includes uiMode,
-        // AppCompatDelegate.setDefaultNightMode does NOT trigger automatic
-        // Activity recreation — the delegate updates internal state only.
-        // Explicit recreate() in cycleTheme() / onConfigurationChanged()
-        // handles the full theme switch.
+        // ═══════════════════════════════════════════════════════════
+        // THEME INITIALIZATION ORDER (critical — DO NOT reorder)
+        // ═══════════════════════════════════════════════════════════
+        // 1. applyTheme() BEFORE super.onCreate() — sets the default
+        //    night mode (light/dark/system) via AppCompatDelegate.
+        //    This is a STATIC call that configures the delegate before
+        //    it's created in super.onCreate().
+        // 2. super.onCreate() — creates the AppCompatDelegate, which
+        //    reads the night mode from step 1 and APPLIES it to the
+        //    Activity's Resources. Only AFTER this call does the
+        //    Activity's context reflect the correct night mode.
+        // 3. applyDynamicTheme() AFTER super.onCreate() — sets the
+        //    base theme (Theme.OTAku.Suisei) and applies Material You
+        //    DynamicColors overlay. This MUST happen after super.onCreate()
+        //    because DynamicColors needs the Activity's night mode to
+        //    be finalized to determine the correct overlay variant
+        //    (light vs dark). Before super.onCreate(), the Resources
+        //    may still reflect the PREVIOUS Activity's night mode,
+        //    causing DynamicColors to apply the wrong variant or fail.
+        // 4. setContentView() — inflates views with the correct theme.
+        //
+        // BUGFIX: Previously, applyDynamicTheme() was called BEFORE
+        // super.onCreate(). This caused DynamicColors to see stale
+        // night mode configuration, resulting in:
+        //   - Auto mode (system dark): white background, no accent
+        //   - Light mode: inverted dark-on-white colors
+        //   - Only explicit Dark mode worked correctly
+        // ═══════════════════════════════════════════════════════════
         applyTheme()
-        applyDynamicTheme()
         super.onCreate(savedInstanceState)
+        applyDynamicTheme()
         setContentView(R.layout.activity_main)
 
         // Initialize lastUiMode from the current configuration so that the FIRST
@@ -602,6 +620,16 @@ class MainActivity : AppCompatActivity() {
      * #00B0F0), never the generic teal/cyan Theme.OTAku. This eliminates the
      * "default is still cyan" bug — the app's brand identity is Suisei Blue.
      *
+     * DYNAMICCOLORS-TIMING-FIX: This method MUST be called AFTER super.onCreate()
+     * so the AppCompatDelegate has applied the correct night mode to the Activity's
+     * Resources. DynamicColors.applyToActivityIfAvailable() reads the Activity's
+     * current theme to determine the light/dark variant of the Material You overlay.
+     * If called before super.onCreate(), the Resources may still reflect the
+     * previous Activity's night mode, causing:
+     *   - Wrong overlay variant (light colors in dark mode or vice versa)
+     *   - DynamicColors failing silently (no accent color applied)
+     *   - Partial color inversion (dark-on-white or white-on-dark)
+     *
      * Decision tree:
      *   - API 31+ AND user hasn't disabled dynamic color:
      *     Theme.OTAku.Suisei (Suisei Blue base) + DynamicColors overlay.
@@ -611,18 +639,8 @@ class MainActivity : AppCompatActivity() {
      *   - API 26-30 OR user disabled dynamic color:
      *     Theme.OTAku.Suisei (Suisei Blue palette only, no overlay).
      *
-     * Why Suisei Blue as base instead of teal?
-     *   - Theme.OTAku's teal (#006B5A) palette bleeds through when DynamicColors
-     *     doesn't fully override every color slot (e.g. custom attributes, derived
-     *     colors in some Material3 components). Using Suisei Blue as base ensures
-     *     the fallback is always brand-consistent, never generic teal/cyan.
-     *   - If DynamicColors succeeds, its overlay takes precedence over the base —
-     *     the system accent (cyan, blue, green, purple, etc.) is fully applied.
-     *   - If DynamicColors fails (OEM ROM issue, library version mismatch), the
-     *     user sees Suisei Blue, not generic teal — consistent with the app identity.
-     *
      * Must be called BEFORE setContentView() so theme attributes resolve correctly
-     * during view inflation.
+     * during view inflation, but AFTER super.onCreate() so night mode is finalized.
      */
     private fun applyDynamicTheme() {
         // THEME-DEFAULT-FIX: Always use Suisei Blue as the base theme.
@@ -634,13 +652,20 @@ class MainActivity : AppCompatActivity() {
             // Apply Material You dynamic color overlay on top of the Suisei base.
             // The overlay overrides colorPrimary, colorSecondary, etc. with the
             // system's wallpaper-derived accent — including cyan if that's the
-            // system accent. No restriction (isCyanLike is NOT used to reject).
+            // system accent. No restriction on accent colors.
             try {
-                com.google.android.material.color.DynamicColors
+                val applied = com.google.android.material.color.DynamicColors
                     .applyToActivityIfAvailable(this)
-            } catch (_: Throwable) {
-                // Defensive: if Material library is older than expected,
-                // fall through silently. Suisei Blue base still works.
+                if (!applied) {
+                    android.util.Log.w("OTAku", "DynamicColors.applyToActivityIfAvailable() " +
+                        "returned false — Material You not applied on this device/config")
+                }
+            } catch (e: Throwable) {
+                // Defensive: if Material library is older than expected or the
+                // Activity context isn't properly initialized, fall through
+                // silently. Suisei Blue base still works.
+                android.util.Log.e("OTAku", "DynamicColors.applyToActivityIfAvailable() " +
+                    "threw: ${e.message}")
             }
         }
         // If !useDynamic: Suisei Blue base with no overlay — the default
