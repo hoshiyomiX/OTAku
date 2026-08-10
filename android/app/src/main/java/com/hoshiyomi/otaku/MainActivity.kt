@@ -2160,24 +2160,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupBackPressedHandler() {
         backPressedCallback?.remove()
-        backPressedCallback = onBackPressedDispatcher.addCallback(this,
-            object : androidx.activity.OnBackPressedCallback(true) {
-                override fun handleOnBackPressed() {
-                    if (isBuilding) {
-                        MaterialAlertDialogBuilder(this@MainActivity)
-                            .setTitle("Build in Progress")
-                            .setMessage("The build operation is running in the background " +
-                                "and will continue even if you leave the app.")
-                            .setPositiveButton("Stay", null)
-                            .show()
-                    } else {
-                        // Not building — allow back navigation
-                        isEnabled = false
-                        onBackPressedDispatcher.onBackPressed()
-                    }
+        val callback = object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (isBuilding) {
+                    MaterialAlertDialogBuilder(this@MainActivity)
+                        .setTitle("Build in Progress")
+                        .setMessage("The build operation is running in the background " +
+                            "and will continue even if you leave the app.")
+                        .setPositiveButton("Stay", null)
+                        .show()
+                } else {
+                    // Not building — allow back navigation
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
                 }
             }
-        )
+        }
+        onBackPressedDispatcher.addCallback(this, callback)
+        backPressedCallback = callback
     }
 
     private fun onBuildClicked() {
