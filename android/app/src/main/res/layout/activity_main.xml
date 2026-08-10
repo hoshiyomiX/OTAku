@@ -320,7 +320,8 @@
                                 android:text="@string/button_add_images"
                                 style="Widget.Material3.Button.TonalButton"
                                 app:icon="@android:drawable/ic_input_add"
-                                app:iconGravity="textStart" />
+                                app:iconGravity="textStart"
+                                app:cornerRadius="12dp" />
 
                             <com.google.android.material.button.MaterialButton
                                 android:id="@+id/buttonRemoveAll"
@@ -329,7 +330,8 @@
                                 android:layout_height="wrap_content"
                                 android:text="@string/button_remove_all"
                                 android:visibility="gone"
-                                android:layout_marginStart="8dp" />
+                                android:layout_marginStart="8dp"
+                                app:cornerRadius="12dp" />
 
                         </LinearLayout>
 
@@ -535,7 +537,8 @@
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:text="@string/button_browse"
-                                android:minWidth="80dp" />
+                                android:minWidth="80dp"
+                                app:cornerRadius="12dp" />
 
                         </LinearLayout>
 
@@ -582,7 +585,7 @@
             app:cardElevation="0dp"
             app:strokeWidth="1dp"
             app:strokeColor="?attr/colorOutlineVariant"
-            app:cardBackgroundColor="@android:color/transparent">
+            app:cardBackgroundColor="@color/log_background">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -636,7 +639,8 @@
                         android:text="@string/button_copy_log"
                         android:textSize="12sp"
                         android:minWidth="0dp"
-                        android:paddingHorizontal="8dp" />
+                        android:paddingHorizontal="8dp"
+                        app:cornerRadius="8dp" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonClearLog"
@@ -647,7 +651,8 @@
                         android:textSize="12sp"
                         android:minWidth="0dp"
                         android:layout_marginStart="4dp"
-                        android:paddingHorizontal="8dp" />
+                        android:paddingHorizontal="8dp"
+                        app:cornerRadius="8dp" />
 
                 </LinearLayout>
 
@@ -764,6 +769,7 @@
         android:text="@string/button_repack"
         android:contentDescription="@string/button_repack"
         app:icon="@android:drawable/ic_media_play"
+        app:cornerRadius="16dp"
         android:enabled="false" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
