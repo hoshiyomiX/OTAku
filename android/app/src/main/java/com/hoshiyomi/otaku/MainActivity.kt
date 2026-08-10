@@ -407,9 +407,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Apply theme BEFORE setContentView.
-        // applyDynamicTheme() decides between:
-        //   - Theme.OTAku (default teal, with Material You overrides on API 31+)
-        //   - Theme.OTAku.Suisei (Suisei Blue fallback on API 26-30 or user-disabled)
+        // applyDynamicTheme() always uses Theme.OTAku.Suisei (Suisei Blue #00B0F0)
+        // as the base theme. On API 31+, DynamicColors overlays Material You accent
+        // on top. On API 26-30, Suisei Blue is the fallback (no teal/cyan default).
         // applyTheme() (light/dark/system night mode) must run BEFORE setTheme()
         // and setContentView(). Because configChanges includes uiMode,
         // AppCompatDelegate.setDefaultNightMode does NOT trigger automatic
@@ -598,44 +598,54 @@ class MainActivity : AppCompatActivity() {
     /**
      * Apply dynamic color theme based on device capability and user preference.
      *
+     * THEME-DEFAULT-FIX: The base theme is ALWAYS Theme.OTAku.Suisei (Suisei Blue
+     * #00B0F0), never the generic teal/cyan Theme.OTAku. This eliminates the
+     * "default is still cyan" bug — the app's brand identity is Suisei Blue.
+     *
      * Decision tree:
-     *   - API 31+ (Android 12, Material You available) AND user hasn't disabled
-     *     dynamic color → use Theme.OTAku (default teal, which Material You
-     *     will override at runtime via DynamicColors.applyToActivityIfAvailable).
-     *     System accent is applied WITHOUT restriction — even if it's cyan.
-     *   - API 26-30 (Material You unavailable) OR user disabled dynamic color
-     *     → use Theme.OTAku.Suisei (Suisei Blue fallback palette #00B0F0).
-     *     The default fallback is Suisei Blue, NOT generic cyan/teal.
+     *   - API 31+ AND user hasn't disabled dynamic color:
+     *     Theme.OTAku.Suisei (Suisei Blue base) + DynamicColors overlay.
+     *     The Material You overlay applies the system's wallpaper-derived accent
+     *     on top of the Suisei base — including cyan if that's the system accent.
+     *     No restriction on system accent colors — the user chose their wallpaper.
+     *   - API 26-30 OR user disabled dynamic color:
+     *     Theme.OTAku.Suisei (Suisei Blue palette only, no overlay).
      *
-     * Must be called BEFORE setContentView() so the theme attributes are
-     * resolved correctly during view inflation.
+     * Why Suisei Blue as base instead of teal?
+     *   - Theme.OTAku's teal (#006B5A) palette bleeds through when DynamicColors
+     *     doesn't fully override every color slot (e.g. custom attributes, derived
+     *     colors in some Material3 components). Using Suisei Blue as base ensures
+     *     the fallback is always brand-consistent, never generic teal/cyan.
+     *   - If DynamicColors succeeds, its overlay takes precedence over the base —
+     *     the system accent (cyan, blue, green, purple, etc.) is fully applied.
+     *   - If DynamicColors fails (OEM ROM issue, library version mismatch), the
+     *     user sees Suisei Blue, not generic teal — consistent with the app identity.
      *
-     * Side effect: on API 31+, also calls DynamicColors.applyToActivityIfAvailable()
-     * to enable Material You wallpaper-derived colors for Material3 components.
-     * This is a no-op on older versions.
+     * Must be called BEFORE setContentView() so theme attributes resolve correctly
+     * during view inflation.
      */
     private fun applyDynamicTheme() {
+        // THEME-DEFAULT-FIX: Always use Suisei Blue as the base theme.
+        // This is the app's brand identity — never default to generic teal/cyan.
+        setTheme(R.style.Theme_OTAku_Suisei)
+
         val useDynamic = SuiseiColors.shouldUseDynamicTheme(prefs)
         if (useDynamic) {
-            // Use Theme.OTAku — Material You will override colors at runtime.
-            // The system accent color (whatever it is, including cyan) is applied
-            // without restriction — the user chose this wallpaper, we respect it.
-            // isCyanLike() is available as a utility but NOT used to reject accents.
-            setTheme(R.style.Theme_OTAku)
+            // Apply Material You dynamic color overlay on top of the Suisei base.
+            // The overlay overrides colorPrimary, colorSecondary, etc. with the
+            // system's wallpaper-derived accent — including cyan if that's the
+            // system accent. No restriction (isCyanLike is NOT used to reject).
             try {
                 com.google.android.material.color.DynamicColors
                     .applyToActivityIfAvailable(this)
             } catch (_: Throwable) {
                 // Defensive: if Material library is older than expected,
-                // fall through silently. Theme.OTAku still works.
+                // fall through silently. Suisei Blue base still works.
             }
-        } else {
-            // Material You unavailable (API <31) or user disabled dynamic color.
-            // Default fallback: Suisei Blue palette (#00B0F0), NOT generic cyan/teal.
-            // This ensures the app has a distinctive brand identity even without
-            // Material You — the user explicitly wants Suisei Blue as default.
-            setTheme(R.style.Theme_OTAku_Suisei)
         }
+        // If !useDynamic: Suisei Blue base with no overlay — the default
+        // fallback palette (#00B0F0 seed). This is the correct behavior on
+        // API 26-30 or when user has disabled dynamic color.
     }
 
     override fun onCreateOptionsMenu(menu: android.view.Menu?): Boolean {

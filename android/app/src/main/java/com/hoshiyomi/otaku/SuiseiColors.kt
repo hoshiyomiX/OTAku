@@ -20,26 +20,22 @@ import androidx.core.content.ContextCompat
  *   - [getSystemAccentColor]    — returns the user's wallpaper-derived accent
  *   - [shouldUseDynamicTheme]   — true if API 31+ AND user hasn't disabled it
  *
- * Used by MainActivity.applyDynamicTheme() to decide which theme overlay
- * to apply: Theme.OTAku (Material You, default teal) on API 31+ when dynamic
- * color is enabled, or Theme.OTAku.Suisei (Suisei Blue palette) on older
- * devices or when dynamic color is disabled.
+ * THEME-DEFAULT-FIX: applyDynamicTheme() now ALWAYS uses Theme.OTAku.Suisei
+ * as the base theme (Suisei Blue #00B0F0 as the brand default), then applies
+ * DynamicColors on top when available. This means:
+ *   - API 31+ with dynamic color enabled: Suisei Blue base + Material You overlay
+ *     (system accent, including cyan, is applied without restriction)
+ *   - API 26-30 or dynamic color disabled: Suisei Blue palette only
+ * The generic teal/cyan Theme.OTAku is NO LONGER used as the default.
  *
  * Why not just use DynamicColors.applyToActivityIfAvailable()?
  *   - That API only colors Material3 components that opt in via
- *     ?attr/colorPrimary etc. It doesn't override our existing teal palette.
- *   - We want a clear either/or: Material You (when available) OR Suisei
- *     Blue (when not). Not a hybrid.
+ *     ?attr/colorPrimary etc. It doesn't override our base palette.
+ *   - We want a clear either/or: Material You overlay (when available) on
+ *     top of Suisei Blue base, or Suisei Blue alone (when not).
  *   - The theme-overlay approach gives us full control of every color slot
  *     (primary, secondary, tertiary, surface, error, etc.) and works
  *     consistently across all UI components.
- *
- * Why a separate Suisei palette instead of just shifting the existing teal?
- *   - The existing teal (#006B5A) is a deliberate brand choice. When the
- *     user can't get Material You, we honor the Suisei reference rather
- *     than leave them with a color they didn't choose.
- *   - The Suisei palette is a full Material 3 tonal palette generated from
- *     the #00B0F0 seed color, ensuring all contrast ratios meet WCAG AA.
  */
 object SuiseiColors {
 
@@ -181,14 +177,14 @@ object SuiseiColors {
     }
 
     /**
-     * Detect whether a color is "cyan-like" — a generic cyan/teal system accent
-     * that should be rejected in favor of the Suisei Blue fallback.
+     * Detect whether a color is "cyan-like" — a generic cyan/teal system accent.
      *
-     * Many stock Android devices (Pixel, Samsung OneUI default) use a cyan
-     * accent (#00BCD4 Material Cyan or similar) as the default wallpaper-derived
-     * Material You color. This looks generic and clashes with OTAku's identity.
-     * When the system accent is cyan-like, we fall back to the distinctive
-     * Suisei Blue (#00B0F0) palette instead.
+     * @Deprecated This method is NO LONGER used to reject system accent colors.
+     * THEME-DEFAULT-FIX: The app now always uses Theme.OTAku.Suisei as the base
+     * theme and applies DynamicColors on top — ALL system accent colors (including
+     * cyan) are applied without restriction. The user chose their wallpaper, and
+     * we respect it. This method is retained as a utility for potential future
+     * diagnostics/UI features but should NOT be used for accent filtering.
      *
      * Detection uses HSL (Hue-Saturation-Lightness) color space:
      *   - Hue: 175°–200° (cyan range — excludes blue ~224° like Suisei Blue
@@ -197,23 +193,13 @@ object SuiseiColors {
      *   - Lightness: > 30% (excludes dark teals like the brand color #006B5A
      *     which has L ≈ 21%)
      *
-     * Why HSL instead of RGB distance?
-     *   - Material Cyan (#00BCD4) is only ~31 RGB units from Suisei Blue
-     *     (#00B0F0) — too close for reliable RGB-based exclusion.
-     *   - HSL separates hue (color family) from saturation/lightness,
-     *     making the classification intuitive and robust.
-     *
-     * Test vectors (verified):
-     *   - #00BCD4 (Material Cyan)  → hue 187°, sat 100%, light 83% → TRUE
-     *   - #00B0F0 (Suisei Blue)    → hue 198°, ...wait, Suisei Blue is ~224° in HSL → FALSE
-     *   - #006B5A (Brand Teal)     → hue 168°, sat 100%, light 21% → FALSE (L < 30%)
-     *   - #5CDBBF (Dark primary)   → hue 163°, sat 61%, light 62% → FALSE (hue < 175°)
-     *   - #F44336 (Red)            → hue 4°, → FALSE
-     *   - #4CAF50 (Green)          → hue 122°, → FALSE
+     * Additional RGB proximity check: colors within 25 RGB units of Suisei Blue
+     * (#00B0F0) are NOT classified as cyan-like (they're close to our brand color).
      *
      * @param color ARGB color int (0xAARRGGBB)
-     * @return true if the color is generic cyan and should trigger Suisei fallback
+     * @return true if the color is generic cyan (for diagnostic purposes only)
      */
+    @Deprecated(message = "Not used for accent filtering — all system accents are applied. Retained as diagnostic utility.")
     fun isCyanLike(@ColorInt color: Int): Boolean {
         // Extract RGB channels (0–255)
         val r = (color shr 16 and 0xFF) / 255f

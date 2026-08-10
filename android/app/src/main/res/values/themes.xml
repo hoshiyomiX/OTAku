@@ -2,7 +2,10 @@
 <resources>
     <!--
         Theme definitions for OTAku.
-        Material Design 3 (Material You) with teal/green color scheme.
+        Material Design 3 (Material You) with Suisei Blue (#00B0F0) as the
+        default brand palette. The teal/green palette (Theme.OTAku) is retained
+        as a legacy reference but is NO LONGER the default — applyDynamicTheme()
+        always uses Theme.OTAku.Suisei as the base theme.
     -->
 
     <!-- Splash screen theme — shows OTAku icon on black background at launch.
@@ -21,8 +24,8 @@
         <!-- Branding text removed — was glitched (A letter flipped, u cut off).
              The icon alone is sufficient for splash screen identity.
              See values-v31/themes.xml for API 31+ specific overrides. -->
-        <!-- After splash, transition to the main OTAku theme -->
-        <item name="postSplashScreenTheme">@style/Theme.OTAku</item>
+        <!-- After splash, transition to the Suisei Blue base theme (default) -->
+        <item name="postSplashScreenTheme">@style/Theme.OTAku.Suisei</item>
     </style>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -139,6 +142,13 @@
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Dark theme override                                           -->
+    <!--                                                               -->
+    <!-- THEME-DARK-FIX: Added missing component style overrides that   -->
+    <!-- were present in Theme.OTAku (light) and Theme.OTAku.Suisei    -->
+    <!-- but missing here. Without these, Theme.OTAku.Dark falls back  -->
+    <!-- to default M3 styles, causing visual inconsistency (wrong      -->
+    <!-- toolbar style, chip style, button corner radius, text colors)  -->
+    <!-- when this theme is explicitly applied.                         -->
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <style name="Theme.OTAku.Dark" parent="Theme.Material3.Dark.NoActionBar">
         <!-- Primary brand color -->
@@ -183,6 +193,15 @@
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
 
+        <!-- Text appearance — was MISSING, caused fallback to M3 defaults -->
+        <item name="android:textColorPrimary">@color/md_theme_dark_onSurface</item>
+        <item name="android:textColorSecondary">@color/md_theme_dark_onSurfaceVariant</item>
+
+        <!-- Material components — was MISSING, caused wrong toolbar/chip/button styles -->
+        <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
+        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
+        <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
+
         <!-- Toolbar icon tinting -->
         <item name="colorControlNormal">@color/md_theme_dark_onSurface</item>
     </style>
@@ -220,11 +239,44 @@
         <item name="android:letterSpacing">0.05</item>
     </style>
 
+    <!-- Tonal button variant — ensures consistent 12dp corner radius
+         for TonalButton-style buttons (filled background, no stroke).
+         ROUNDED-FIX: Without this, TonalButtons use M3 default corner
+         radius (20dp) which doesn't match the OTAku 12dp standard,
+         causing visual mismatch between button outline and background. -->
+    <style name="Widget.OTAku.Button.Tonal" parent="Widget.Material3.Button.TonalButton">
+        <item name="cornerRadius">12dp</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.05</item>
+    </style>
+
+    <!-- Outlined button variant — ensures consistent 12dp corner radius
+         for OutlinedButton-style buttons (stroke border, no fill).
+         ROUNDED-FIX: Without this, OutlinedButtons use M3 default
+         corner radius which may not match the stroke shape. -->
+    <style name="Widget.OTAku.Button.Outlined" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="cornerRadius">12dp</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.05</item>
+    </style>
+
+    <!-- Text button variant — for inline/minimal buttons (no stroke, no fill).
+         Uses 8dp corner radius for a subtler shape matching smaller size. -->
+    <style name="Widget.OTAku.Button.Text" parent="Widget.Material3.Button.TextButton">
+        <item name="cornerRadius">8dp</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
     <!-- Log output text view style -->
+    <!-- THEME-AWARE-FIX: Use ?attr/colorOnSurfaceVariant instead of hardcoded
+         @color/log_text. The hardcoded color didn't follow the active theme
+         (teal vs Suisei), causing visual mismatch during theme transitions.
+         ?attr/colorOnSurfaceVariant provides muted but readable text that
+         adapts to both light/dark mode and the active color palette. -->
     <style name="TextAppearance.OTAku.Log" parent="TextAppearance.Material3.BodySmall">
         <item name="android:fontFamily">monospace</item>
         <item name="android:textSize">12sp</item>
-        <item name="android:textColor">@color/log_text</item>
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
         <item name="android:lineSpacingMultiplier">1.2</item>
     </style>
 

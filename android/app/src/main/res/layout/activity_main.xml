@@ -253,7 +253,7 @@
 
                             <com.google.android.material.button.MaterialButton
                                 android:id="@+id/buttonAutoDetect"
-                                style="Widget.Material3.Button.TonalButton"
+                                style="@style/Widget.OTAku.Button.Tonal"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:layout_gravity="center_vertical"
@@ -264,8 +264,7 @@
                                 android:paddingHorizontal="12dp"
                                 app:icon="@drawable/ic_auto_detect"
                                 app:iconSize="16dp"
-                                app:iconPadding="4dp"
-                                app:cornerRadius="12dp" />
+                                app:iconPadding="4dp" />
 
                         </LinearLayout>
 
@@ -318,20 +317,18 @@
                                 android:layout_height="wrap_content"
                                 android:layout_weight="1"
                                 android:text="@string/button_add_images"
-                                style="Widget.Material3.Button.TonalButton"
+                                style="@style/Widget.OTAku.Button.Tonal"
                                 app:icon="@android:drawable/ic_input_add"
-                                app:iconGravity="textStart"
-                                app:cornerRadius="12dp" />
+                                app:iconGravity="textStart" />
 
                             <com.google.android.material.button.MaterialButton
                                 android:id="@+id/buttonRemoveAll"
-                                style="Widget.Material3.Button.OutlinedButton"
+                                style="@style/Widget.OTAku.Button.Outlined"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:text="@string/button_remove_all"
                                 android:visibility="gone"
-                                android:layout_marginStart="8dp"
-                                app:cornerRadius="12dp" />
+                                android:layout_marginStart="8dp" />
 
                         </LinearLayout>
 
@@ -533,12 +530,11 @@
 
                             <com.google.android.material.button.MaterialButton
                                 android:id="@+id/buttonBrowseOutput"
-                                style="Widget.Material3.Button.OutlinedButton"
+                                style="@style/Widget.OTAku.Button.Outlined"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:text="@string/button_browse"
-                                android:minWidth="80dp"
-                                app:cornerRadius="12dp" />
+                                android:minWidth="80dp" />
 
                         </LinearLayout>
 
@@ -585,7 +581,7 @@
             app:cardElevation="0dp"
             app:strokeWidth="1dp"
             app:strokeColor="?attr/colorOutlineVariant"
-            app:cardBackgroundColor="@color/log_background">
+            app:cardBackgroundColor="?attr/colorSurfaceVariant">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -633,35 +629,34 @@
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonCopyLog"
-                        style="Widget.Material3.Button.TextButton"
+                        style="@style/Widget.OTAku.Button.Text"
                         android:layout_width="wrap_content"
                         android:layout_height="32dp"
                         android:text="@string/button_copy_log"
                         android:textSize="12sp"
                         android:minWidth="0dp"
-                        android:paddingHorizontal="8dp"
-                        app:cornerRadius="8dp" />
+                        android:paddingHorizontal="8dp" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonClearLog"
-                        style="Widget.Material3.Button.TextButton"
+                        style="@style/Widget.OTAku.Button.Text"
                         android:layout_width="wrap_content"
                         android:layout_height="32dp"
                         android:text="@string/button_clear_log"
                         android:textSize="12sp"
                         android:minWidth="0dp"
                         android:layout_marginStart="4dp"
-                        android:paddingHorizontal="8dp"
-                        app:cornerRadius="8dp" />
+                        android:paddingHorizontal="8dp" />
 
                 </LinearLayout>
 
-                <!-- Log divider -->
+                <!-- Log divider — uses theme attribute for consistent appearance
+                     across teal/Suisei/dynamic themes (THEME-AWARE-FIX) -->
                 <View
                     android:id="@+id/logDivider"
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
-                    android:background="@color/log_divider" />
+                    android:background="?attr/colorOutlineVariant" />
 
                 <!-- Standalone scrollable log — visibility toggled by header click.
                      When collapsed (GONE), the log card shrinks to just the header bar,

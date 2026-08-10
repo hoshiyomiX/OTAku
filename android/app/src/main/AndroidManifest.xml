@@ -55,11 +55,11 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.OTAku"
+        android:theme="@style/Theme.OTAku.Suisei"
         android:requestLegacyExternalStorage="true"
         tools:targetApi="34">
 
-        <!-- Main Activity — uses splash screen theme at launch, then transitions to Theme.OTAku -->
+        <!-- Main Activity — uses splash screen theme at launch, then transitions to Theme.OTAku.Suisei -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

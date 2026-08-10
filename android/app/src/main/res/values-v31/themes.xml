@@ -13,7 +13,7 @@
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
         <!-- Icon background color (circular mask behind the icon) -->
         <item name="windowSplashScreenIconBackgroundColor">#000000</item>
-        <!-- After splash, transition to the main OTAku theme -->
-        <item name="postSplashScreenTheme">@style/Theme.OTAku</item>
+        <!-- After splash, transition to the Suisei Blue base theme (default) -->
+        <item name="postSplashScreenTheme">@style/Theme.OTAku.Suisei</item>
     </style>
 </resources>
