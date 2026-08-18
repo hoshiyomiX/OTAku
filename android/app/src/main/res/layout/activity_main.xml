@@ -382,7 +382,7 @@
                             android:layout_height="48dp"
                             android:background="?attr/selectableItemBackground"
                             android:spinnerMode="dropdown"
-                            android:paddingStart="4dp"
+                            android:paddingStart="8dp"
                             android:paddingEnd="8dp" />
 
                         <!-- Divider -->
@@ -415,7 +415,7 @@
                             android:layout_height="48dp"
                             android:background="?attr/selectableItemBackground"
                             android:spinnerMode="dropdown"
-                            android:paddingStart="4dp"
+                            android:paddingStart="8dp"
                             android:paddingEnd="8dp" />
 
                         <!-- Divider -->
@@ -432,7 +432,7 @@
                             android:layout_height="wrap_content"
                             android:text="@string/label_output"
                             style="@style/TextAppearance.OTAku.SectionTitle"
-                            android:layout_marginBottom="6dp" />
+                            android:layout_marginBottom="4dp" />
 
                         <!-- Custom filename input -->
                         <com.google.android.material.textfield.TextInputLayout
@@ -460,6 +460,9 @@
                                 android:inputType="text"
                                 android:maxLines="1"
                                 android:textSize="14sp"
+                                android:gravity="center_vertical"
+                                android:paddingTop="10dp"
+                                android:paddingBottom="10dp"
                                 android:maxLength="128" />
 
                         </com.google.android.material.textfield.TextInputLayout>
@@ -524,7 +527,10 @@
                                     android:clickable="false"
                                     android:maxLines="2"
                                     android:ellipsize="middle"
-                                    android:textSize="14sp" />
+                                    android:textSize="14sp"
+                                    android:gravity="center_vertical"
+                                    android:paddingTop="10dp"
+                                    android:paddingBottom="10dp" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -534,7 +540,14 @@
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:text="@string/button_browse"
-                                android:minWidth="80dp" />
+                                android:textSize="12sp"
+                                android:minWidth="0dp"
+                                android:paddingHorizontal="12dp"
+                                app:cornerRadius="12dp"
+                                app:icon="@android:drawable/ic_menu_view"
+                                app:iconSize="16dp"
+                                app:iconGravity="textStart"
+                                app:iconPadding="4dp" />
 
                         </LinearLayout>
 
