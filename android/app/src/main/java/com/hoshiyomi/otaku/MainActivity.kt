@@ -204,6 +204,13 @@ class MainActivity : AppCompatActivity() {
         // Activity instance as a safety net.
         @Volatile var themeSwitchInProgress = false
 
+        // IMPL-008: Track last uiMode for theme-change detection (survives
+        // Activity recreation). Previously an instance var — this caused a bug
+        // where lastUiMode reset to 0 on every Activity recreation, causing
+        // the first system dark/light toggle after recreation to be silently
+        // missed (condition "lastUiMode != 0" always fails on first change).
+        @Volatile var lastUiMode: Int = 0
+
         /** Show ongoing progress notification with determinate progress bar. */
         fun showProgressNotification(message: String, percent: Int) {
             val ctx = appContext ?: return
@@ -421,6 +428,9 @@ class MainActivity : AppCompatActivity() {
         // ═══════════════════════════════════════════════════════════
         // THEME INITIALIZATION ORDER (critical — DO NOT reorder)
         // ═══════════════════════════════════════════════════════════
+        // 0. (IMPL-006) ALWAYS strip "android:appcompat:local_night_mode"
+        //    from savedInstanceState — prevents AppCompatDelegate from restoring
+        //    the OLD night mode which would override setDefaultNightMode().
         // 1. applyTheme() BEFORE super.onCreate() — sets the default
         //    night mode (light/dark/system) via AppCompatDelegate.
         //    This is a STATIC call that configures the delegate before
@@ -429,19 +439,16 @@ class MainActivity : AppCompatActivity() {
         //    reads the night mode from step 1 and APPLIES it to the
         //    Activity's Resources. Only AFTER this call does the
         //    Activity's context reflect the correct night mode.
-        // 3. applyDynamicColorsOverlay() AFTER super.onCreate() — sets the
-        //    base theme (Theme.OTAku.Suisei) and applies Material You
-        //    DynamicColors overlay. This MUST happen after super.onCreate()
-        //    because DynamicColors needs the Activity's night mode to
-        //    be finalized to determine the correct overlay variant
-        //    (light vs dark). Before super.onCreate(), the Resources
-        //    may still reflect the PREVIOUS Activity's night mode,
-        //    causing DynamicColors to apply the wrong variant or fail.
-        // 4. setContentView() — inflates views with the correct theme.
-        // 0. (IMPL-006) ALWAYS strip "android:appcompat:local_night_mode"
-        //    from savedInstanceState — prevents AppCompatDelegate from restoring
-        //    the OLD night mode (e.g., MODE_NIGHT_YES) which would override
-        //    setDefaultNightMode() and cause mixed light/dark colors.
+        // 3. setTheme() AFTER super.onCreate() — sets the base theme
+        //    (Theme.OTAku.Suisei). This MUST happen after super.onCreate()
+        //    because setTheme() resolves night qualifiers from Resources.
+        //    Before super.onCreate(), Resources reflect the PREVIOUS
+        //    Activity's night mode → wrong theme variant → mixed colors.
+        // 4. applyDynamicColorsOverlay() AFTER setTheme() — applies
+        //    Material You DynamicColors overlay on the correct base.
+        // 5. syncWindowToTheme() — fixes Window attributes that were
+        //    set from stale night mode during Activity.attach().
+        // 6. setContentView() — inflates views with the correct theme.
         //
         // BUGFIX: Previously, applyDynamicColorsOverlay() was called BEFORE
         // super.onCreate(). This caused DynamicColors to see stale
@@ -488,21 +495,25 @@ class MainActivity : AppCompatActivity() {
         }
         applyTheme()
 
-        // IMPL-007: Set the base theme BEFORE super.onCreate() so the
-        // Window (created in attach()) gets Theme.OTAku.Suisei instead of
-        // Theme.OTAku.Splash. Without this, the Window background and
-        // system bars are set from the stale night mode, causing mixed
-        // colors (dark window bg + light content, or vice versa).
-        setTheme(R.style.Theme_OTAku_Suisei)
-
         super.onCreate(cleanedState)
 
-        // IMPL-007: Apply DynamicColors AFTER super.onCreate() (night mode
-        // must be finalized). setTheme() was already called before
-        // super.onCreate() — this only applies the Material You overlay.
+        // IMPL-008: Set the base theme AFTER super.onCreate() so
+        // setTheme() resolves night qualifiers from the NOW-CORRECT
+        // Resources (AppCompatDelegate has applied the night mode).
+        // Previously, setTheme() was called before super.onCreate(),
+        // which caused it to resolve against stale Resources (from the
+        // PREVIOUS Activity's night mode), resulting in the wrong theme
+        // variant (dark variant when light was expected, or vice versa).
+        // This was the root cause of the "separuh dark, separuh light"
+        // mixed-colors bug when switching from dark → auto → light.
+        // The Window stale-color issue is handled by syncWindowToTheme().
+        setTheme(R.style.Theme_OTAku_Suisei)
+
+        // Apply DynamicColors AFTER setTheme() + super.onCreate() so
+        // night mode is finalized AND the base theme is correct.
         applyDynamicColorsOverlay()
 
-        // IMPL-007: Force-sync the Window's appearance to the current theme.
+        // Force-sync the Window's appearance to the current theme.
         // The Resources at attach() time may have had stale night mode, so
         // the Window was themed with the wrong variant. This re-reads
         // window attributes from the now-correct theme and applies them.
@@ -573,7 +584,6 @@ class MainActivity : AppCompatActivity() {
         setupDeviceMetaFields()
         setupOutputField()
         setupCustomFilenameField()
-        setupThemeToggle()
         setupBackPressedHandler()  // BUG-H07: OnBackPressedDispatcher
         updateOutputPreview()  // Show default filename preview immediately
         updateBuildButtonState()  // Disable Build button until partitions are added
@@ -684,35 +694,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Apply dynamic color theme based on device capability and user preference.
-     *
-     * THEME-DEFAULT-FIX: The base theme is ALWAYS Theme.OTAku.Suisei (Suisei Blue
-     * #00B0F0), never the generic teal/cyan Theme.OTAku. This eliminates the
-     * "default is still cyan" bug — the app's brand identity is Suisei Blue.
-     *
-     * DYNAMICCOLORS-TIMING-FIX: This method MUST be called AFTER super.onCreate()
-     * so the AppCompatDelegate has applied the correct night mode to the Activity's
-     * Resources. DynamicColors.applyToActivityIfAvailable() reads the Activity's
-     * current theme to determine the light/dark variant of the Material You overlay.
-     * If called before super.onCreate(), the Resources may still reflect the
-     * previous Activity's night mode, causing:
-     *   - Wrong overlay variant (light colors in dark mode or vice versa)
-     *   - DynamicColors failing silently (no accent color applied)
-     *   - Partial color inversion (dark-on-white or white-on-dark)
-     *
-     * Decision tree:
-     *   - API 31+ AND user hasn't disabled dynamic color:
-     *     Theme.OTAku.Suisei (Suisei Blue base) + DynamicColors overlay.
-     *     The Material You overlay applies the system's wallpaper-derived accent
-     *     on top of the Suisei base — including cyan if that's the system accent.
-     *     No restriction on system accent colors — the user chose their wallpaper.
-     *   - API 26-30 OR user disabled dynamic color:
-     *     Theme.OTAku.Suisei (Suisei Blue palette only, no overlay).
-     *
-     * Must be called BEFORE setContentView() so theme attributes resolve correctly
-     * during view inflation, but AFTER super.onCreate() so night mode is finalized.
-     */
     /**
      * Apply Material You dynamic color overlay based on device capability
      * and user preference.
@@ -839,6 +820,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    /**
+     * Re-render partition progress bars from companion state.
+     *
+     * IMPL-008: Extracted from 3 duplicate code sites (onConfigurationChanged,
+     * onResume build-in-progress, onResume build-complete) to reduce code
+     * duplication and ensure consistent rendering logic.
+     *
+     * @param forceComplete If true, render all bars at 100% regardless of
+     *   actual progress (used for build completion display).
+     */
+    private fun renderPartitionProgress(forceComplete: Boolean = false) {
+        if (partitionCount <= 0) return
+        val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+            ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
+        if (barRow != null) {
+            for (i in 0 until partitionCount) {
+                val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                if (bar != null) {
+                    bar.isIndeterminate = false
+                    bar.progress = if (forceComplete) 100 else partitionProgress[i]
+                }
+            }
+        }
+    }
     override fun onCreateOptionsMenu(menu: android.view.Menu?): Boolean {
         menuInflater.inflate(R.menu.toolbar_menu, menu)
         updateThemeIcon(menu)
@@ -929,10 +935,6 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun setupThemeToggle() {
-        // Theme toggle is handled via toolbar menu item (R.id.action_toggle_theme).
-        // No extra setup needed here — onCreateOptionsMenu + onOptionsItemSelected handle it.
-    }
 
     private fun setupCustomFilenameField() {
         val editFilename = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextCustomFilename)
@@ -2150,6 +2152,20 @@ class MainActivity : AppCompatActivity() {
 
     private var outputDirPath: String? = null
 
+    // IMPL-008: Cached view references — avoids repeated findViewById() calls
+    // in setUIExecuting() which runs on every progress update during builds.
+    // findViewById() is O(n) view hierarchy traversal; caching eliminates jank.
+    private var cachedBtnExecute: com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton? = null
+    private var cachedBtnAddImages: View? = null
+    private var cachedBtnRemoveAll: View? = null
+    private var cachedBtnBrowseOutput: View? = null
+    private var cachedSpinnerCompression: android.widget.Spinner? = null
+    private var cachedSpinnerCompressionLevel: android.widget.Spinner? = null
+    private var cachedEditDevice: View? = null
+    private var cachedBtnAutoDetect: View? = null
+    private var cachedEditFilename: View? = null
+    private var cachedProgressContainer: android.widget.LinearLayout? = null
+
     private fun handleImageFilesSelected(uris: List<Uri>) {
         // Cancel any previous in-flight image-loading coroutine.
         // This prevents the "loading chaos" bug where:
@@ -3064,17 +3080,7 @@ class MainActivity : AppCompatActivity() {
                     setupSplitProgressBar(partitionNames)
                     savedProgress.copyInto(partitionProgress)
                     currentPartitionIndex = savedIndex
-                    val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                        ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
-                    if (barRow != null) {
-                        for (i in 0 until partitionCount) {
-                            val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                            if (bar != null) {
-                                bar.isIndeterminate = false
-                                bar.progress = partitionProgress[i]
-                            }
-                        }
-                    }
+                    renderPartitionProgress()
                 }
             }
         } else {
@@ -3097,17 +3103,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 // Re-render progress bars at 100% if visible
-                val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                    ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
-                if (barRow != null && barRow.childCount == partitionCount) {
-                    for (i in 0 until partitionCount) {
-                        val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                        bar?.let {
-                            it.isIndeterminate = false
-                            it.progress = 100
-                        }
-                    }
-                }
+                renderPartitionProgress(forceComplete = true)
 
                 // Re-show completion notification (uses appContext, safe to call here)
                 if (result.success) {
@@ -3121,7 +3117,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private var lastUiMode: Int = 0  // tracks uiMode for theme-change detection
+
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -3160,6 +3156,9 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             // Case 2: system mode change while following system → recreate
+            // Safety net: re-apply theme before recreate to ensure
+            // AppCompatDelegate state matches the current preference.
+            applyTheme()
             recreate()
             @Suppress("DEPRECATION")
             overridePendingTransition(android.R.anim.fade_in, 0)
@@ -3180,17 +3179,7 @@ class MainActivity : AppCompatActivity() {
             savedProgress.copyInto(partitionProgress)
             currentPartitionIndex = savedIndex
             // Re-render progress bars with restored values
-            val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
-            if (barRow != null) {
-                for (i in 0 until partitionCount) {
-                    val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                    if (bar != null) {
-                        bar.isIndeterminate = false
-                        bar.progress = partitionProgress[i]
-                    }
-                }
-            }
+            renderPartitionProgress()
         }
         // Scroll log to bottom (layout may have shifted)
         // IMPL-003 (BUG-02 fix): Use NestedScrollView type instead of ScrollView
@@ -3207,6 +3196,18 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         activityRef = null
+        // IMPL-008: Invalidate cached view references — views may be
+        // detached/invalid after pause; re-resolve on next onResume.
+        cachedBtnExecute = null
+        cachedBtnAddImages = null
+        cachedBtnRemoveAll = null
+        cachedBtnBrowseOutput = null
+        cachedSpinnerCompression = null
+        cachedSpinnerCompressionLevel = null
+        cachedEditDevice = null
+        cachedBtnAutoDetect = null
+        cachedEditFilename = null
+        cachedProgressContainer = null
     }
 
     override fun onDestroy() {
@@ -3296,34 +3297,53 @@ class MainActivity : AppCompatActivity() {
 
     private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).toInt()
 
+    /**
+     * Update UI to reflect build execution state.
+     *
+     * IMPL-008: Uses cached view references instead of repeated findViewById()
+     * calls. findViewById() traverses the view hierarchy (O(n)) on every call;
+     * during builds with rapid progress updates, this caused measurable main
+     * thread jank. Cached references are populated in onCreate()/onResume().
+     */
     private fun setUIExecuting(executing: Boolean) {
         runOnUiThread {
-            val btnExecute = findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.buttonExecute)
-            btnExecute?.text = if (executing) "BUILDING OTA..." else getString(R.string.button_repack)
-            btnExecute?.isEnabled = !executing
+            // Resolve cached views if not yet populated (first call or after recreation)
+            if (cachedBtnExecute == null) {
+                cachedBtnExecute = findViewById(R.id.buttonExecute)
+                cachedBtnAddImages = findViewById(R.id.buttonAddImages)
+                cachedBtnRemoveAll = findViewById(R.id.buttonRemoveAll)
+                cachedBtnBrowseOutput = findViewById(R.id.buttonBrowseOutput)
+                cachedSpinnerCompression = findViewById(R.id.spinnerCompression)
+                cachedSpinnerCompressionLevel = findViewById(R.id.spinnerCompressionLevel)
+                cachedEditDevice = findViewById(R.id.editTextDevice)
+                cachedBtnAutoDetect = findViewById(R.id.buttonAutoDetect)
+                cachedEditFilename = findViewById(R.id.editTextCustomFilename)
+                cachedProgressContainer = findViewById(R.id.progressBarContainer)
+            }
+            cachedBtnExecute?.text = if (executing) "BUILDING OTA..." else getString(R.string.button_repack)
+            cachedBtnExecute?.isEnabled = !executing
             updateBuildButtonState()
-            val container = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
             if (executing) {
-                container?.visibility = View.VISIBLE
+                cachedProgressContainer?.visibility = View.VISIBLE
             } else {
-                container?.visibility = View.GONE
-                container?.removeAllViews()
+                cachedProgressContainer?.visibility = View.GONE
+                cachedProgressContainer?.removeAllViews()
                 partitionCount = 0
                 partitionProgress = IntArray(0)
                 currentPartitionIndex = -1
                 partitionNames = emptyList()
             }
-            findViewById<View>(R.id.buttonAddImages)?.isEnabled = !executing
-            findViewById<View>(R.id.buttonRemoveAll)?.isEnabled = !executing
+            cachedBtnAddImages?.isEnabled = !executing
+            cachedBtnRemoveAll?.isEnabled = !executing
             // Disable all input controls during build to prevent user from
             // changing settings that have no effect on the running build
             // but would mislead them into thinking they do.
-            findViewById<View>(R.id.buttonBrowseOutput)?.isEnabled = !executing
-            findViewById<android.widget.Spinner>(R.id.spinnerCompression)?.isEnabled = !executing
-            findViewById<android.widget.Spinner>(R.id.spinnerCompressionLevel)?.isEnabled = !executing
-            findViewById<View>(R.id.editTextDevice)?.isEnabled = !executing
-            findViewById<View>(R.id.buttonAutoDetect)?.isEnabled = !executing
-            findViewById<View>(R.id.editTextCustomFilename)?.isEnabled = !executing
+            cachedBtnBrowseOutput?.isEnabled = !executing
+            cachedSpinnerCompression?.isEnabled = !executing
+            cachedSpinnerCompressionLevel?.isEnabled = !executing
+            cachedEditDevice?.isEnabled = !executing
+            cachedBtnAutoDetect?.isEnabled = !executing
+            cachedEditFilename?.isEnabled = !executing
         }
     }
 
