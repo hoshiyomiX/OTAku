@@ -20,8 +20,6 @@ data class OTAResult(
     val exitCode: Int = 0,
     val durationMs: Long = 0
 ) {
-    @Deprecated(message = "Unused - not referenced from any Kotlin code. Use 'result.success' or 'result.error' directly instead.")
-    val hasError: Boolean get() = !success || !error.isNullOrBlank()
 
     companion object {
         fun error(message: String, durationMs: Long = 0) = OTAResult(
@@ -66,9 +64,10 @@ object OTABridge {
     // "none" removed — users should always compress OTA packages.
     val COMPRESSION_ALGORITHMS = listOf("zstd", "xz", "bzip2", "gzip", "lz4")
 
-    // All valid compression values (for validation). "none" removed —
-    // users should always compress OTA packages.
-    val ALL_COMPRESSION = setOf("zstd", "xz", "bzip2", "gzip", "lz4")
+    // All valid compression values — derived from COMPRESSION_ALGORITHMS
+    // to avoid duplicating the algorithm list. "none" excluded — users
+    // should always compress OTA packages.
+    val ALL_COMPRESSION: Set<String> = COMPRESSION_ALGORITHMS.toSet()
 
 
     // Compression level ranges per algorithm: (min, max, default)
@@ -167,6 +166,10 @@ object OTABridge {
 
             while (isActive) {
                 delay(500) // poll every 500ms
+                // IMPL-015: Check parent scope cancellation — if the build
+                // coroutine was cancelled (e.g., user clicked Remove All),
+                // stop polling immediately instead of continuing for up to 500ms.
+                if (!isActive) break
                 try {
                     if (!progressFile.exists()) continue
 
@@ -289,9 +292,11 @@ object OTABridge {
                     ).copy(output = ddResult.output)
                 }
             } finally {
-                // Always cancel progress polling and clean up
-                progressJob.cancel()
-                progressScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()  // Cancel the scope itself
+                // Always cancel progress polling and clean up.
+                // IMPL-015: Cancel scope first (cancels all children including progressJob),
+                // then delete the sidecar file so stale data doesn't persist.
+                progressScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+                progressJob.cancel()  // redundant but explicit
                 progressFile.delete()
             }
         }
