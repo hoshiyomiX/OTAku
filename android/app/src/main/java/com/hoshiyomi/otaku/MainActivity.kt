@@ -438,7 +438,7 @@ class MainActivity : AppCompatActivity() {
         //    may still reflect the PREVIOUS Activity's night mode,
         //    causing DynamicColors to apply the wrong variant or fail.
         // 4. setContentView() — inflates views with the correct theme.
-        // 0. (IMPL-006) If themeSwitchInProgress, strip "android:appcompat:local_night_mode"
+        // 0. (IMPL-006) ALWAYS strip "android:appcompat:local_night_mode"
         //    from savedInstanceState — prevents AppCompatDelegate from restoring
         //    the OLD night mode (e.g., MODE_NIGHT_YES) which would override
         //    setDefaultNightMode() and cause mixed light/dark colors.
@@ -450,9 +450,9 @@ class MainActivity : AppCompatActivity() {
         //   - Light mode: inverted dark-on-white colors
         //   - Only explicit Dark mode worked correctly
         // ═══════════════════════════════════════════════════════════
-        // IMPL-006 (theme-switch night mode fix): When cycleTheme() triggers
-        // Activity recreation, strip the AppCompatDelegate's saved night mode
-        // from savedInstanceState. Without this, super.onCreate() restores the
+        // IMPL-006 (theme-switch night mode fix): ALWAYS strip
+        // AppCompatDelegate's saved night mode from savedInstanceState on
+        // ANY Activity recreation. Without this, super.onCreate() restores the
         // OLD night mode (e.g., MODE_NIGHT_YES from dark mode), which overrides
         // the setDefaultNightMode() call in applyTheme(). The result is a mixed
         // state where the delegate thinks it's in dark mode but the framework
@@ -471,7 +471,15 @@ class MainActivity : AppCompatActivity() {
         // Activity was in MODE_NIGHT_YES and cycleTheme() switches to
         // MODE_NIGHT_FOLLOW_SYSTEM, the restored MODE_NIGHT_YES overrides
         // the new FOLLOW_SYSTEM, creating the mixed state.
-        val cleanedState = if (themeSwitchInProgress && savedInstanceState != null) {
+        //
+        // IMPL-006 NOTE: We ALWAYS strip (not just when themeSwitchInProgress)
+        // because onConfigurationChanged() clears themeSwitchInProgress
+        // BEFORE the new Activity's onCreate() runs (race condition).
+        // Sequence: cycleTheme() sets flag → onConfigurationChanged() clears
+        // flag → recreate() → onCreate() sees flag=false → no stripping → BUG.
+        // Unconditional stripping is safe because applyTheme() always calls
+        // setDefaultNightMode() with the correct value from preferences.
+        val cleanedState = if (savedInstanceState != null) {
             Bundle(savedInstanceState).apply {
                 remove(KEY_APPCOMPAT_LOCAL_NIGHT_MODE)
             }
