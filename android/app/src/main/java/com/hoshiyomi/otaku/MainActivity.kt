@@ -654,12 +654,13 @@ class MainActivity : AppCompatActivity() {
             // system's wallpaper-derived accent — including cyan if that's the
             // system accent. No restriction on accent colors.
             try {
-                val applied = com.google.android.material.color.DynamicColors
+                // applyToActivityIfAvailable() returns DynamicColors (for fluent
+                // chaining), NOT a Boolean. The "IfAvailable" suffix means it
+                // applies only if the device supports Material You — but the
+                // return type is always DynamicColors. Do NOT treat the return
+                // value as a success/failure indicator.
+                com.google.android.material.color.DynamicColors
                     .applyToActivityIfAvailable(this)
-                if (!applied) {
-                    android.util.Log.w("OTAku", "DynamicColors.applyToActivityIfAvailable() " +
-                        "returned false — Material You not applied on this device/config")
-                }
             } catch (e: Throwable) {
                 // Defensive: if Material library is older than expected or the
                 // Activity context isn't properly initialized, fall through
