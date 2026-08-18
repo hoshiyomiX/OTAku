@@ -184,6 +184,18 @@ class MainActivity : AppCompatActivity() {
         // Only log once per continuous build session, not on every Activity recreation.
         @Volatile private var resumedWhileBuildingLogged = false
 
+        // IMPL-006 (theme-switch night mode fix): Key used by AppCompatDelegate
+        // to save/restore per-instance night mode in savedInstanceState.
+        // When cycleTheme() calls recreate(), the saved state contains the OLD
+        // night mode (e.g., MODE_NIGHT_YES from dark mode). If not stripped,
+        // super.onCreate() restores this old mode, overriding the
+        // setDefaultNightMode() call in applyTheme(). This causes mixed
+        // light/dark colors (some elements from old mode, some from new mode)
+        // because the delegate and Resources disagree on the night mode.
+        // Key source: AppCompatDelegateImpl.KEY_LOCAL_NIGHT_MODE (1.6.1).
+        private const val KEY_APPCOMPAT_LOCAL_NIGHT_MODE =
+            "android:appcompat:local_night_mode"
+
         // IMPL-004 (theme toggle fix): Flag to prevent double recreate().
         // When cycleTheme() calls applyTheme() + recreate(), the delegate may
         // also trigger onConfigurationChanged() → recreate(). This flag tells
@@ -426,6 +438,10 @@ class MainActivity : AppCompatActivity() {
         //    may still reflect the PREVIOUS Activity's night mode,
         //    causing DynamicColors to apply the wrong variant or fail.
         // 4. setContentView() — inflates views with the correct theme.
+        // 0. (IMPL-006) If themeSwitchInProgress, strip "android:appcompat:local_night_mode"
+        //    from savedInstanceState — prevents AppCompatDelegate from restoring
+        //    the OLD night mode (e.g., MODE_NIGHT_YES) which would override
+        //    setDefaultNightMode() and cause mixed light/dark colors.
         //
         // BUGFIX: Previously, applyDynamicTheme() was called BEFORE
         // super.onCreate(). This caused DynamicColors to see stale
@@ -434,8 +450,36 @@ class MainActivity : AppCompatActivity() {
         //   - Light mode: inverted dark-on-white colors
         //   - Only explicit Dark mode worked correctly
         // ═══════════════════════════════════════════════════════════
+        // IMPL-006 (theme-switch night mode fix): When cycleTheme() triggers
+        // Activity recreation, strip the AppCompatDelegate's saved night mode
+        // from savedInstanceState. Without this, super.onCreate() restores the
+        // OLD night mode (e.g., MODE_NIGHT_YES from dark mode), which overrides
+        // the setDefaultNightMode() call in applyTheme(). The result is a mixed
+        // state where the delegate thinks it's in dark mode but the framework
+        // Resources are in light mode — causing "separuh dark, separuh light"
+        // (half dark, half light) visual corruption.
+        //
+        // Bug pattern (user-observed):
+        //   dark → auto  = BUG (partial colors)
+        //   auto (bugged) → light = BUG persists
+        //   light/dark → dark = NORMAL (dark masks the mismatch)
+        //   auto → light → dark = NORMAL (no prior dark→auto transition)
+        //
+        // Root cause: AppCompatDelegateImpl.onSaveInstanceState() saves
+        // localNightMode. AppCompatDelegateImpl.onCreate() restores it,
+        // taking priority over setDefaultNightMode(). When the previous
+        // Activity was in MODE_NIGHT_YES and cycleTheme() switches to
+        // MODE_NIGHT_FOLLOW_SYSTEM, the restored MODE_NIGHT_YES overrides
+        // the new FOLLOW_SYSTEM, creating the mixed state.
+        val cleanedState = if (themeSwitchInProgress && savedInstanceState != null) {
+            Bundle(savedInstanceState).apply {
+                remove(KEY_APPCOMPAT_LOCAL_NIGHT_MODE)
+            }
+        } else {
+            savedInstanceState
+        }
         applyTheme()
-        super.onCreate(savedInstanceState)
+        super.onCreate(cleanedState)
         applyDynamicTheme()
         setContentView(R.layout.activity_main)
 
