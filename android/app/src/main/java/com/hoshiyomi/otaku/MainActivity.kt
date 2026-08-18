@@ -155,6 +155,30 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var partitionCount: Int = 0
         @Volatile private var partitionProgress: IntArray = IntArray(0)
         @Volatile private var currentPartitionIndex: Int = -1
+
+        // IMPL-011: Thread-safe snapshot of partitionProgress contents.
+        // @Volatile ensures visibility of the array REFERENCE, but NOT the
+        // array CONTENTS. Without synchronization, copyOf() called from
+        // onConfigurationChanged/onResume (UI thread) can observe a
+        // partially-written array while the build coroutine (Dispatchers.Default)
+        // is updating elements. The lock is on the companion object itself
+        // (this), which is safe because:
+        //   - Kotlin object synchronization is reentrant (same thread can
+        //     re-enter without deadlock)
+        //   - The critical section is tiny (just copyOf), so lock contention
+        //     is negligible even at 500ms poll intervals
+        //   - Only the snapshot reader needs the lock; the writer (onProgress
+        //     callback) also takes the lock to ensure atomic visibility
+        private val progressLock = Any()
+        fun snapshotPartitionProgress(): IntArray = synchronized(progressLock) {
+            partitionProgress.copyOf()
+        }
+        fun updatePartitionProgress(index: Int, value: Int) = synchronized(progressLock) {
+            if (index in partitionProgress.indices) partitionProgress[index] = value
+        }
+        fun markAllProgressComplete() = synchronized(progressLock) {
+            for (i in partitionProgress.indices) partitionProgress[i] = 100
+        }
         @Volatile private var partitionNames: List<String> = emptyList()
         // Device-supported partition names (from nativeScanDevicePartitions).
         // Populated once on app start, used to validate user-picked .img files.
@@ -520,6 +544,10 @@ class MainActivity : AppCompatActivity() {
         syncWindowToTheme()
 
         setContentView(R.layout.activity_main)
+        // IMPL-013: Eagerly cache all view references after inflation.
+        // Eliminates the lazy-if-null check in setUIExecuting() which
+        // runs on every progress update during builds.
+        cacheViews()
 
         // Initialize lastUiMode from the current configuration so that the FIRST
         // system dark mode change is detected by onConfigurationChanged().
@@ -699,13 +727,14 @@ class MainActivity : AppCompatActivity() {
      * and user preference.
      *
      * IMPL-007: This method ONLY applies the DynamicColors overlay. The base
-     * theme (Theme.OTAku.Suisei) is now set BEFORE super.onCreate() in
-     * onCreate() to ensure the Window gets the correct theme variant.
-     * Previously, setTheme() was called here (after super.onCreate()),
-     * which caused the Window to retain stale night mode colors because
-     * the Window's background and system bar colors are set once during
-     * Window creation (Activity.attach()) and are NOT retroactively
-     * updated by later setTheme() calls.
+     * theme (Theme.OTAku.Suisei) is set AFTER super.onCreate() in
+     * onCreate() (IMPL-008) so that Resources have the correct night mode
+     * before setTheme() resolves theme qualifiers. Previously, setTheme()
+     * was called BEFORE super.onCreate(), which caused it to resolve
+     * against stale Resources (from the PREVIOUS Activity's night mode),
+     * resulting in the wrong theme variant and the "separuh dark, separuh
+     * light" mixed-colors bug. The Window stale-color issue is handled
+     * by syncWindowToTheme().
      *
      * Must be called AFTER super.onCreate() so night mode is finalized,
      * but BEFORE setContentView() so theme attributes resolve correctly
@@ -2165,6 +2194,33 @@ class MainActivity : AppCompatActivity() {
     private var cachedBtnAutoDetect: View? = null
     private var cachedEditFilename: View? = null
     private var cachedProgressContainer: android.widget.LinearLayout? = null
+    // IMPL-012: Cached bar_row reference — avoids findViewWithTag() on every
+    // onProgress callback (500ms poll interval × multi-minute build = thousands
+    // of calls). Resolved lazily in the onProgress UI update block.
+    private var cachedBarRow: android.widget.LinearLayout? = null
+
+    // IMPL-013: Eagerly resolve all frequently-accessed view references.
+    // Called once after setContentView() in onCreate(). Previously, these
+    // were resolved lazily in setUIExecuting() via an if-null check on
+    // every call — but setUIExecuting() runs on every progress update
+    // during builds (every 500ms for minutes), so the null check was
+    // redundant overhead after the first call. Eager resolution is
+    // cleaner and avoids the null-check branching on the hot path.
+    private fun cacheViews() {
+        cachedBtnExecute = findViewById(R.id.buttonExecute)
+        cachedBtnAddImages = findViewById(R.id.buttonAddImages)
+        cachedBtnRemoveAll = findViewById(R.id.buttonRemoveAll)
+        cachedBtnBrowseOutput = findViewById(R.id.buttonBrowseOutput)
+        cachedSpinnerCompression = findViewById(R.id.spinnerCompression)
+        cachedSpinnerCompressionLevel = findViewById(R.id.spinnerCompressionLevel)
+        cachedEditDevice = findViewById(R.id.editTextDevice)
+        cachedBtnAutoDetect = findViewById(R.id.buttonAutoDetect)
+        cachedEditFilename = findViewById(R.id.editTextCustomFilename)
+        cachedProgressContainer = findViewById(R.id.progressBarContainer)
+        // Also cache log views (previously done in a separate cacheLogViews())
+        cachedLogView = findViewById(R.id.textViewLog)
+        cachedScrollView = findViewById(R.id.scrollViewLog)
+    }
 
     private fun handleImageFilesSelected(uris: List<Uri>) {
         // Cancel any previous in-flight image-loading coroutine.
@@ -2669,18 +2725,19 @@ class MainActivity : AppCompatActivity() {
                                     progress.message.contains("Building flasher") ||
                                     progress.message.contains("Writing ZIP") -> {
                                         // Post-partition steps: mark all bars complete
-                                        for (j in 0 until partitionCount) {
-                                            partitionProgress[j] = 100
-                                        }
+                                        markAllProgressComplete()
                                         currentPartitionIndex = partitionCount - 1
                                     }
                                     pIdx in 0 until partitionCount -> {
                                         // Use partitionPercent for per-partition bar fill
-                                        partitionProgress[pIdx] = progress.partitionPercent
+                                        updatePartitionProgress(pIdx, progress.partitionPercent)
                                         currentPartitionIndex = pIdx
                                         // Mark all previous partitions as complete
-                                        for (j in 0 until pIdx) {
-                                            if (partitionProgress[j] < 100) partitionProgress[j] = 100
+                                        // Mark all previous partitions as complete (thread-safe)
+                                        synchronized(progressLock) {
+                                            for (j in 0 until pIdx) {
+                                                if (partitionProgress[j] < 100) partitionProgress[j] = 100
+                                            }
                                         }
                                     }
                                 }
@@ -2708,9 +2765,15 @@ class MainActivity : AppCompatActivity() {
                             val current = activityRef?.get()
                             if (current != null && !current.isFinishing && !current.isDestroyed) {
                                 current.runOnUiThread {
-                                    // Update split progress bars
-                                    val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                                    val barRow = container?.findViewWithTag<android.widget.LinearLayout>("bar_row")
+                                    // IMPL-012: Use cached bar_row reference instead of
+                                    // findViewById + findViewWithTag on every callback.
+                                    // Fallback to resolve + cache if reference is stale
+                                    // (e.g., after Activity recreation).
+                                    if (current.cachedBarRow == null || current.cachedBarRow?.parent == null) {
+                                        val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                                        current.cachedBarRow = container?.findViewWithTag("bar_row")
+                                    }
+                                    val barRow = current.cachedBarRow
                                     if (barRow != null && barRow.childCount == partitionCount) {
                                         for (i in 0 until partitionCount) {
                                             val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
@@ -3075,10 +3138,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 // Re-create split progress bars with current state
                 if (partitionCount > 0) {
-                    val savedProgress = partitionProgress.copyOf()
+                    val savedProgress = snapshotPartitionProgress()
                     val savedIndex = currentPartitionIndex
                     setupSplitProgressBar(partitionNames)
-                    savedProgress.copyInto(partitionProgress)
+                    synchronized(progressLock) { savedProgress.copyInto(partitionProgress) }
                     currentPartitionIndex = savedIndex
                     renderPartitionProgress()
                 }
@@ -3098,9 +3161,7 @@ class MainActivity : AppCompatActivity() {
                 val result = lastBuildResult!!
 
                 // Mark all partition progress as complete
-                for (i in 0 until partitionCount) {
-                    partitionProgress[i] = 100
-                }
+                markAllProgressComplete()
 
                 // Re-render progress bars at 100% if visible
                 renderPartitionProgress(forceComplete = true)
@@ -3173,10 +3234,10 @@ class MainActivity : AppCompatActivity() {
         // an active build would reset all progress bars to 0%, making it
         // appear as if the build restarted from scratch.
         if (isBuilding && imageFiles.isNotEmpty()) {
-            val savedProgress = partitionProgress.copyOf()
+            val savedProgress = snapshotPartitionProgress()
             val savedIndex = currentPartitionIndex
             setupSplitProgressBar(imageFiles.map { it.first })
-            savedProgress.copyInto(partitionProgress)
+            synchronized(progressLock) { savedProgress.copyInto(partitionProgress) }
             currentPartitionIndex = savedIndex
             // Re-render progress bars with restored values
             renderPartitionProgress()
@@ -3208,6 +3269,7 @@ class MainActivity : AppCompatActivity() {
         cachedBtnAutoDetect = null
         cachedEditFilename = null
         cachedProgressContainer = null
+        cachedBarRow = null
     }
 
     override fun onDestroy() {
@@ -3307,19 +3369,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setUIExecuting(executing: Boolean) {
         runOnUiThread {
-            // Resolve cached views if not yet populated (first call or after recreation)
-            if (cachedBtnExecute == null) {
-                cachedBtnExecute = findViewById(R.id.buttonExecute)
-                cachedBtnAddImages = findViewById(R.id.buttonAddImages)
-                cachedBtnRemoveAll = findViewById(R.id.buttonRemoveAll)
-                cachedBtnBrowseOutput = findViewById(R.id.buttonBrowseOutput)
-                cachedSpinnerCompression = findViewById(R.id.spinnerCompression)
-                cachedSpinnerCompressionLevel = findViewById(R.id.spinnerCompressionLevel)
-                cachedEditDevice = findViewById(R.id.editTextDevice)
-                cachedBtnAutoDetect = findViewById(R.id.buttonAutoDetect)
-                cachedEditFilename = findViewById(R.id.editTextCustomFilename)
-                cachedProgressContainer = findViewById(R.id.progressBarContainer)
-            }
+            // IMPL-013: Cached views are eagerly resolved in cacheViews()
+            // (called from onCreate after setContentView). No lazy resolution needed.
             cachedBtnExecute?.text = if (executing) "BUILDING OTA..." else getString(R.string.button_repack)
             cachedBtnExecute?.isEnabled = !executing
             updateBuildButtonState()

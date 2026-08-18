@@ -53,22 +53,6 @@ object SuiseiColors {
     val isDynamicColorAvailable: Boolean
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
-    /**
-     * Resolve the system's primary accent color (Material You palette slot 1).
-     *
-     * On API 31+, returns `android.R.color.system_accent1_500` — the
-     * middle tone of the user's wallpaper-derived accent palette. This is
-     * the closest equivalent to "the user's chosen accent color" that
-     * Android exposes publicly.
-     *
-     * On API 26-30, returns the Suisei Blue seed color (#00B0F0) directly.
-     *
-     * On API 31+ if the lookup fails (rare — some heavily-customized OEM
-     * ROMs strip the system_* color resources), falls back to Suisei Blue.
-     *
-     * @param context Any context — used to resolve the system color resource
-     * @return The accent color as a 0xAARRGGBB int (alpha always 0xFF)
-     */
     /** Suisei Blue literal — used as fallback when system accent is unavailable. */
     private const val SUISEI_BLUE = 0xFF00B0F0.toInt()
 
