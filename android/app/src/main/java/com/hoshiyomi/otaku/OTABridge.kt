@@ -250,7 +250,11 @@ object OTABridge {
 
         return withContext(Dispatchers.IO) {
             try {
-                Process.setThreadPriority(Process.myTid(), -10)
+                // IMPL-018: Use -4 (THREAD_PRIORITY_URGENT_DISPLAY) instead of -10.
+                // -10 is in the audio priority range and can cause audio glitching
+                // during long compression builds. -4 gives I/O work higher priority
+                // than default (0) without interfering with audio playback.
+                Process.setThreadPriority(Process.myTid(), -4)
             } catch (_: Exception) {}
 
             try {
@@ -320,11 +324,14 @@ object OTABridge {
     //  Utility methods
     // ═══════════════════════════════════════════════════════════════
 
-    /** Format byte size as human-readable string (e.g. "45.2MB"). */
-    private fun formatSize(bytes: Long): String = when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
-        bytes < 1024 * 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024))
-        else -> String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024))
-    }
+    /** Format byte size as human-readable string (e.g. "45.2MB"). Clamps negative to 0. */
+    private fun formatSize(bytes: Long): String {
+        // IMPL-020: Guard against negative input (e.g. corrupted file size)
+        val b = if (bytes < 0) 0L else bytes
+        return when {
+        b < 1024 -> "$b B"
+        b < 1024 * 1024 -> String.format("%.1f KB", b / 1024.0)
+        b < 1024 * 1024 * 1024 -> String.format("%.1f MB", b / (1024.0 * 1024))
+        else -> String.format("%.2f GB", b / (1024.0 * 1024 * 1024))
+    }}
 }

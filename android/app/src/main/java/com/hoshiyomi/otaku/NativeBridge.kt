@@ -72,24 +72,14 @@ object NativeBridge {
      */
     fun checkDeps(): DepCheckResult {
         if (!isLoaded) {
-            return DepCheckResult(
-                available = listOf("gzip"),
-                missing = listOf("zstd", "xz", "bzip2", "lz4"),
-                allOk = false,
-                nativeVersion = "not loaded"
-            )
+            return DepCheckResult.error(nativeVersion = "not loaded")
         }
         return try {
             val jsonStr = nativeCheckDeps()
             parseDepCheckResult(jsonStr)
         } catch (e: Exception) {
             Log.e(TAG, "checkDeps failed: ${e.message}")
-            DepCheckResult(
-                available = listOf("gzip"),
-                missing = listOf("zstd", "xz", "bzip2", "lz4"),
-                allOk = false,
-                nativeVersion = "error"
-            )
+            DepCheckResult.error()
         }
     }
 
@@ -244,7 +234,17 @@ object NativeBridge {
         val missing: List<String>,
         val allOk: Boolean,
         val nativeVersion: String
-    )
+    ) {
+        companion object {
+            /** Create an error result indicating the native library is not functional. */
+            fun error(nativeVersion: String = "error") = DepCheckResult(
+                available = listOf("gzip"),
+                missing = listOf("zstd", "xz", "bzip2", "lz4"),
+                allOk = false,
+                nativeVersion = nativeVersion
+            )
+        }
+    }
 
     /**
      * Result of a DD build operation (Phase 3).
