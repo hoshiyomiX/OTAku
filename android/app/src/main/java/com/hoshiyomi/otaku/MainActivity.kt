@@ -429,7 +429,7 @@ class MainActivity : AppCompatActivity() {
         //    reads the night mode from step 1 and APPLIES it to the
         //    Activity's Resources. Only AFTER this call does the
         //    Activity's context reflect the correct night mode.
-        // 3. applyDynamicTheme() AFTER super.onCreate() — sets the
+        // 3. applyDynamicColorsOverlay() AFTER super.onCreate() — sets the
         //    base theme (Theme.OTAku.Suisei) and applies Material You
         //    DynamicColors overlay. This MUST happen after super.onCreate()
         //    because DynamicColors needs the Activity's night mode to
@@ -443,7 +443,7 @@ class MainActivity : AppCompatActivity() {
         //    the OLD night mode (e.g., MODE_NIGHT_YES) which would override
         //    setDefaultNightMode() and cause mixed light/dark colors.
         //
-        // BUGFIX: Previously, applyDynamicTheme() was called BEFORE
+        // BUGFIX: Previously, applyDynamicColorsOverlay() was called BEFORE
         // super.onCreate(). This caused DynamicColors to see stale
         // night mode configuration, resulting in:
         //   - Auto mode (system dark): white background, no accent
@@ -487,8 +487,27 @@ class MainActivity : AppCompatActivity() {
             savedInstanceState
         }
         applyTheme()
+
+        // IMPL-007: Set the base theme BEFORE super.onCreate() so the
+        // Window (created in attach()) gets Theme.OTAku.Suisei instead of
+        // Theme.OTAku.Splash. Without this, the Window background and
+        // system bars are set from the stale night mode, causing mixed
+        // colors (dark window bg + light content, or vice versa).
+        setTheme(R.style.Theme_OTAku_Suisei)
+
         super.onCreate(cleanedState)
-        applyDynamicTheme()
+
+        // IMPL-007: Apply DynamicColors AFTER super.onCreate() (night mode
+        // must be finalized). setTheme() was already called before
+        // super.onCreate() — this only applies the Material You overlay.
+        applyDynamicColorsOverlay()
+
+        // IMPL-007: Force-sync the Window's appearance to the current theme.
+        // The Resources at attach() time may have had stale night mode, so
+        // the Window was themed with the wrong variant. This re-reads
+        // window attributes from the now-correct theme and applies them.
+        syncWindowToTheme()
+
         setContentView(R.layout.activity_main)
 
         // Initialize lastUiMode from the current configuration so that the FIRST
@@ -694,36 +713,130 @@ class MainActivity : AppCompatActivity() {
      * Must be called BEFORE setContentView() so theme attributes resolve correctly
      * during view inflation, but AFTER super.onCreate() so night mode is finalized.
      */
-    private fun applyDynamicTheme() {
-        // THEME-DEFAULT-FIX: Always use Suisei Blue as the base theme.
-        // This is the app's brand identity — never default to generic teal/cyan.
-        setTheme(R.style.Theme_OTAku_Suisei)
-
+    /**
+     * Apply Material You dynamic color overlay based on device capability
+     * and user preference.
+     *
+     * IMPL-007: This method ONLY applies the DynamicColors overlay. The base
+     * theme (Theme.OTAku.Suisei) is now set BEFORE super.onCreate() in
+     * onCreate() to ensure the Window gets the correct theme variant.
+     * Previously, setTheme() was called here (after super.onCreate()),
+     * which caused the Window to retain stale night mode colors because
+     * the Window's background and system bar colors are set once during
+     * Window creation (Activity.attach()) and are NOT retroactively
+     * updated by later setTheme() calls.
+     *
+     * Must be called AFTER super.onCreate() so night mode is finalized,
+     * but BEFORE setContentView() so theme attributes resolve correctly
+     * during view inflation.
+     */
+    private fun applyDynamicColorsOverlay() {
         val useDynamic = SuiseiColors.shouldUseDynamicTheme(prefs)
         if (useDynamic) {
-            // Apply Material You dynamic color overlay on top of the Suisei base.
-            // The overlay overrides colorPrimary, colorSecondary, etc. with the
-            // system's wallpaper-derived accent — including cyan if that's the
-            // system accent. No restriction on accent colors.
             try {
-                // applyToActivityIfAvailable() returns DynamicColors (for fluent
-                // chaining), NOT a Boolean. The "IfAvailable" suffix means it
-                // applies only if the device supports Material You — but the
-                // return type is always DynamicColors. Do NOT treat the return
-                // value as a success/failure indicator.
                 com.google.android.material.color.DynamicColors
                     .applyToActivityIfAvailable(this)
             } catch (e: Throwable) {
-                // Defensive: if Material library is older than expected or the
-                // Activity context isn't properly initialized, fall through
-                // silently. Suisei Blue base still works.
                 android.util.Log.e("OTAku", "DynamicColors.applyToActivityIfAvailable() " +
                     "threw: ${e.message}")
             }
         }
-        // If !useDynamic: Suisei Blue base with no overlay — the default
-        // fallback palette (#00B0F0 seed). This is the correct behavior on
-        // API 26-30 or when user has disabled dynamic color.
+    }
+
+    /**
+     * IMPL-007: Force-sync the Window's appearance to the current theme.
+     *
+     * When recreate() is called (e.g., theme switch via cycleTheme()),
+     * the new Activity's Window is created in Activity.attach() BEFORE
+     * onCreate(). At attach() time, the Resources configuration may
+     * still reflect the PREVIOUS Activity's night mode. The Window's
+     * background and system bar colors are set once during Window
+     * creation and are NOT retroactively updated by later setTheme().
+     *
+     * This method re-reads window-related attributes from the NOW-CORRECT
+     * theme (after super.onCreate() applied the right night mode) and
+     * explicitly applies them to the Window, ensuring the Window
+     * background, status bar, and navigation bar match the content views.
+     */
+    private fun syncWindowToTheme() {
+        try {
+            val window = this.window ?: return
+
+            // Re-read windowBackground from the current theme and apply it.
+            val bgAttrs = intArrayOf(android.R.attr.windowBackground)
+            val bgTa = obtainStyledAttributes(bgAttrs)
+            val background = bgTa.getDrawable(0)
+            bgTa.recycle()
+            if (background != null) {
+                window.setBackgroundDrawable(background)
+            }
+
+            // Re-read status bar and navigation bar colors.
+            val sysAttrs = intArrayOf(
+                android.R.attr.statusBarColor,
+                android.R.attr.navigationBarColor
+            )
+            val sysTa = obtainStyledAttributes(sysAttrs)
+            window.statusBarColor = sysTa.getColor(0, android.graphics.Color.TRANSPARENT)
+            window.navigationBarColor = sysTa.getColor(1, android.graphics.Color.TRANSPARENT)
+            sysTa.recycle()
+
+            // Re-read and apply light status bar / navigation bar flags.
+            val lightAttrs = intArrayOf(
+                android.R.attr.windowLightStatusBar,
+                android.R.attr.windowLightNavigationBar
+            )
+            val lightTa = obtainStyledAttributes(lightAttrs)
+            val lightStatusBar = lightTa.getBoolean(0, false)
+            val lightNavigationBar = lightTa.getBoolean(1, false)
+            lightTa.recycle()
+
+            // Apply light-bar flags via WindowInsetsController (API 30+)
+            // or legacy systemUiVisibility flags (API 26-29).
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val controller = window.decorView.windowInsetsController
+                if (controller != null) {
+                    if (lightStatusBar) {
+                        controller.setSystemBarsAppearance(
+                            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        )
+                    } else {
+                        controller.setSystemBarsAppearance(
+                            0,
+                            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        )
+                    }
+                    if (lightNavigationBar) {
+                        controller.setSystemBarsAppearance(
+                            android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                            android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+                        )
+                    } else {
+                        controller.setSystemBarsAppearance(
+                            0,
+                            android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+                        )
+                    }
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                var flags = window.decorView.systemUiVisibility
+                @Suppress("DEPRECATION")
+                val lightStatusBarFlag = android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                @Suppress("DEPRECATION")
+                val lightNavBarFlag = android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+
+                flags = if (lightStatusBar) flags or lightStatusBarFlag
+                        else flags and lightStatusBarFlag.inv()
+                flags = if (lightNavigationBar) flags or lightNavBarFlag
+                        else flags and lightNavBarFlag.inv()
+
+                window.decorView.systemUiVisibility = flags
+            }
+        } catch (e: Throwable) {
+            android.util.Log.e("OTAku", "syncWindowToTheme() failed: ${e.message}")
+        }
     }
 
     override fun onCreateOptionsMenu(menu: android.view.Menu?): Boolean {
