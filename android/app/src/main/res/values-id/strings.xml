@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Indonesian (Bahasa Indonesia) translation — P1-fix I-04 -->
+    <string name="app_name">OTAku</string>
+    <string name="toolbar_subtitle">Pembangun Partisi</string>
+
+    <!-- Flashable Information -->
+    <string name="label_flashable_info">Informasi Flashable</string>
+    <string name="description_flashable_info">Nama ROM dan pembuat (kosmetik — tampil di banner flasher)</string>
+    <string name="hint_optional_default_banner">Opsional — kosongkan untuk banner default</string>
+    <string name="hint_rom_name">Nama ROM</string>
+    <string name="hint_maker">Pembuat</string>
+
+    <!-- Accessibility -->
+    <string name="cd_toggle_log_panel">Buka/tutup panel log</string>
+    <string name="cd_remove_partition">Hapus partisi %1$s</string>
+    <string name="cd_arrow_expand_log">Buka atau tutup panel log</string>
+
+    <!-- Partitions -->
+    <string name="label_partitions">PARTISI</string>
+    <string name="hint_no_images">Belum ada image ditambahkan</string>
+    <string name="hint_add_images_prompt">Pilih image partisi (.img) untuk dimasukkan ke ZIP flashable.</string>
+    <string name="button_add_images">Tambah Partisi</string>
+    <string name="button_remove_all">Hapus Semua</string>
+
+    <!-- Compression -->
+    <string name="label_compression">FORMAT KOMPRESI</string>
+    <string name="description_compression">Algoritma kompresi yang digunakan untuk mengecilkan ukuran file output.</string>
+    <string name="label_compression_level">TINGKAT KOMPRESI</string>
+    <string name="description_compression_level">Nilai lebih tinggi menghasilkan file lebih kecil dengan waktu proses lebih lama. Default memakai pengaturan yang direkomendasikan.</string>
+
+    <!-- Device -->
+    <string name="label_device">PERANGKAT</string>
+    <string name="description_device">Kode nama perangkat target untuk verifikasi keamanan flash.</string>
+    <string name="hint_device_required">Wajib</string>
+    <string name="hint_device_codename">Kode nama perangkat *</string>
+    <string name="helper_device_codename">Wajib untuk verifikasi keamanan flash di custom recovery. Mencegah flashing di perangkat yang salah. Pisahkan beberapa perangkat dengan koma.</string>
+    <string name="button_auto_detect">Deteksi otomatis</string>
+
+    <!-- Output -->
+    <string name="label_output">OUTPUT</string>
+    <string name="hint_output_dir">Direktori output</string>
+    <string name="hint_custom_filename">Nama file kustom (opsional)</string>
+    <string name="helper_custom_filename">Nama file dibuat otomatis jika dikosongkan</string>
+    <string name="label_preview">Pratinjau:</string>
+    <string name="button_browse">Telusuri</string>
+
+    <!-- Actions -->
+    <string name="button_repack">BANGUN OTA</string>
+    <string name="button_execute">Jalankan</string>
+    <string name="button_copy_log">Salin</string>
+    <string name="button_clear_log">Bersihkan</string>
+    <string name="log_copied">Log disalin ke clipboard</string>
+
+    <!-- Toggle options -->
+    <string name="label_skip_verify">Lewati verifikasi pasca-flash</string>
+    <string name="helper_skip_verify">Menonaktifkan verifikasi integritas setelah flashing. Flashing akan lebih cepat, tetapi integritas data tidak akan dikonfirmasi.</string>
+
+    <!-- Log section -->
+    <string name="label_output_log">Log</string>
+
+    <!-- Status messages -->
+    <string name="log_init_success">Backend native v%1$s siap</string>
+    <string name="status_initializing">Menginisialisasi backend native…</string>
+    <string name="status_executing">Membangun partisi…</string>
+
+    <!-- About dialog -->
+    <string name="about_title">Tentang OTAku</string>
+    <string name="about_version">Versi %1$s</string>
+    <string name="about_description">Alat Android non-root untuk membangun image partisi menjadi paket OTA ZIP yang dapat di-flash.\n\nDibangun di atas otaku, toolkit OTA yang patuh AOSP.</string>
+    <string name="about_ok">OK</string>
+
+    <!-- Theme -->
+    <string name="theme_label">Ganti tema</string>
+
+    <!-- Dynamic color -->
+    <string name="dynamic_color_label">Warna dinamis</string>
+    <string name="dynamic_color_summary">Pakai warna aksen sistem di Android 12+. Kembali ke Suisei Blue (#00B0F0) di versi lebih lama.</string>
+    <string name="color_source_material_you">Material You (aksen sistem)</string>
+    <string name="color_source_suisei">Suisei Blue (default)</string>
+</resources>

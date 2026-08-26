@@ -29,8 +29,8 @@
 
     <com.google.android.material.appbar.AppBarLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:fitsSystemWindows="true">
+        android:layout_height="wrap_content">
+        <!-- P2-fix L-02: removed android:fitsSystemWindows="true" (double-inset with root CoordinatorLayout) -->
 
         <com.google.android.material.appbar.MaterialToolbar
             android:id="@+id/toolbar"
@@ -63,16 +63,16 @@
             android:layout_weight="1"
             android:fillViewport="true"
             android:scrollbars="vertical"
-            android:fadeScrollbars="true"
+            android:fadeScrollbars="false"
             
-            android:scrollbarSize="4dp">
+            android:scrollbarSize="6dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:paddingHorizontal="16dp"
-                android:paddingTop="12dp"
+                android:paddingTop="16dp"
                 android:paddingBottom="16dp">
 
                 <!-- ═══════════════════════════════════════ -->
@@ -82,7 +82,7 @@
                 <com.google.android.material.card.MaterialCardView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="8dp"
                     app:cardCornerRadius="16dp"
                     app:cardElevation="0dp"
                     app:strokeWidth="1dp"
@@ -98,14 +98,14 @@
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Flashable Information"
+                            android:text="@string/label_flashable_info"
                             style="@style/TextAppearance.OTAku.SectionTitle"
                             android:layout_marginBottom="4dp" />
 
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="ROM name and maker (cosmetic — shown in flasher banner)"
+                            android:text="@string/description_flashable_info"
                             android:textSize="12sp"
                             android:textColor="?attr/colorOnSurfaceVariant"
                             android:layout_marginBottom="4dp" />
@@ -115,13 +115,13 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:orientation="vertical"
-                            android:layout_marginBottom="2dp">
+                            android:layout_marginBottom="4dp">
 
                             <com.google.android.material.textfield.TextInputLayout
                                 android:id="@+id/layoutRomName"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:hint="ROM name"
+                                android:hint="@string/hint_rom_name"
                                 app:boxBackgroundColor="?attr/colorSurface"
                                 app:boxCornerRadiusTopStart="12dp"
                                 app:boxCornerRadiusTopEnd="12dp"
@@ -132,7 +132,7 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextRomName"
                                     android:layout_width="match_parent"
-                                    android:layout_height="40dp"
+                                    android:layout_height="48dp"
                                     android:inputType="text"
                                     android:maxLines="1"
                                     android:textSize="14sp"
@@ -146,7 +146,7 @@
                                 android:id="@+id/layoutMaker"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:hint="Maker"
+                                android:hint="@string/hint_maker"
                                 android:layout_marginTop="8dp"
                                 app:boxBackgroundColor="?attr/colorSurface"
                                 app:boxCornerRadiusTopStart="12dp"
@@ -158,7 +158,7 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextMaker"
                                     android:layout_width="match_parent"
-                                    android:layout_height="40dp"
+                                    android:layout_height="48dp"
                                     android:inputType="text"
                                     android:maxLines="1"
                                     android:textSize="14sp"
@@ -173,7 +173,7 @@
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Optional — leave blank for default banner"
+                            android:text="@string/hint_optional_default_banner"
                             style="@style/TextAppearance.OTAku.Micro"
                             android:layout_marginStart="4dp"
                             android:layout_marginBottom="4dp" />
@@ -183,8 +183,8 @@
                             android:layout_width="match_parent"
                             android:layout_height="1dp"
                             android:background="?attr/colorOutlineVariant"
-                            android:layout_marginTop="14dp"
-                            android:layout_marginBottom="14dp" />
+                            android:layout_marginTop="12dp"
+                            android:layout_marginBottom="12dp" />
 
                         <!-- ── 1. Device ── -->
                         <LinearLayout
@@ -222,7 +222,7 @@
                             android:layout_height="wrap_content"
                             android:orientation="horizontal"
                             android:gravity="center_vertical"
-                            android:layout_marginBottom="2dp">
+                            android:layout_marginBottom="4dp">
 
                             <com.google.android.material.textfield.TextInputLayout
                                 android:id="@+id/layoutDevice"
@@ -241,7 +241,7 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextDevice"
                                     android:layout_width="match_parent"
-                                    android:layout_height="40dp"
+                                    android:layout_height="48dp"
                                     android:inputType="text"
                                     android:maxLines="1"
                                     android:textSize="14sp"
@@ -255,13 +255,13 @@
                                 android:id="@+id/buttonAutoDetect"
                                 style="@style/Widget.OTAku.Button.Tonal"
                                 android:layout_width="wrap_content"
-                                android:layout_height="40dp"
+                                android:layout_height="48dp"
                                 android:layout_gravity="center_vertical"
                                 android:layout_marginStart="8dp"
                                 android:text="@string/button_auto_detect"
-                                android:textSize="12sp"
+                                android:tooltipText="@string/button_auto_detect"
                                 android:minWidth="0dp"
-                                android:paddingHorizontal="12dp"
+                                android:paddingHorizontal="24dp"
                                 app:cornerRadius="12dp"
                                 app:icon="@drawable/ic_auto_detect"
                                 app:iconSize="16dp"
@@ -284,8 +284,8 @@
                             android:layout_width="match_parent"
                             android:layout_height="1dp"
                             android:background="?attr/colorOutlineVariant"
-                            android:layout_marginTop="14dp"
-                            android:layout_marginBottom="14dp" />
+                            android:layout_marginTop="12dp"
+                            android:layout_marginBottom="12dp" />
 
                         <!-- ── 2. Add Partitions ── -->
                         <TextView
@@ -302,7 +302,7 @@
                             android:text="@string/hint_add_images_prompt"
                             android:textSize="13sp"
                             android:textColor="?attr/colorOnSurfaceVariant"
-                            android:layout_marginBottom="10dp"
+                            android:layout_marginBottom="8dp"
                             android:visibility="visible" />
 
                         <!-- Add Images + Remove All -->
@@ -311,17 +311,17 @@
                             android:layout_height="wrap_content"
                             android:orientation="horizontal"
                             android:gravity="center_vertical"
-                            android:layout_marginBottom="10dp">
+                            android:layout_marginBottom="8dp">
 
                             <com.google.android.material.button.MaterialButton
                                 android:id="@+id/buttonAddImages"
                                 android:layout_width="0dp"
-                                android:layout_height="40dp"
+                                android:layout_height="48dp"
                                 android:layout_weight="1"
                                 android:text="@string/button_add_images"
-                                android:textSize="12sp"
+                                
                                 android:minWidth="0dp"
-                                android:paddingHorizontal="12dp"
+                                android:paddingHorizontal="24dp"
                                 style="@style/Widget.OTAku.Button.Tonal"
                                 app:cornerRadius="12dp"
                                 app:icon="@android:drawable/ic_input_add"
@@ -333,11 +333,11 @@
                                 android:id="@+id/buttonRemoveAll"
                                 style="@style/Widget.OTAku.Button.Outlined"
                                 android:layout_width="wrap_content"
-                                android:layout_height="40dp"
+                                android:layout_height="48dp"
                                 android:text="@string/button_remove_all"
-                                android:textSize="12sp"
+                                
                                 android:minWidth="0dp"
-                                android:paddingHorizontal="12dp"
+                                android:paddingHorizontal="24dp"
                                 app:cornerRadius="12dp"
                                 android:visibility="gone"
                                 android:layout_marginStart="8dp" />
@@ -369,8 +369,8 @@
                             android:layout_width="match_parent"
                             android:layout_height="1dp"
                             android:background="?attr/colorOutlineVariant"
-                            android:layout_marginTop="14dp"
-                            android:layout_marginBottom="14dp" />
+                            android:layout_marginTop="12dp"
+                            android:layout_marginBottom="12dp" />
 
                         <!-- ── 3. Compression Format ── -->
                         <TextView
@@ -391,7 +391,7 @@
                         <androidx.appcompat.widget.AppCompatSpinner
                             android:id="@+id/spinnerCompression"
                             android:layout_width="match_parent"
-                            android:layout_height="40dp"
+                            android:layout_height="48dp"
                             android:background="?attr/selectableItemBackground"
                             android:spinnerMode="dropdown"
                             android:paddingStart="8dp"
@@ -402,8 +402,8 @@
                             android:layout_width="match_parent"
                             android:layout_height="1dp"
                             android:background="?attr/colorOutlineVariant"
-                            android:layout_marginTop="14dp"
-                            android:layout_marginBottom="14dp" />
+                            android:layout_marginTop="12dp"
+                            android:layout_marginBottom="12dp" />
 
                         <!-- ── 4. Compression Level ── -->
                         <TextView
@@ -424,7 +424,7 @@
                         <androidx.appcompat.widget.AppCompatSpinner
                             android:id="@+id/spinnerCompressionLevel"
                             android:layout_width="match_parent"
-                            android:layout_height="40dp"
+                            android:layout_height="48dp"
                             android:background="?attr/selectableItemBackground"
                             android:spinnerMode="dropdown"
                             android:paddingStart="8dp"
@@ -435,8 +435,8 @@
                             android:layout_width="match_parent"
                             android:layout_height="1dp"
                             android:background="?attr/colorOutlineVariant"
-                            android:layout_marginTop="14dp"
-                            android:layout_marginBottom="14dp" />
+                            android:layout_marginTop="12dp"
+                            android:layout_marginBottom="12dp" />
 
                         <!-- ── 5. Output ── -->
                         <TextView
@@ -468,7 +468,7 @@
                             <com.google.android.material.textfield.TextInputEditText
                                 android:id="@+id/editTextCustomFilename"
                                 android:layout_width="match_parent"
-                                android:layout_height="40dp"
+                                android:layout_height="48dp"
                                 android:inputType="text"
                                 android:maxLines="1"
                                 android:textSize="14sp"
@@ -532,7 +532,7 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextOutput"
                                     android:layout_width="match_parent"
-                                    android:layout_height="40dp"
+                                    android:layout_height="48dp"
                                     android:hint="@string/hint_output_dir"
                                     android:inputType="none"
                                     android:focusable="false"
@@ -550,11 +550,11 @@
                                 android:id="@+id/buttonBrowseOutput"
                                 style="@style/Widget.OTAku.Button.Outlined"
                                 android:layout_width="wrap_content"
-                                android:layout_height="40dp"
+                                android:layout_height="48dp"
                                 android:text="@string/button_browse"
-                                android:textSize="12sp"
+                                
                                 android:minWidth="0dp"
-                                android:paddingHorizontal="12dp"
+                                android:paddingHorizontal="24dp"
                                 app:cornerRadius="12dp"
                                 app:icon="@android:drawable/ic_menu_view"
                                 app:iconSize="16dp"
@@ -578,7 +578,7 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:visibility="gone"
-                    android:layout_marginBottom="10dp" />
+                    android:layout_marginBottom="8dp" />
 
             </LinearLayout>
 
@@ -620,7 +620,7 @@
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
-                    android:paddingHorizontal="12dp"
+                    android:paddingHorizontal="24dp"
                     android:paddingVertical="10dp"
                     android:clickable="true"
                     android:focusable="true"
@@ -628,15 +628,17 @@
 
                     <!-- Arrow toggle — LEFT of "Logs" text.
                          Plain ImageView with ?attr/colorPrimary tint for accent color.
-                         Click handled by parent logHeaderBar (full-width clickable). -->
+                         Click handled by parent logHeaderBar (full-width clickable).
+                         P0-fix A-02: 32dp → 48dp (M3 touch target minimum) -->
                     <ImageView
                         android:id="@+id/buttonToggleLog"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
                         android:src="@drawable/ic_expand_log"
-                        android:contentDescription="@string/label_output_log"
+                        android:contentDescription="@string/cd_arrow_expand_log"
                         android:clickable="true"
                         android:focusable="true"
+                        android:tooltipText="@string/cd_toggle_log_panel"
                         android:background="?attr/selectableItemBackgroundBorderless"
                         app:tint="?attr/colorPrimary"
                         android:scaleType="centerInside"
@@ -656,22 +658,22 @@
                         android:id="@+id/buttonCopyLog"
                         style="@style/Widget.OTAku.Button.Text"
                         android:layout_width="wrap_content"
-                        android:layout_height="40dp"
+                        android:layout_height="48dp"
                         android:text="@string/button_copy_log"
-                        android:textSize="12sp"
+                        
                         android:minWidth="0dp"
-                        android:paddingHorizontal="12dp" />
+                        android:paddingHorizontal="24dp" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonClearLog"
                         style="@style/Widget.OTAku.Button.Text"
                         android:layout_width="wrap_content"
-                        android:layout_height="40dp"
+                        android:layout_height="48dp"
                         android:text="@string/button_clear_log"
-                        android:textSize="12sp"
+                        
                         android:minWidth="0dp"
                         android:layout_marginStart="4dp"
-                        android:paddingHorizontal="12dp" />
+                        android:paddingHorizontal="24dp" />
 
                 </LinearLayout>
 
@@ -698,8 +700,8 @@
                     android:layout_weight="1"
                     android:fillViewport="true"
                     android:scrollbars="vertical"
-                    android:fadeScrollbars="true"
-                    android:scrollbarSize="4dp">
+                    android:fadeScrollbars="false"
+                    android:scrollbarSize="6dp">
 
                     <TextView
                         android:id="@+id/textViewLog"
@@ -709,7 +711,7 @@
                         android:textColor="?attr/colorPrimary"
                         android:fontFamily="monospace"
                         android:textSize="11sp"
-                        android:lineSpacingMultiplier="1.3"
+                        android:lineSpacingMultiplier="1.4"
                         android:typeface="monospace"
                         android:textIsSelectable="true" />
 
@@ -749,15 +751,16 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:paddingHorizontal="14dp"
-            android:paddingVertical="10dp">
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="14dp">
 
             <ImageView
                 android:id="@+id/miniToggleArrow"
                 android:layout_width="20dp"
                 android:layout_height="20dp"
                 android:src="@drawable/ic_expand_log"
-                android:contentDescription="@string/label_output_log"
+                android:contentDescription="@string/cd_arrow_expand_log"
+                android:tooltipText="@string/cd_toggle_log_panel"
                 app:tint="?attr/colorOnPrimary"
                 android:scaleType="centerInside"
                 android:layout_marginEnd="6dp" />
@@ -790,6 +793,7 @@
         android:contentDescription="@string/button_repack"
         app:icon="@android:drawable/ic_media_play"
         app:cornerRadius="16dp"
+        app:layout_behavior="com.google.android.material.behavior.HideBottomViewOnScrollBehavior"
         android:enabled="false" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

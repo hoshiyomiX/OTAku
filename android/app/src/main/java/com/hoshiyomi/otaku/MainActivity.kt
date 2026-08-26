@@ -1236,7 +1236,7 @@ class MainActivity : AppCompatActivity() {
         val logCard = findViewById<com.google.android.material.card.MaterialCardView>(R.id.logCard)
         val logHeader = findViewById<View>(R.id.logHeaderBar)
         val toggleBtn = findViewById<android.widget.ImageView>(R.id.buttonToggleLog)
-        toggleBtn?.contentDescription = "Toggle log panel"  // accessibility
+        toggleBtn?.contentDescription = getString(R.string.cd_toggle_log_panel)  // P0-fix C-04: was hardcoded "Toggle log panel"
         val logDivider = findViewById<View>(R.id.logDivider)
         val logScrollView = findViewById<androidx.core.widget.NestedScrollView>(R.id.scrollViewLog)
         val parentLayout = logCard?.parent as? android.widget.LinearLayout
@@ -2954,7 +2954,7 @@ class MainActivity : AppCompatActivity() {
                     // "Type mismatch: inferred type is Float but Int was expected")
                     iconSize = dpToPx(18)
                     text = null  // icon-only button
-                    contentDescription = "Remove $name partition"  // accessibility
+                    contentDescription = this@MainActivity.getString(R.string.cd_remove_partition, name)  // P0-fix C-05: was hardcoded "Remove $name partition"
                     insetTop = 0
                     insetBottom = 0
                     minimumWidth = 0

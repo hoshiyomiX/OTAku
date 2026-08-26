@@ -3,6 +3,19 @@
     <!-- App name -->
     <string name="app_name">OTAku</string>
 
+    <!-- Flashable Information section (P0-fix I-01: extracted from hardcoded layout strings) -->
+    <string name="label_flashable_info">Flashable Information</string>
+    <string name="description_flashable_info">ROM name and maker (cosmetic — shown in flasher banner)</string>
+    <string name="hint_optional_default_banner">Optional — leave blank for default banner</string>
+    <string name="hint_rom_name">ROM name</string>
+    <string name="hint_maker">Maker</string>
+
+    <!-- Accessibility content descriptions (P0-fix C-04/A-04 + C-05/A-05: extracted from MainActivity.kt) -->
+    <string name="cd_toggle_log_panel">Toggle log panel</string>
+    <string name="cd_remove_partition">Remove %1$s partition</string>
+    <string name="cd_arrow_expand_log">Expand or collapse log panel</string>
+    <string name="cd_remove_partition_plural">Remove partition</string>
+
     <!-- Toolbar -->
     <string name="toolbar_subtitle">Partition Builder</string>
 
@@ -10,7 +23,8 @@
     <string name="label_partitions">PARTITIONS</string>
     <string name="hint_no_images">No images added yet</string>
     <string name="hint_add_images_prompt">Select partition images (.img) to include in the flashable ZIP.</string>
-    <string name="button_add_images">Add Partition(s)</string>
+    <!-- P2-fix I-09: removed "(s)" notation for cleaner plural. Was: "Add Partition(s)" -->
+    <string name="button_add_images">Add Partitions</string>
     <string name="button_remove_all">Remove All</string>
 
     <!-- Compression section -->
@@ -31,7 +45,8 @@
     <string name="label_output">OUTPUT</string>
     <string name="hint_output_dir">Output directory</string>
     <string name="hint_custom_filename">Custom filename (optional)</string>
-    <string name="helper_custom_filename">Leave empty for auto-generated name</string>
+    <!-- P2-fix I-07: passive voice → active voice. Was: "Leave empty for auto-generated name" -->
+    <string name="helper_custom_filename">Auto-generate filename if empty</string>
     <string name="label_preview">Preview:</string>
     <string name="button_browse">Browse</string>
 
@@ -50,7 +65,8 @@
     <string name="label_output_log">Logs</string>
 
     <!-- Status messages -->
-    <string name="log_init_success">otaku-native %1$s loaded</string>
+    <!-- P2-fix I-08: hide implementation detail "otaku-native". Was: "otaku-native %1$s loaded" -->
+    <string name="log_init_success">Native backend v%1$s ready</string>
     <string name="status_initializing">Initializing native backend…</string>
     <string name="status_executing">Building partitions…</string>
 
