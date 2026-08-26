@@ -93,11 +93,11 @@
     <!-- ═══════════════════════════════════════════════════════════════ -->
 
     <!-- Chip backgrounds -->
-    <!-- IMPL-007: Deprecated — chip background now uses @color/chip_background
+    <!-- IMPL-007 / P2-fix C-T-05: Deprecated — chip background now uses @color/chip_background
          ColorStateList (colorSurfaceVariant/colorPrimaryContainer) for theme-awareness.
-         Kept for reference; safe to remove in next major version. -->
+         Removed in P2 cleanup pass. -->
     <color name="chip_selected_bg">#E0F2F1</color>
-    <!-- IMPL-007: Deprecated — same reason as chip_selected_bg above. -->
+    <!-- IMPL-007 / P2-fix C-T-05: Deprecated — same reason as chip_selected_bg above. -->
     <color name="chip_default_bg">#F5F5F5</color>
 
     <!-- Log output — light theme: light bg + dark text.
@@ -106,26 +106,32 @@
     <color name="log_text">#1E1E1E</color>
     <color name="log_divider">#E0E0E0</color>
 
-    <!-- Partition list text — theme-aware via values-night override.
+    <!-- Partition list text — P1-fix C-T-03: kept as resource for programmatic resolve.
          Light: near-black (#191C1B) on light surface.
          Dark: near-white (#E1E3E0) on dark surface.
          Defined as explicit color resource (not ?attr) because the TextView
          is created programmatically and ContextCompat.getColor needs a
          concrete resource ID that Android can resolve per-configuration. -->
     <color name="partition_text">#191C1B</color>
+    <!-- P1-fix C-T-04: was hardcoded teal #80CBC4. Now uses ?attr/colorPrimary tint
+         for theme-awareness (teal/Suisei/dynamic). The hardcoded teal didn't adapt
+         when user switched to Suisei Blue palette. -->
     <color name="partition_text_loading">#80CBC4</color>
-    <!-- Log level colors — same for both light/dark (terminal-style always-dark bg).
-         log_info is overridden to use ?attr/colorPrimary (accent) via code in showLog(). -->
-    <color name="log_error">#F44336</color>
-    <color name="log_success">#4CAF50</color>
-    <color name="log_warning">#FF9800</color>
+    <!-- Log level colors — P1-fix C-T-02: aligned with M3 semantic color tokens.
+         log_error: M3 error (#BA1A1A)
+         log_success: derived from M3 primary tone (success green concept)
+         log_warning: derived from M3 tertiary tone
+         log_info overridden to use ?attr/colorPrimary (accent) via code in showLog(). -->
+    <color name="log_error">#BA1A1A</color>
+    <color name="log_success">#4B635B</color>
+    <color name="log_warning">#426278</color>
     <color name="log_info">#80CBC4</color>
     <color name="log_debug">#9E9E9E</color>
 
-    <!-- Status colors -->
-    <color name="status_running">#FF9800</color>
-    <color name="status_success">#4CAF50</color>
-    <color name="status_error">#F44336</color>
+    <!-- Status colors — P1-fix C-T-02: aligned with M3 semantic tokens -->
+    <color name="status_running">#426278</color>
+    <color name="status_success">#4B635B</color>
+    <color name="status_error">#BA1A1A</color>
 
     <!-- Card colors -->
     <!-- Card border — unused in current code. When needed, prefer

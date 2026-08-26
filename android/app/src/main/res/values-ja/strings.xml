@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Japanese (日本語) translation — P1-fix I-04 -->
+    <string name="app_name">OTAku</string>
+    <string name="toolbar_subtitle">パーティションビルダー</string>
+
+    <!-- Flashable Information -->
+    <string name="label_flashable_info">フラッシュ情報</string>
+    <string name="description_flashable_info">ROM名とメーカー（外観用 — フラッシャーバナーに表示）</string>
+    <string name="hint_optional_default_banner">任意 — デフォルトバナーを使う場合は空欄</string>
+    <string name="hint_rom_name">ROM名</string>
+    <string name="hint_maker">メーカー</string>
+
+    <!-- Accessibility -->
+    <string name="cd_toggle_log_panel">ログパネルの開閉</string>
+    <string name="cd_remove_partition">%1$s パーティションを削除</string>
+    <string name="cd_arrow_expand_log">ログパネルを開くまたは閉じる</string>
+
+    <!-- Partitions -->
+    <string name="label_partitions">パーティション</string>
+    <string name="hint_no_images">まだイメージが追加されていません</string>
+    <string name="hint_add_images_prompt">フラッシュ可能なZIPに含めるパーティションイメージ(.img)を選択してください。</string>
+    <string name="button_add_images">パーティションを追加</string>
+    <string name="button_remove_all">すべて削除</string>
+
+    <!-- Compression -->
+    <string name="label_compression">圧縮形式</string>
+    <string name="description_compression">出力ファイルサイズを縮小するために使用される圧縮アルゴリズム。</string>
+    <string name="label_compression_level">圧縮レベル</string>
+    <string name="description_compression_level">高い値は処理時間が長くなりますが、より小さなファイルが生成されます。デフォルトは推奨設定を使用します。</string>
+
+    <!-- Device -->
+    <string name="label_device">デバイス</string>
+    <string name="description_device">フラッシュ安全性検証用のターゲットデバイスコードネーム。</string>
+    <string name="hint_device_required">必須</string>
+    <string name="hint_device_codename">デバイスコードネーム *</string>
+    <string name="helper_device_codename">カスタムリカバリでのフラッシュ安全性検証に必須です。誤ったデバイスへのフラッシュを防ぎます。複数のデバイスはカンマで区切ってください。</string>
+    <string name="button_auto_detect">自動検出</string>
+
+    <!-- Output -->
+    <string name="label_output">出力</string>
+    <string name="hint_output_dir">出力ディレクトリ</string>
+    <string name="hint_custom_filename">カスタムファイル名（任意）</string>
+    <string name="helper_custom_filename">空欄で自動生成ファイル名</string>
+    <string name="label_preview">プレビュー:</string>
+    <string name="button_browse">参照</string>
+
+    <!-- Actions -->
+    <string name="button_repack">OTAをビルド</string>
+    <string name="button_execute">実行</string>
+    <string name="button_copy_log">コピー</string>
+    <string name="button_clear_log">クリア</string>
+    <string name="log_copied">ログをクリップボードにコピーしました</string>
+
+    <!-- Toggle options -->
+    <string name="label_skip_verify">フラッシュ後の検証をスキップ</string>
+    <string name="helper_skip_verify">フラッシュ後の整合性検証を無効にします。フラッシュは速くなりますが、データ整合性は確認されません。</string>
+
+    <!-- Log section -->
+    <string name="label_output_log">ログ</string>
+
+    <!-- Status messages -->
+    <string name="log_init_success">ネイティブバックエンド v%1$s 準備完了</string>
+    <string name="status_initializing">ネイティブバックエンドを初期化中…</string>
+    <string name="status_executing">パーティションをビルド中…</string>
+
+    <!-- About dialog -->
+    <string name="about_title">OTAkuについて</string>
+    <string name="about_version">バージョン %1$s</string>
+    <string name="about_description">パーティションイメージをフラッシュ可能なOTA ZIPパッケージにビルドする非ルートAndroidツール。\n\nAOSP準拠のOTAツールキットotaku上に構築。</string>
+    <string name="about_ok">OK</string>
+
+    <!-- Theme -->
+    <string name="theme_label">テーマ切替</string>
+
+    <!-- Dynamic color -->
+    <string name="dynamic_color_label">ダイナミックカラー</string>
+    <string name="dynamic_color_summary">Android 12+でシステムアクセントカラーを使用。旧バージョンではSuisei Blue（#00B0F0）にフォールバック。</string>
+    <string name="color_source_material_you">Material You（システムアクセント）</string>
+    <string name="color_source_suisei">Suisei Blue（デフォルト）</string>
+</resources>
