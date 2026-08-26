@@ -204,6 +204,12 @@ class MainActivity : AppCompatActivity() {
         // Prevents duplicate "Initializing OTAku…" log lines on Activity recreation.
         @Volatile var nativeInitialized = false
 
+        // Partition scan flag: true after the device partition scan has run once.
+        // Prevents duplicate "Device supports N partitions…" + "Supported: …"
+        // log lines on Activity recreation (e.g., theme toggle via cycleTheme()).
+        // Mirrors the nativeInitialized guard above.
+        @Volatile var partitionScanDone = false
+
         // Suppress repeated "Build in progress (returned from background)" log.
         // Only log once per continuous build session, not on every Activity recreation.
         @Volatile private var resumedWhileBuildingLogged = false
@@ -581,27 +587,37 @@ class MainActivity : AppCompatActivity() {
         // validate user-picked .img files: filenames that don't match any
         // partition name in this list will be refused with a warning.
         // Run async because getprop spawns a subshell (~50-100ms).
-        lifecycleScope.launch(Dispatchers.IO) {
-            val result = NativeBridge.scanDevicePartitions()
-            withContext(Dispatchers.Main) {
-                if (result.success) {
-                    deviceSupportedPartitions = result.partitions
-                    // Build summary string with explicit parens to avoid Kotlin
-                    // if-expression + string-concat precedence bug (the old code
-                    // used `str + if (...) a else b + if (...) c else d + e`
-                    // which parsed as `str + if (...) a else (b + if (...) c else (d + e))`
-                    // — only the dynamic branch was printed, slot/Android were dropped).
-                    val partitionType = if (result.dynamicPartitions) "dynamic" else "static GPT"
-                    val slotInfo = if (result.slotSuffix.isNotEmpty()) ", A/B slot=${result.slotSuffix}" else ""
-                    showLog("Device supports ${result.partitions.size} partitions ($partitionType$slotInfo, Android ${result.androidVersion})")
-                    // Print the actual detected partition list so user can verify
-                    // which partitions are supported before picking .img files.
-                    showLog("  Supported: ${result.partitions.joinToString(", ")}")
-                } else {
-                    // Fallback: permissive mode (accept all .img files, no validation)
-                    deviceSupportedPartitions = emptyList()
-                    showLog("Partition scan failed: ${result.error}", LogLevel.WARN)
-                    showLog("Validation disabled — all .img files will be accepted.", LogLevel.WARN)
+        //
+        // BUG-FIX (log re-print on theme toggle): gate this block with
+        // partitionScanDone to prevent duplicate "Device supports…" log lines
+        // when Activity is recreated (e.g., cycleTheme() → recreate()).
+        // The companion object deviceSupportedPartitions already holds the
+        // cached result from the first scan — re-scanning + re-logging would
+        // duplicate the log entries on every theme switch.
+        if (!partitionScanDone) {
+            partitionScanDone = true
+            lifecycleScope.launch(Dispatchers.IO) {
+                val result = NativeBridge.scanDevicePartitions()
+                withContext(Dispatchers.Main) {
+                    if (result.success) {
+                        deviceSupportedPartitions = result.partitions
+                        // Build summary string with explicit parens to avoid Kotlin
+                        // if-expression + string-concat precedence bug (the old code
+                        // used `str + if (...) a else b + if (...) c else d + e`
+                        // which parsed as `str + if (...) a else (b + if (...) c else (d + e))`
+                        // — only the dynamic branch was printed, slot/Android were dropped).
+                        val partitionType = if (result.dynamicPartitions) "dynamic" else "static GPT"
+                        val slotInfo = if (result.slotSuffix.isNotEmpty()) ", A/B slot=${result.slotSuffix}" else ""
+                        showLog("Device supports ${result.partitions.size} partitions ($partitionType$slotInfo, Android ${result.androidVersion})")
+                        // Print the actual detected partition list so user can verify
+                        // which partitions are supported before picking .img files.
+                        showLog("  Supported: ${result.partitions.joinToString(", ")}")
+                    } else {
+                        // Fallback: permissive mode (accept all .img files, no validation)
+                        deviceSupportedPartitions = emptyList()
+                        showLog("Partition scan failed: ${result.error}", LogLevel.WARN)
+                        showLog("Validation disabled — all .img files will be accepted.", LogLevel.WARN)
+                    }
                 }
             }
         }
