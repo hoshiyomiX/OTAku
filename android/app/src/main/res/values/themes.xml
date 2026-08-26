@@ -15,12 +15,12 @@
          Splash duration is set to 2 seconds in MainActivity.kt.
          No branding text — icon alone provides splash identity. -->
     <style name="Theme.OTAku.Splash" parent="Theme.SplashScreen">
-        <!-- Theme-aware splash background — Suisei blue primary for continuity with main UI -->
-        <item name="windowSplashScreenBackground">@color/suisei_light_primary</item>
+        <!-- Black background matching the launcher icon -->
+        <item name="windowSplashScreenBackground">#000000</item>
         <!-- The icon shown during splash — uses the same foreground as the launcher icon -->
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
         <!-- Icon background color (circular mask behind the icon) -->
-        <item name="windowSplashScreenIconBackgroundColor">@color/suisei_light_primary</item>
+        <item name="windowSplashScreenIconBackgroundColor">#000000</item>
         <!-- Branding text removed — was glitched (A letter flipped, u cut off).
              The icon alone is sufficient for splash screen identity.
              See values-v31/themes.xml for API 31+ specific overrides. -->

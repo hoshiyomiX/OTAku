@@ -7,12 +7,12 @@
 -->
 <resources>
     <style name="Theme.OTAku.Splash" parent="Theme.SplashScreen">
-        <!-- Theme-aware splash background — Suisei blue primary for continuity with main UI (P1-fix C-T-01) -->
-        <item name="windowSplashScreenBackground">@color/suisei_light_primary</item>
+        <!-- Black background matching the launcher icon -->
+        <item name="windowSplashScreenBackground">#000000</item>
         <!-- The icon shown during splash — uses the launcher icon foreground -->
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
         <!-- Icon background color (circular mask behind the icon) -->
-        <item name="windowSplashScreenIconBackgroundColor">@color/suisei_light_primary</item>
+        <item name="windowSplashScreenIconBackgroundColor">#000000</item>
         <!-- After splash, transition to the Suisei Blue base theme (default) -->
         <item name="postSplashScreenTheme">@style/Theme.OTAku.Suisei</item>
     </style>
