@@ -265,44 +265,42 @@ object OTABridge {
                     Process.setThreadPriority(Process.myTid(), -4)
                 } catch (_: Exception) {}
 
-                try {
-                    val ddResult = NativeBridge.buildDd(
-                        images = images,
-                        compression = compression,
-                        level = level,
-                        outputPath = outputPath,
-                        device = effectiveDevice,
-                        skipVerify = skipVerify,
-                        romName = romName,
-                        maker = maker
-                    )
+                val ddResult = NativeBridge.buildDd(
+                    images = images,
+                    compression = compression,
+                    level = level,
+                    outputPath = outputPath,
+                    device = effectiveDevice,
+                    skipVerify = skipVerify,
+                    romName = romName,
+                    maker = maker
+                )
 
-                    // Emit all Rust output lines to the log
-                    ddResult.output.split("\n").forEach { line ->
-                        if (line.isNotBlank()) {
-                            onOutputLine?.invoke(line)
-                        }
+                // Emit all Rust output lines to the log
+                ddResult.output.split("\n").forEach { line ->
+                    if (line.isNotBlank()) {
+                        onOutputLine?.invoke(line)
                     }
+                }
 
-                    // Log result summary after the JNI call returns
-                    val durationMs = System.currentTimeMillis() - buildStartTime
-                    val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
-                    val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
-                    val totalUncSizeStr = ddResult.totalUncSize?.let { formatSize(it) } ?: "N/A"
-                    val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
-                        "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
-                        "bundle_size=$bundleSizeStr, total_flash_size=$totalUncSizeStr"
-                    Log.d(TAG, debugEndMsg)
-                    onOutputLine?.invoke(debugEndMsg)
+                // Log result summary after the JNI call returns
+                val durationMs = System.currentTimeMillis() - buildStartTime
+                val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
+                val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
+                val totalUncSizeStr = ddResult.totalUncSize?.let { formatSize(it) } ?: "N/A"
+                val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
+                    "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
+                    "bundle_size=$bundleSizeStr, total_flash_size=$totalUncSizeStr"
+                Log.d(TAG, debugEndMsg)
+                onOutputLine?.invoke(debugEndMsg)
 
-                    if (ddResult.success) {
-                        OTAResult.success(ddResult.output, ddResult.durationMs)
-                    } else {
-                        OTAResult.error(
-                            ddResult.error ?: "Native build failed",
-                            ddResult.durationMs
-                        ).copy(output = ddResult.output)
-                    }
+                if (ddResult.success) {
+                    OTAResult.success(ddResult.output, ddResult.durationMs)
+                } else {
+                    OTAResult.error(
+                        ddResult.error ?: "Native build failed",
+                        ddResult.durationMs
+                    ).copy(output = ddResult.output)
                 }
                 // NOTE: progressScope/progressFile cleanup deliberately NOT here —
                 // handled by the outer finally (AUDIT-F1) so it also covers the
