@@ -96,6 +96,12 @@ dependencies {
     // MDC-Android Views (library now in maintenance mode; 1.12.x brings
     // dynamic-color + contrast fixes). Drop-in minor bump, API compatible.
     implementation 'com.google.android.material:material:1.12.0'
+    // Container-morph log panel: spring physics for the pill ↔ card settle
+    // (M3 Expressive motion feel). Declared explicitly because
+    // SpringAnimation / FloatValueHolder are referenced directly in
+    // MainActivity — relying on material's transitive copy would break
+    // if material ever drops or scopes it to implementation.
+    implementation 'androidx.dynamicanimation:dynamicanimation:1.1.0'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'

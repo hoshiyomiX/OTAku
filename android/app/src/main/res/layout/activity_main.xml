@@ -779,61 +779,6 @@
     </LinearLayout>
 
     <!-- ═══════════════════════════════════════════════════ -->
-    <!-- Mini floating logs header — shown ONLY when logCard    -->
-    <!-- is collapsed. Positioned at bottom|start to mirror the  -->
-    <!-- Build OTA FAB at bottom|end.                            -->
-    <!--                                                         -->
-    <!-- Contains only: arrow icon + "Logs" text.                -->
-    <!-- Tap to expand the log panel back.                       -->
-    <!-- ═══════════════════════════════════════════════════ -->
-    <com.google.android.material.card.MaterialCardView
-        android:id="@+id/miniLogHeader"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|start"
-        android:layout_margin="16dp"
-        android:visibility="gone"
-        android:clickable="true"
-        android:focusable="true"
-        android:foreground="?attr/selectableItemBackgroundBorderless"
-        app:cardCornerRadius="16dp"
-        app:cardElevation="2dp"
-        app:strokeWidth="0dp"
-        app:cardBackgroundColor="?attr/colorPrimary">
-
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingHorizontal="16dp"
-            android:paddingVertical="14dp">
-
-            <ImageView
-                android:id="@+id/miniToggleArrow"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:src="@drawable/ic_expand_log"
-                android:contentDescription="@string/cd_arrow_expand_log"
-                android:tooltipText="@string/cd_toggle_log_panel"
-                app:tint="?attr/colorOnPrimary"
-                android:scaleType="centerInside"
-                android:layout_marginEnd="6dp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/label_output_log"
-                android:textSize="11sp"
-                android:textAllCaps="true"
-                android:letterSpacing="0.08"
-                android:textColor="?attr/colorOnPrimary" />
-
-        </LinearLayout>
-
-    </com.google.android.material.card.MaterialCardView>
-
-    <!-- ═══════════════════════════════════════════════════ -->
     <!-- Floating Action Button — Build OTA Now                 -->
     <!-- Appears at bottom-right, enabled only when all          -->
     <!-- required fields are filled (partitions + codename).     -->

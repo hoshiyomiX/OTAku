@@ -1317,673 +1317,300 @@ class MainActivity : AppCompatActivity() {
             findViewById<android.widget.TextView>(R.id.textViewLog)?.text = initBanner
         }
 
-        // ── Log panel expand/collapse — SystemUI-style pull/push ──
-        // Uses ValueAnimator to animate the card's height directly (not translationY).
-        // This is how Android's BottomSheetBehavior and notification shade work:
-        // the container height changes smoothly, content follows naturally.
+        // ════════════════════════════════════════════════════════════
+        //  Log panel — CONTAINER MORPH (single surface, M3-style)
+        // ════════════════════════════════════════════════════════════
+        //  Redesign: replaces the old two-view mini-pill ↔ logCard
+        //  alpha crossfade, which read as a "ghost swap" — position,
+        //  size, color and elevation all teleported at once. ONE
+        //  MaterialCardView now morphs continuously between:
+        //    COLLAPSED pill : width=pillW, height=pillH, radius=pillH/2,
+        //                    content = arrow + "LOGS" label only
+        //    EXPANDED card  : width=MATCH_PARENT, height=weight share,
+        //                    radius=16dp, full log content
+        //  Spatial continuity is preserved (M3 container-transform
+        //  intent): the pill IS the collapsed card — same fill
+        //  (colorPrimaryContainer), same stroke, same elevation; only
+        //  geometry + content alpha animate.
         //
-        // Drag: finger controls height in real-time (1:1 with drag distance).
-        // Release: ValueAnimator snaps to target height (expanded or collapsed).
-        // Tap: ValueAnimator animates from current to target.
+        //  Gesture semantics (vertical, unchanged):
+        //    Drag UP   → expand   (1:1 finger tracking)
+        //    Drag DOWN → collapse
+        //    Tap       → toggle
+        //    Release   → SpringAnimation settle, velocity-continuous
+        //                with the finger (M3 Expressive motion feel)
+        // ════════════════════════════════════════════════════════════
         val logCard = findViewById<com.google.android.material.card.MaterialCardView>(R.id.logCard)
         val logHeader = findViewById<View>(R.id.logHeaderBar)
         val toggleBtn = findViewById<android.widget.ImageView>(R.id.buttonToggleLog)
-        toggleBtn?.contentDescription = getString(R.string.cd_toggle_log_panel)  // P0-fix C-04: was hardcoded "Toggle log panel"
+        toggleBtn?.contentDescription = getString(R.string.cd_toggle_log_panel)  // P0-fix C-04
         val logDivider = findViewById<View>(R.id.logDivider)
         val logScrollView = findViewById<androidx.core.widget.NestedScrollView>(R.id.scrollViewLog)
+        val buttonCopyLog = findViewById<View>(R.id.buttonCopyLog)
+        val buttonClearLog = findViewById<View>(R.id.buttonClearLog)
         val parentLayout = logCard?.parent as? android.widget.LinearLayout
+        val density = resources.displayMetrics.density
+        val CARD_RADIUS_PX = 16f * density
 
-        // Mini floating logs header — shown ONLY when logCard is collapsed.
-        // Positioned at bottom|start to mirror the Build OTA FAB at bottom|end.
-        // Tap to expand the log panel back.
-        val miniLogHeader = findViewById<com.google.android.material.card.MaterialCardView>(R.id.miniLogHeader)
-
-        // ════════════════════════════════════════════════════════════
-        //  Log panel expand/collapse — SystemUI BottomSheet-style
-        //  ════════════════════════════════════════════════════════════
-        //  Key design choices (matching Material BottomSheetBehavior):
-        //  1. Drag sensitivity = 1.0 (true 1:1 finger tracking).
-        //     Previous 2.2x made panel move faster than finger — felt
-        //     inaccurate. 1.0 = panel tracks finger exactly, like dragging
-        //     a window border.
-        //  2. Touch slop (6px ~ 2dp) — low enough to feel responsive, high
-        //     enough to reject micro-taps during scrolling attempts. 4px was
-        //     too low (accidental drags during tap), 8px was too high.
-        //  3. Unified interpolator: FastOutSlowInInterpolator for BOTH tap
-        //     and post-drag snap (Material standard). Duration is velocity-
-        //     aware: high velocity → short snap, low velocity → longer settle.
-        //     Previous code used DecelerateInterpolator for snaps — felt
-        //     inconsistent with tap easing.
-        //  4. Synchronous LayoutParams swap in onAnimationEnd. The previous
-        //     card.post{} approach caused a 1-frame flicker because the layout
-        //     pass happened AFTER the animator released its final value.
-        //     Since the animator reaches the exact target height, swapping to
-        //     weight=1 (expanded) or WRAP_CONTENT (collapsed) at that height
-        //     produces the same visual result — no jump.
-        //  5. Measured header height (not hardcoded) — header padding is
-        //     10dp + 32dp icon + 10dp = 52dp.
-        //  6. Pure alpha crossfade morph (no translationY) — mini header
-        //     fades out while card fades in. Previous translationY slide
-        //     felt disconnected from the card's growth direction.
-        // ════════════════════════════════════════════════════════════
-
-        var logExpandedHeight = 0
-        var measuredHeaderHeight = 0
-        var currentAnimator: android.animation.ValueAnimator? = null
-
-        // Drag sensitivity: 1px finger = 1px height change.
-        // Previous 2.2x made the panel move faster than the finger — felt
-        // inaccurate. 1.0 = true 1:1 tracking, like dragging a window border.
-        val DRAG_SENSITIVITY = 1.0f
-        // Minimum finger movement before drag activates (px).
-        // 6px ~ 2dp — low enough for responsiveness, high enough to reject taps.
-        val DRAG_TOUCH_SLOP = 6f
-        // Tap threshold — anything below this is a tap, not a drag.
-        val TAP_THRESHOLD = 16f
-        // Velocity tracking for momentum-aware snap
-        var lastMoveTime = 0L
-        var lastMoveY = 0f
-        var dragVelocity = 0f  // px/sec, positive = expand direction
-
-        fun setCardHeight(height: Int, weight: Float) {
-            logCard?.let { card ->
-                val params = card.layoutParams as android.widget.LinearLayout.LayoutParams
-                params.height = height
-                params.weight = weight
-                card.layoutParams = params
-            }
-        }
+        // ── Morph state ──
+        // morphProgress: 0f = collapsed pill, 1f = expanded card.
+        // Values slightly outside [0,1] occur transiently during spring
+        // motion; applyMorph clamps height overshoot to +6% and
+        // hard-clamps everything below 0 (the pill must never shrink
+        // under its content height).
+        var morphProgress = if (isLogExpanded) 1f else 0f
+        var pillWidth = 0
+        var pillHeight = 0
+        var fullCardWidth = 0
+        var fullCardHeight = 0
+        var springAnim: androidx.dynamicanimation.animation.SpringAnimation? = null
 
         /**
-         * Measure the header bar height by temporarily hiding the content
-         * and reading the card's measured height. Restores visibility after.
-         * Cached in `measuredHeaderHeight` for subsequent calls.
+         * Measure the collapsed-pill geometry:
+         *   pillHeight = card wrap height with content (scroll + divider)
+         *                and Copy/Clear buttons hidden
+         *   pillWidth  = card wrap width in the same hidden state
+         * Uses manual measure() passes (works before first layout),
+         * then restores previous visibility + LayoutParams — same
+         * technique as the previous header-measure helper.
          */
-        fun measureHeaderHeight(): Int {
-            if (measuredHeaderHeight > 0) return measuredHeaderHeight
+        fun measurePillGeometry() {
             logCard?.let { card ->
-                val sv = logScrollView
-                val dv = logDivider
-                val svWasVisible = sv?.visibility ?: View.VISIBLE
-                val dvWasVisible = dv?.visibility ?: View.VISIBLE
-                sv?.visibility = View.GONE
-                dv?.visibility = View.GONE
-                val prevHeight = (card.layoutParams as android.widget.LinearLayout.LayoutParams).height
-                val prevWeight = (card.layoutParams as android.widget.LinearLayout.LayoutParams).weight
-                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                val svWas = logScrollView?.visibility ?: View.VISIBLE
+                val dvWas = logDivider?.visibility ?: View.VISIBLE
+                val cpWas = buttonCopyLog?.visibility ?: View.VISIBLE
+                val clWas = buttonClearLog?.visibility ?: View.VISIBLE
+                logScrollView?.visibility = View.GONE
+                logDivider?.visibility = View.GONE
+                buttonCopyLog?.visibility = View.GONE
+                buttonClearLog?.visibility = View.GONE
+                val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams
+                val prevW = lp?.width
+                val prevH = lp?.height
+                val prevWt = lp?.weight
+                if (lp != null) {
+                    lp.width = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    lp.height = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    lp.weight = 0f
+                }
                 card.measure(
-                    android.view.View.MeasureSpec.makeMeasureSpec(card.width, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
                     android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
                 )
-                val h = card.measuredHeight
-                setCardHeight(prevHeight, prevWeight)
-                sv?.visibility = svWasVisible
-                dv?.visibility = dvWasVisible
-                if (h > 0) measuredHeaderHeight = h
-                return h
+                if (card.measuredHeight > 0) pillHeight = card.measuredHeight
+                if (card.measuredWidth > 0) pillWidth = card.measuredWidth
+                if (lp != null) {
+                    if (prevW != null) lp.width = prevW
+                    if (prevH != null) lp.height = prevH
+                    lp.weight = prevWt ?: 0f
+                }
+                logScrollView?.visibility = svWas
+                logDivider?.visibility = dvWas
+                buttonCopyLog?.visibility = cpWas
+                buttonClearLog?.visibility = clWas
             }
-            return (52 * resources.displayMetrics.density).toInt()  // fallback
+            if (pillHeight <= 0) pillHeight = (52 * density).toInt()  // fallback (old header estimate)
+            if (pillWidth <= 0) pillWidth = (160 * density).toInt()   // fallback
         }
 
         /**
-         * Compute the theoretical height the card WOULD occupy if it had
-         * weight=1 alongside its sibling NestedScrollView (also weight=1).
-         *
-         * CRITICAL: This must NOT read sibling.height (current laid-out
-         * height) — that creates a circular dependency:
-         *   • Card GONE → sibling takes all → available=0 → card stuck
-         *   • Card explicit height X → sibling = parent-X → available=X
-         *     → card can't grow past current
-         *
-         * Instead, compute the weight-based split directly:
-         *   remaining = parent.height - parent.padding - all child margins
-         *   cardShare = remaining * (card.weight / sum_of_weights)
-         *
-         * With both card + NestedScrollView at weight=1, sum=2, card gets
-         * remaining/2 (50/50 split). This is independent of current layout
-         * state — works during drag, when GONE, when explicit height, etc.
-         *
-         * Sibling margins are queried from their LayoutParams (not laid-out
-         * height), so the calculation is stable across layout passes.
+         * Measure the expanded-card target geometry from the parent:
+         *   fullCardWidth  = what match_parent resolves to (parent width
+         *                    minus padding minus the card's own margins)
+         *   fullCardHeight = weight-based share, assuming the card back
+         *                    at weight=1 alongside its siblings
+         * Independent of the card's CURRENT LayoutParams (works during
+         * mid-morph explicit-size states) — the same invariant the
+         * previous expanded-height helper guaranteed.
          */
-        fun measureExpandedHeight(): Int {
-            val parent = parentLayout ?: return 0
-            val card = logCard ?: return 0
-            val headerH = measureHeaderHeight()
-
-            // Parent's available space (excluding padding)
-            val parentH = parent.height
-            if (parentH <= 0) return 0
-            val padding = parent.paddingTop + parent.paddingBottom
-            val available = parentH - padding
-
-            // Sum of weights across all VISIBLE children (skip GONE).
-            // Card's weight=1, NestedScrollView's weight=1 → sum=2.
-            var weightSum = 0f
-            var allMargins = 0
-            var cardWeight = 0f
+        fun measureFullGeometry() {
+            val parent = parentLayout ?: return
+            val card = logCard ?: return
+            if (parent.height <= 0 || parent.width <= 0) return
+            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+            fullCardWidth = parent.width - parent.paddingLeft - parent.paddingRight - lp.leftMargin - lp.rightMargin
+            var weightSum = 1f  // the card itself, assumed at expanded weight=1
+            var allMargins = lp.topMargin + lp.bottomMargin
             for (i in 0 until parent.childCount) {
                 val child = parent.getChildAt(i)
-                if (child.visibility == View.GONE) continue
-                val lp = child.layoutParams as android.widget.LinearLayout.LayoutParams
-                weightSum += lp.weight
-                allMargins += lp.topMargin + lp.bottomMargin
-                if (child === card) cardWeight = lp.weight
+                if (child === card || child.visibility == View.GONE) continue
+                val clp = child.layoutParams as? android.widget.LinearLayout.LayoutParams ?: continue
+                weightSum += clp.weight
+                allMargins += clp.topMargin + clp.bottomMargin
             }
-            if (weightSum <= 0f) return headerH
-
-            // Remaining space after all child margins
+            val available = parent.height - parent.paddingTop - parent.paddingBottom
             val remaining = (available - allMargins).coerceAtLeast(0)
-            // Card's share = remaining * (cardWeight / weightSum)
-            val cardShare = (remaining * (cardWeight / weightSum)).toInt()
-            return cardShare.coerceAtLeast(headerH)
+            val share = (remaining * (1f / weightSum)).toInt()
+            fullCardHeight = if (share > pillHeight) share else (available * 0.5f).toInt().coerceAtLeast(pillHeight)
         }
 
-        fun setExpandedVisualState(expanded: Boolean) {
-            logScrollView?.visibility = if (expanded) View.VISIBLE else View.GONE
-            logDivider?.visibility = if (expanded) View.VISIBLE else View.GONE
-            toggleBtn?.setImageResource(if (expanded) R.drawable.ic_collapse_log else R.drawable.ic_expand_log)
-            if (expanded) {
-                // Expanded: logCard visible, mini header hidden
-                logCard?.visibility = View.VISIBLE
-                miniLogHeader?.visibility = View.GONE
-                setCardHeight(0, 1f)  // weight=1, height=0 → takes available space
+        /**
+         * Apply one morph frame at `progress` (0 = pill, 1 = card).
+         * Every visual property derives from the single progress value,
+         * so all frames are internally consistent — no timing drift
+         * between size, radius, rotation and fades.
+         */
+        fun applyMorph(progress: Float) {
+            val card = logCard ?: return
+            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+            val cp = progress.coerceIn(0f, 1.06f)  // small spring overshoot allowed (height only)
+            val vis = progress.coerceIn(0f, 1f)    // clamped for fades + radius
+            // Geometry — explicit size, weight=0 (weight is restored only
+            // by applyExpandedCanonical at settle)
+            val h = (pillHeight + (fullCardHeight - pillHeight) * cp).toInt()
+            val w = (pillWidth + (fullCardWidth - pillWidth) * cp).toInt()
+            lp.width = w
+            lp.height = h
+            lp.weight = 0f
+            card.layoutParams = lp
+            // Corner radius: fully-round pill → 16dp card
+            card.radius = (pillHeight / 2f) + (CARD_RADIUS_PX - pillHeight / 2f) * vis
+            // Arrow rotates continuously 0° (expand_more) → 180° (expand_less look)
+            toggleBtn?.rotation = vis * 180f
+            // Log content fades in fast — fully visible by 50% progress
+            val contentAlpha = ((vis - 0.2f) / 0.3f).coerceIn(0f, 1f)
+            logDivider?.alpha = contentAlpha
+            logScrollView?.alpha = contentAlpha
+            val showContent = vis > 0.19f
+            if (showContent) {
+                if (logDivider?.visibility != View.VISIBLE) logDivider?.visibility = View.VISIBLE
+                if (logScrollView?.visibility != View.VISIBLE) logScrollView?.visibility = View.VISIBLE
             } else {
-                // Collapsed: logCard hidden entirely, mini floating header shown
-                // at bottom-left (mirrors FAB at bottom-right)
-                logCard?.visibility = View.GONE
-                miniLogHeader?.visibility = View.VISIBLE
-                miniLogHeader?.alpha = 1f
-                setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                if (logDivider?.visibility != View.GONE) logDivider?.visibility = View.GONE
+                if (logScrollView?.visibility != View.GONE) logScrollView?.visibility = View.GONE
             }
+            // Copy/Clear buttons fade in last — fully visible by 80%
+            val btnAlpha = ((vis - 0.55f) / 0.25f).coerceIn(0f, 1f)
+            buttonCopyLog?.alpha = btnAlpha
+            buttonClearLog?.alpha = btnAlpha
+            val showButtons = vis > 0.54f
+            if (showButtons) {
+                if (buttonCopyLog?.visibility != View.VISIBLE) buttonCopyLog?.visibility = View.VISIBLE
+                if (buttonClearLog?.visibility != View.VISIBLE) buttonClearLog?.visibility = View.VISIBLE
+            } else {
+                if (buttonCopyLog?.visibility != View.GONE) buttonCopyLog?.visibility = View.GONE
+                if (buttonClearLog?.visibility != View.GONE) buttonClearLog?.visibility = View.GONE
+            }
+        }
+
+        /** Snap to the canonical EXPANDED params (no animation). */
+        fun applyExpandedCanonical() {
+            val card = logCard ?: return
+            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+            lp.width = android.widget.LinearLayout.LayoutParams.MATCH_PARENT
+            lp.height = 0
+            lp.weight = 1f
+            card.layoutParams = lp
+            card.radius = CARD_RADIUS_PX
+            toggleBtn?.rotation = 180f
+            logDivider?.visibility = View.VISIBLE
+            logDivider?.alpha = 1f
+            logScrollView?.visibility = View.VISIBLE
+            logScrollView?.alpha = 1f
+            buttonCopyLog?.visibility = View.VISIBLE
+            buttonCopyLog?.alpha = 1f
+            buttonClearLog?.visibility = View.VISIBLE
+            buttonClearLog?.alpha = 1f
+            morphProgress = 1f
+        }
+
+        /** Snap to the canonical COLLAPSED (pill) params (no animation). */
+        fun applyPillCanonical() {
+            val card = logCard ?: return
+            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+            lp.width = pillWidth
+            lp.height = pillHeight
+            lp.weight = 0f
+            card.layoutParams = lp
+            card.radius = pillHeight / 2f
+            toggleBtn?.rotation = 0f
+            logDivider?.visibility = View.GONE
+            logDivider?.alpha = 0f
+            logScrollView?.visibility = View.GONE
+            logScrollView?.alpha = 0f
+            buttonCopyLog?.visibility = View.GONE
+            buttonCopyLog?.alpha = 0f
+            buttonClearLog?.visibility = View.GONE
+            buttonClearLog?.alpha = 0f
+            morphProgress = 0f
+        }
+
+        fun finalizeState(expanded: Boolean) {
+            if (expanded) applyExpandedCanonical() else applyPillCanonical()
+            isLogExpanded = expanded
         }
 
         /**
-         * Distance-aware animation duration for TAP toggles (no velocity).
-         * Short distance → short duration, long distance → longer.
-         * Clamped to [180, 280]ms — Material motion spec range for taps.
+         * Spring-settle to a target state (0 = pill, 1 = expanded).
+         * Release velocity carries over from the drag (px/s → progress/s)
+         * so the surface continues the finger's motion — no visual seam
+         * between drag and settle. dampingRatio 0.85 / stiffness 450 =
+         * snappy with a subtle settle (M3 Expressive intent, no jelly).
          */
-        fun tapDurationFor(distancePx: Int): Long {
-            val dp = distancePx.toFloat() / resources.displayMetrics.density
-            return (150 + dp * 0.8f).toLong().coerceIn(180L, 280L)
-        }
-
-        /**
-         * Velocity-aware duration for post-drag snap.
-         * High velocity → short snap (finger momentum carries it).
-         * Low velocity → longer snap (settle slowly).
-         * Clamped to [120, 260]ms.
-         */
-        fun snapDurationFor(distancePx: Int, velocityPxSec: Float): Long {
-            val velAbs = Math.abs(velocityPxSec)
-            // Higher velocity = shorter duration (momentum already doing the work)
-            val velFactor = (velAbs / 2000f).coerceIn(0f, 1f)  // 0..1
-            val baseMs = 260L - (velFactor * 140L).toLong()  // 260ms → 120ms
-            // Also scale by distance (don't snap long distance too fast)
-            val dp = distancePx.toFloat() / resources.displayMetrics.density
-            val distMs = (dp * 0.6f).toLong()
-            return (baseMs + distMs).coerceIn(120L, 260L)
-        }
-
-        /**
-         * Animate to expanded/collapsed state.
-         *
-         * @param targetExpanded   target state
-         * @param fromTap          true = user tapped (use FastOutSlowIn, material feel)
-         *                         false = user dragged (use Decelerate, momentum feel)
-         * @param velocityPxSec    finger velocity at release (px/sec, + = expand direction).
-         *                         Only used when fromTap=false.
-         *
-         * BOUNCE-FREE GUARANTEE:
-         *   The animation target height is computed via measureExpandedHeight(),
-         *   which returns the EXACT height the card would occupy if it had
-         *   weight=1 in the parent. When onAnimationEnd swaps to weight=1,
-         *   the resulting layout assigns the same height — no visible jump.
-         *   Previous code used a cached/estimated logExpandedHeight that
-         *   differed from the actual weight=1 height, causing "overshoot".
-         */
-        fun animateToExpanded(targetExpanded: Boolean, fromTap: Boolean = true, velocityPxSec: Float = 0f) {
-            currentAnimator?.cancel()
-
-            logCard?.let { card ->
-                val headerH = measureHeaderHeight()
-
-                // Compute the TRUE expanded height (what weight=1 will give us).
-                val measuredExpanded = measureExpandedHeight()
-                if (measuredExpanded > headerH) {
-                    logExpandedHeight = measuredExpanded
-                } else if (logExpandedHeight <= headerH) {
-                    val parentH = parentLayout?.height ?: 0
-                    logExpandedHeight = if (parentH > 0) {
-                        (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
-                    } else {
-                        (headerH + 400 * resources.displayMetrics.density).toInt()
-                    }
-                }
-
-                // ── Single-animator morph ──
-                // All animated properties (card height, card alpha, mini alpha,
-                // mini translationY) are driven from ONE ValueAnimator's
-                // animatedFraction. This ensures every frame updates ALL
-                // properties in lockstep — no timing drift, no stiffness.
-                //
-                // Previous approach used 2 separate animators (ValueAnimator
-                // for height + ViewPropertyAnimator for alpha/translation)
-                // with different interpolators → frames drifted → felt "kaku".
-                val isExpandingFromMini = targetExpanded && card.visibility != View.VISIBLE
-                val isCollapsingToMini = !targetExpanded
-
-                // Starting visual state setup
-                if (isExpandingFromMini) {
-                    // Mini header is currently visible; will fade out + translate up.
-                    // Card is GONE; will become VISIBLE at headerH with alpha 0.
-                    //
-                    // CRITICAL: Set mini INVISIBLE immediately at expand start.
-                    // Previous code kept mini VISIBLE during the entire expand
-                    // animation (only set INVISIBLE at onAnimationEnd). Even
-                    // though mini.alpha reached 0 at 40% progress, the mini's
-                    // elevation shadow (2dp) + card background could faintly
-                    // render at alpha=0 due to hardware layer compositing —
-                    // perceived as a blink at 90-100% when the card is near
-                    // full height and overlapping mini's position.
-                    //
-                    // Setting INVISIBLE at start ensures mini is fully hidden
-                    // (no draw, no shadow) for the entire expand animation.
-                    // The alpha crossfade still runs (mini.alpha 0.90→0) but
-                    // since mini is INVISIBLE, only the card's fade-in matters
-                    // visually — cleaner morph, no blink.
-                    card.visibility = View.VISIBLE
-                    card.alpha = 0f
-                    logScrollView?.visibility = View.VISIBLE
-                    logDivider?.visibility = View.VISIBLE
-                    toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
-                    setCardHeight(headerH, 0f)
-                    miniLogHeader?.visibility = View.INVISIBLE
-                } else if (isCollapsingToMini) {
-                    // Card visible, will shrink to headerH then fade out.
-                    // Mini header hidden, will fade in (pure alpha, no translation).
-                    logScrollView?.visibility = View.VISIBLE
-                    logDivider?.visibility = View.VISIBLE
-                    toggleBtn?.setImageResource(R.drawable.ic_expand_log)
-                    miniLogHeader?.visibility = View.VISIBLE
-                    miniLogHeader?.alpha = 0f
-                }
-
-                val startHeight = if (isExpandingFromMini) headerH else card.height
-                val targetHeight = if (targetExpanded) logExpandedHeight else headerH
-
-                // Skip animation if already at target
-                if (startHeight == targetHeight && !isExpandingFromMini && !isCollapsingToMini) {
-                    setExpandedVisualState(targetExpanded)
-                    isLogExpanded = targetExpanded
-                    return
-                }
-
-                val distance = Math.abs(targetHeight - startHeight)
-                val animator = android.animation.ValueAnimator.ofInt(startHeight, targetHeight)
-
-                if (fromTap) {
-                    animator.duration = tapDurationFor(distance)
-                } else {
-                    animator.duration = snapDurationFor(distance, velocityPxSec)
-                }
-                // Unified interpolator for both tap and snap — Material standard.
-                // Previous code used DecelerateInterpolator(1.5f) for snaps which
-                // felt inconsistent with tap easing.
-                animator.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
-
-                // Capture starting values for frame-by-frame interpolation.
-                // Max opacity lowered from 1.0 to 0.95 (card) / 0.9 (mini) for
-                // subtler morph — full 1.0 alpha crossfade felt harsh.
-                val CARD_MAX_ALPHA = 0.95f
-                val MINI_MAX_ALPHA = 0.90f
-                val cardAlphaStart = if (isExpandingFromMini) 0f else CARD_MAX_ALPHA
-                val cardAlphaEnd = if (isCollapsingToMini) 0f else CARD_MAX_ALPHA
-                val miniAlphaStart = if (isExpandingFromMini) MINI_MAX_ALPHA else 0f
-                val miniAlphaEnd = if (isExpandingFromMini) 0f else MINI_MAX_ALPHA
-                // Pure alpha crossfade — no translationY (removed for cleaner morph).
-                val miniTransStart = 0f
-                val miniTransEnd = 0f
-
-                // Morph timing: different for expand vs collapse.
-                //
-                // EXPAND (mini → card): morph in FIRST 40% of animation.
-                //   Card fades in quickly while mini fades out. By 40%, card
-                //   is fully visible and continues growing.
-                //
-                // COLLAPSE (card → mini): morph in LAST 50% of animation.
-                //   Card stays fully visible while shrinking for first 50%.
-                //   Then fades out + mini fades in during last 50%.
-                //   Previous 40% [60-100%] felt abrupt — the sudden start of
-                //   fading at 60% was jarring. 50% [50-100%] gives more time
-                //   for the fade to ease in naturally.
-                val morphStart = if (isExpandingFromMini) 0f else 0.5f  // 0% or 50%
-                val morphEnd = if (isExpandingFromMini) 0.4f else 1.0f   // 40% or 100%
-
-                animator.addUpdateListener { anim ->
-                    val h = anim.animatedValue as Int
-                    setCardHeight(h, 0f)
-
-                    // Compute morph progress: 0..1 over [morphStart, morphEnd]
-                    val rawFraction = anim.animatedFraction
-                    val morphRange = morphEnd - morphStart
-                    var morphProgress = if (morphRange > 0f) {
-                        ((rawFraction - morphStart) / morphRange).coerceIn(0f, 1f)
-                    } else 1f
-
-                    // For collapse, apply ease-in to the alpha fade so it
-                    // starts gradually instead of linearly. This eliminates
-                    // the "abrupt fade start" at 50%.
-                    // Ease-in: progress²  (quadratic — slow start, fast end)
-                    if (isCollapsingToMini) {
-                        morphProgress = morphProgress * morphProgress
-                    }
-
-                    // Apply frame-synced alpha + translation
-                    card.alpha = cardAlphaStart + (cardAlphaEnd - cardAlphaStart) * morphProgress
-                    miniLogHeader?.alpha = miniAlphaStart + (miniAlphaEnd - miniAlphaStart) * morphProgress
-                    miniLogHeader?.translationY = miniTransStart + (miniTransEnd - miniTransStart) * morphProgress
-                }
-                animator.addListener(object : android.animation.AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: android.animation.Animator) {
-                        if (targetExpanded) {
-                            // Expanded: swap to weight=1 (matches target height).
-                            // Use INVISIBLE (not GONE) for mini header — GONE
-                            // triggers CoordinatorLayout re-measure which causes
-                            // a 1-frame blink of the FAB / mini position.
-                            // INVISIBLE preserves layout space, no re-measure.
-                            setCardHeight(0, 1f)
-                            miniLogHeader?.visibility = View.INVISIBLE
-                            miniLogHeader?.alpha = 0f
-                            miniLogHeader?.translationY = 0f
-                            // Restore card alpha to full 1.0 now that morph is done
-                            card.alpha = 1f
-                        } else {
-                            // Collapsed: hide logCard. Card alpha is already 0
-                            // from animator — visibility GONE is safe (no flash).
-                            // Mini header alpha is at MINI_MAX_ALPHA from animator,
-                            // restore to full 1.0 for normal display.
-                            logScrollView?.visibility = View.GONE
-                            logDivider?.visibility = View.GONE
-                            setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
-                            card.visibility = View.GONE
-                            miniLogHeader?.visibility = View.VISIBLE
-                            miniLogHeader?.alpha = 1f
-                            miniLogHeader?.translationY = 0f
-                        }
-                        isLogExpanded = targetExpanded
-                    }
-                })
-                animator.start()
-                currentAnimator = animator
+        fun springTo(target: Float, velocityPxSec: Float = 0f) {
+            val range = (fullCardHeight - pillHeight).coerceAtLeast(1)
+            springAnim?.cancel()
+            val holder = androidx.dynamicanimation.animation.FloatValueHolder(morphProgress)
+            val anim = androidx.dynamicanimation.animation.SpringAnimation(holder)
+            anim.spring = androidx.dynamicanimation.animation.SpringForce(target)
+                .setDampingRatio(0.85f)
+                .setStiffness(450f)
+            anim.setStartVelocity(velocityPxSec / range)
+            anim.minimumVisibleChange = 1f / range
+            anim.addUpdateListener { _, value, _ ->
+                morphProgress = value
+                applyMorph(value)
             }
+            anim.addEndListener { _, canceled, _, _ ->
+                if (!canceled) finalizeState(target > 0.5f)
+            }
+            anim.start()
+            springAnim = anim
         }
 
-        // Initialize from companion state
-        setExpandedVisualState(isLogExpanded)
-        // Record expanded height after layout
-        logCard?.post {
-            if (isLogExpanded && logExpandedHeight == 0) {
-                logExpandedHeight = logCard?.height ?: 0
-            }
-            // Pre-measure header so first drag/animation has accurate target
-            if (measuredHeaderHeight == 0) {
-                measureHeaderHeight()
-            }
-        }
-
-        // Tap toggle — uses Material FastOutSlowInInterpolator
-        toggleBtn?.setOnClickListener { animateToExpanded(!isLogExpanded, fromTap = true) }
-
-        // Mini floating header tap — expand the log panel back
-        miniLogHeader?.setOnClickListener { animateToExpanded(true, fromTap = true) }
-
-        // Mini floating header drag — drag UP to expand (mirrors drag DOWN on
-        // the full log header bar to collapse). Uses the same velocity-aware
-        // snap animation as the main drag handler.
-        var miniDragStartY = 0f
-        var miniDragStartX = 0f
-        var miniIsDragging = false
-        var miniLastMoveTime = 0L
-        var miniLastMoveY = 0f
-        var miniDragVelocity = 0f
-        val MINI_DRAG_SLOP = 6f
-        val MINI_TAP_THRESHOLD = 16f
-
-        miniLogHeader?.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    miniDragStartY = event.rawY
-                    miniDragStartX = event.rawX
-                    miniIsDragging = false
-                    miniLastMoveTime = android.os.SystemClock.uptimeMillis()
-                    miniLastMoveY = event.rawY
-                    miniDragVelocity = 0f
-
-                    // Pre-compute headerH + logExpandedHeight for real-time
-                    // height tracking during drag (mirrors main logHeader handler).
-                    val headerH = measureHeaderHeight()
-                    val measuredExpanded = measureExpandedHeight()
-                    if (measuredExpanded > headerH) {
-                        logExpandedHeight = measuredExpanded
-                    } else if (logExpandedHeight <= headerH) {
-                        val parentH = parentLayout?.height ?: 0
-                        logExpandedHeight = if (parentH > 0) {
-                            (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
-                        } else {
-                            (headerH + 400 * resources.displayMetrics.density).toInt()
-                        }
-                    }
-                    true
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    val dy = event.rawY - miniDragStartY
-                    val dx = event.rawX - miniDragStartX
-                    val absDy = Math.abs(dy)
-                    val absDx = Math.abs(dx)
-
-                    if (absDy > absDx && absDy > MINI_DRAG_SLOP) {
-                        miniIsDragging = true
-
-                        // Track velocity (px/sec) — NO sensitivity scaling
-                        val now = android.os.SystemClock.uptimeMillis()
-                        val dt = (now - miniLastMoveTime).coerceAtLeast(1L)
-                        val instVel = ((event.rawY - miniLastMoveY) / dt * 1000f)
-                        miniDragVelocity = if (miniDragVelocity == 0f) {
-                            -instVel
-                        } else {
-                            (miniDragVelocity * 0.6f + (-instVel) * 0.4f)
-                        }
-                        miniLastMoveTime = now
-                        miniLastMoveY = event.rawY
-
-                        // ── Real-time expand: log panel follows finger 1:1 ──
-                        if (dy < 0) {
-                            // Drag UP → expand
-                            val card = logCard
-                            if (card != null && card.visibility != View.VISIBLE) {
-                                // First move: show card at headerH, fade in.
-                                // Set mini INVISIBLE — card covers its position
-                                // and INVISIBLE prevents touch interception
-                                // while mini is at alpha=0.
-                                card.visibility = View.VISIBLE
-                                card.alpha = 0f
-                                logScrollView?.visibility = View.VISIBLE
-                                logDivider?.visibility = View.VISIBLE
-                                toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
-                                setCardHeight(measuredHeaderHeight, 0f)
-                                miniLogHeader?.visibility = View.INVISIBLE
-                            }
-                            // Recompute logExpandedHeight every frame — sibling
-                            // heights may shift as card grows, and stale target
-                            // causes the 90-100% stutter.
-                            val headerH = measuredHeaderHeight
-                            val liveExpanded = measureExpandedHeight()
-                            if (liveExpanded > headerH) {
-                                logExpandedHeight = liveExpanded
-                            }
-
-                            // effectiveDy = -dy (up = positive = expand), 1:1
-                            val effectiveDy = -dy  // sensitivity 1.0
-                            val newHeight = (headerH + effectiveDy).toInt()
-                                .coerceIn(headerH, logExpandedHeight)
-                            setCardHeight(newHeight, 0f)
-
-                            // Fade card in over first 30% of drag range.
-                            // Mini header fades out over same range.
-                            // Max opacity lowered: card 0.95, mini 0.85 (drag
-                            // path uses lower max than tap path for subtler feel).
-                            val expandRange = (logExpandedHeight - headerH).coerceAtLeast(1)
-                            val progress = (newHeight - headerH).toFloat() / expandRange
-                            val fadeProgress = (progress / 0.3f).coerceIn(0f, 1f)
-                            card.alpha = 0.95f * fadeProgress
-                            miniLogHeader?.alpha = 0.85f * (1f - fadeProgress)
-                        } else {
-                            // Drag DOWN → resistance feedback.
-                            // Mini is already collapsed, so downward drag has
-                            // no action. Add slight translation (20% of dy,
-                            // max 24px) as visual resistance — snaps back on
-                            // release.
-                            miniLogHeader?.translationY = (dy * 0.15f).coerceIn(0f, 24f)
-                        }
-                    }
-                    true
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    val dy = event.rawY - miniDragStartY
-                    val absDy = Math.abs(dy)
-
-                    if (miniIsDragging) {
-                        // Decide: expand if dragged up enough OR flung up.
-                        val FLING_THRESHOLD = 500f
-                        val shouldExpand = dy < -MINI_TAP_THRESHOLD ||
-                            miniDragVelocity > FLING_THRESHOLD
-                        if (shouldExpand) {
-                            // animateToExpanded will handle the final snap +
-                            // mini header hide + card alpha reset.
-                            // Restore mini visibility first so morph logic works.
-                            // Use INVISIBLE (not GONE) to avoid CoordinatorLayout
-                            // re-measure blink — animateToExpanded will keep it
-                            // INVISIBLE at expand end.
-                            miniLogHeader?.visibility = View.VISIBLE
-                            animateToExpanded(true, fromTap = false, velocityPxSec = miniDragVelocity)
-                        } else {
-                            // Drag was too small — animate snap back to collapsed.
-                            // Previous code did this instantly (visibility GONE +
-                            // alpha=1) which caused a jarring pop. Now animate
-                            // card height → headerH, card alpha → 0, mini alpha → 1
-                            // over 150ms, then hide card.
-                            val card = logCard
-                            if (card != null && card.visibility == View.VISIBLE) {
-                                val startHeight = card.height
-                                val targetHeight = measuredHeaderHeight
-                                val startCardAlpha = card.alpha
-                                val startMiniAlpha = miniLogHeader?.alpha ?: 0f
-                                miniLogHeader?.visibility = View.VISIBLE
-                                val snapBack = android.animation.ValueAnimator.ofFloat(0f, 1f)
-                                snapBack.duration = 150
-                                snapBack.interpolator = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
-                                snapBack.addUpdateListener { anim ->
-                                    val f = anim.animatedValue as Float
-                                    val h = (startHeight + (targetHeight - startHeight) * f).toInt()
-                                    setCardHeight(h, 0f)
-                                    card.alpha = startCardAlpha + (0f - startCardAlpha) * f
-                                    miniLogHeader?.alpha = startMiniAlpha + (1f - startMiniAlpha) * f
-                                }
-                                snapBack.addListener(object : android.animation.AnimatorListenerAdapter() {
-                                    override fun onAnimationEnd(animation: android.animation.Animator) {
-                                        logScrollView?.visibility = View.GONE
-                                        logDivider?.visibility = View.GONE
-                                        setCardHeight(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
-                                        card.visibility = View.GONE
-                                        card.alpha = 1f
-                                        miniLogHeader?.alpha = 1f
-                                        miniLogHeader?.translationY = 0f
-                                    }
-                                })
-                                snapBack.start()
-                                currentAnimator = snapBack
-                            } else {
-                                // Card wasn't visible (drag was purely downward
-                                // resistance). Just reset mini transforms.
-                                miniLogHeader?.alpha = 1f
-                                miniLogHeader?.translationY = 0f
-                                miniLogHeader?.visibility = View.VISIBLE
-                            }
-                        }
-                    } else if (absDy < MINI_TAP_THRESHOLD) {
-                        // Treat as tap — toggle (Material easing)
-                        animateToExpanded(true, fromTap = true)
-                    }
-                    miniIsDragging = false
-                    true
-                }
-                else -> false
-            }
-        }
-
-        // ── Pull/push drag — SystemUI BottomSheet-style ──
-        // Log panel is anchored to the BOTTOM of the screen (below settings scroll).
-        //   • Drag UP   (dy < 0) → expand   (height grows upward, content reveals)
-        //   • Drag DOWN (dy > 0) → collapse (height shrinks downward, content hides)
-        // effectiveDy = -dy  →  up = positive = expand.
-        //
-        // DRAG_SENSITIVITY = 1.0 (true 1:1 finger tracking). Previous 2.2x made
-        // the panel move faster than the finger — felt inaccurate. 1.0 = panel
-        // tracks finger exactly, like dragging a window border.
-        //
-        // Velocity tracking: each MOVE records timestamp + Y. At release,
-        // velocity = (lastY - prevY) / (lastTime - prevTime). This drives the
-        // snap animation duration (fast finger = quick snap, slow finger = settle).
+        // ── Gesture — unified header/pill touch handler ──
+        // The header bar IS the pill surface when collapsed — one handler
+        // covers both states (previously the mini pill needed its own).
+        val DRAG_TOUCH_SLOP = 6f
+        val TAP_THRESHOLD = 16f
+        val FLING_THRESHOLD = 500f
         var dragStartY = 0f
         var dragStartX = 0f
-        var dragStartHeight = 0
-        var dragStartExpanded = false
-        var isDragging = false
+        var dragStartProgress = 0f
+        var wasDragging = false
+        var lastMoveTime = 0L
+        var lastMoveY = 0f
+        var dragVelocity = 0f  // px/sec, + = expand direction (up)
 
         logHeader?.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
-                    currentAnimator?.cancel()
+                    springAnim?.cancel()
                     dragStartY = event.rawY
                     dragStartX = event.rawX
-                    dragStartExpanded = isLogExpanded
-                    isDragging = false
-
-                    // Reset velocity tracking
+                    wasDragging = false
                     lastMoveTime = android.os.SystemClock.uptimeMillis()
                     lastMoveY = event.rawY
                     dragVelocity = 0f
-
-                    // Capture current card height (the actual laid-out height)
-                    dragStartHeight = logCard?.height ?: 0
-
-                    // Pre-compute headerH ONCE in ACTION_DOWN — avoids calling
-                    // measureHeaderHeight() every ACTION_MOVE frame (which
-                    // temporarily toggles view visibility to measure, causing
-                    // micro-stutters during drag).
-                    val headerH = measureHeaderHeight()
-                    // Compute the TRUE weight=1 height for accurate drag clamping.
-                    // This prevents the bounce on release because the snap target
-                    // matches the post-swap layout height exactly.
-                    val measuredExpanded = measureExpandedHeight()
-                    if (measuredExpanded > headerH) {
-                        logExpandedHeight = measuredExpanded
-                    } else if (logExpandedHeight <= headerH) {
-                        // Fallback: estimate if measureExpandedHeight failed
-                        val parentH = parentLayout?.height ?: 0
-                        logExpandedHeight = if (parentH > 0) {
-                            (parentH * 0.55f).toInt().coerceAtLeast(headerH + 200)
-                        } else {
-                            (headerH + 400 * resources.displayMetrics.density).toInt()
+                    // Refresh the expand target for this gesture (parent
+                    // size may have changed since the last interaction).
+                    measureFullGeometry()
+                    // Pin the CURRENT geometry to explicit sizes so the
+                    // morph math is stable during drag. If we were in the
+                    // canonical expanded state (weight=1, MATCH_PARENT),
+                    // pinning to the actual laid-out size = zero jump.
+                    logCard?.let { card ->
+                        val clp = card.layoutParams as? android.widget.LinearLayout.LayoutParams
+                        if (clp != null) {
+                            clp.width = card.width
+                            clp.height = card.height
+                            clp.weight = 0f
+                            card.layoutParams = clp
                         }
                     }
-
-                    // If currently expanded (weight=1), pin to explicit height
-                    // so we can manipulate it during drag.
-                    if (isLogExpanded && dragStartHeight > 0) {
-                        setCardHeight(dragStartHeight, 0f)
-                    }
+                    val range = (fullCardHeight - pillHeight).coerceAtLeast(1)
+                    morphProgress = ((logCard?.height ?: pillHeight) - pillHeight).toFloat() / range
+                    dragStartProgress = morphProgress.coerceIn(0f, 1f)
                     true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
@@ -1991,18 +1618,13 @@ class MainActivity : AppCompatActivity() {
                     val dx = event.rawX - dragStartX
                     val absDy = Math.abs(dy)
                     val absDx = Math.abs(dx)
-
-                    // Activate drag with thumb-calibrated threshold
                     if (absDy > absDx && absDy > DRAG_TOUCH_SLOP) {
-                        isDragging = true
-
-                        // Track velocity (px/sec, + = expand direction).
-                        // NO sensitivity scaling — velocity should match actual
-                        // finger speed for accurate snap duration calculation.
+                        wasDragging = true
+                        // Velocity (px/sec, + = expand): smoothed 60/40 EMA,
+                        // inverted so up = positive — same as before.
                         val now = android.os.SystemClock.uptimeMillis()
                         val dt = (now - lastMoveTime).coerceAtLeast(1L)
                         val instVel = ((event.rawY - lastMoveY) / dt * 1000f)
-                        // Smooth: weighted average of previous + current
                         dragVelocity = if (dragVelocity == 0f) {
                             -instVel
                         } else {
@@ -2010,82 +1632,58 @@ class MainActivity : AppCompatActivity() {
                         }
                         lastMoveTime = now
                         lastMoveY = event.rawY
-
-                        // Invert: up = positive = expand. Sensitivity 1.0 = 1:1
-                        // finger tracking (no multiplier).
-                        val effectiveDy = -dy * DRAG_SENSITIVITY
-
-                        // Use cached headerH (computed in ACTION_DOWN) — avoid
-                        // calling measureHeaderHeight() every frame.
-                        val headerH = measuredHeaderHeight
-
-                        // ── Recompute logExpandedHeight every frame ──
-                        // Sibling heights shift as card grows (NestedScrollView
-                        // with weight=1 shrinks). A stale logExpandedHeight
-                        // causes the 90-100% stutter: card hits stale ceiling
-                        // before reaching true available space, then snaps up
-                        // on release. Live recompute keeps target accurate.
-                        val liveExpanded = measureExpandedHeight()
-                        if (liveExpanded > headerH) {
-                            logExpandedHeight = liveExpanded
-                        }
-
-                        // If expanding from collapsed, reveal content first
-                        if (!dragStartExpanded && effectiveDy > 0) {
-                            logScrollView?.visibility = View.VISIBLE
-                            logDivider?.visibility = View.VISIBLE
-                            toggleBtn?.setImageResource(R.drawable.ic_collapse_log)
-                            dragStartHeight = headerH
-                        }
-
-                        // Calculate new height:
-                        //   • If started expanded: dragStartHeight + effectiveDy
-                        //     (dragging down → effectiveDy < 0 → height shrinks)
-                        //   • If started collapsed: headerH + effectiveDy
-                        //     (dragging up → effectiveDy > 0 → height grows)
-                        val baseHeight = if (dragStartExpanded) dragStartHeight else headerH
-                        val newHeight = (baseHeight + effectiveDy).toInt()
-                            .coerceIn(headerH, logExpandedHeight)
-                        setCardHeight(newHeight, 0f)
+                        // 1:1 finger tracking: up = positive = expand
+                        val effectiveDy = -dy
+                        val range = (fullCardHeight - pillHeight).coerceAtLeast(1)
+                        morphProgress = (dragStartProgress + effectiveDy / range).coerceIn(0f, 1f)
+                        applyMorph(morphProgress)
                     }
                     true
                 }
                 android.view.MotionEvent.ACTION_UP -> {
                     val dy = event.rawY - dragStartY
-                    val absDy = Math.abs(dy)
-
-                    if (isDragging) {
-                        // Snap to nearest state based on current height.
-                        // Use velocity to bias the decision: strong velocity in
-                        // one direction should snap that way even if past midpoint.
-                        val currentHeight = logCard?.height ?: 0
-                        val headerH = measureHeaderHeight()
-                        val midpoint = (headerH + logExpandedHeight) / 2
-
-                        // Velocity threshold for fling: 500 px/sec (sensitive)
-                        val FLING_THRESHOLD = 500f
+                    val dx = event.rawX - dragStartX
+                    if (wasDragging) {
+                        // Fling-aware target (same thresholds as before)
                         val shouldExpand = when {
-                            dragVelocity > FLING_THRESHOLD -> true   // fling up → expand
-                            dragVelocity < -FLING_THRESHOLD -> false  // fling down → collapse
-                            else -> currentHeight > midpoint          // passive: position-based
+                            dragVelocity > FLING_THRESHOLD -> true    // fling up → expand
+                            dragVelocity < -FLING_THRESHOLD -> false   // fling down → collapse
+                            else -> morphProgress > 0.5f               // passive: nearest state
                         }
-
-                        animateToExpanded(
-                            shouldExpand,
-                            fromTap = false,
-                            velocityPxSec = dragVelocity
-                        )
-                    } else if (absDy < TAP_THRESHOLD) {
-                        // Treat as tap — toggle (Material easing)
-                        animateToExpanded(!isLogExpanded, fromTap = true)
+                        springTo(if (shouldExpand) 1f else 0f, dragVelocity)
+                    } else if (Math.abs(dy) < TAP_THRESHOLD && Math.abs(dx) < TAP_THRESHOLD) {
+                        // Tap → toggle
+                        springTo(if (morphProgress > 0.5f) 0f else 1f)
                     }
-                    isDragging = false
+                    wasDragging = false
                     true
                 }
                 else -> false
             }
         }
 
+        // Keyboard/accessibility path: activation via performClick()
+        // (TalkBack double-tap, keyboard focus + Enter) routes here even
+        // though the touch handler consumes touch events.
+        logHeader?.setOnClickListener {
+            springTo(if (morphProgress > 0.5f) 0f else 1f)
+        }
+
+        // The 48dp arrow is part of the drag/tap surface now — make it
+        // non-clickable so drags starting on the icon reach the header
+        // handler (previously drags starting on the icon were swallowed).
+        toggleBtn?.isClickable = false
+
+        // ── Init (no animation) — survives Activity recreation ──
+        measurePillGeometry()
+        if (isLogExpanded) applyExpandedCanonical() else applyPillCanonical()
+        logCard?.post {
+            // After first layout: refine geometry with real parent sizes
+            // (re-measuring the pill also picks up final font metrics).
+            measurePillGeometry()
+            measureFullGeometry()
+            if (morphProgress <= 0f) applyPillCanonical()  // absorb refined pill size
+        }
         // Prevent parent NestedScrollView from stealing scroll events inside the log panel
         logScrollView?.setOnTouchListener { v, _ ->
             v.parent?.requestDisallowInterceptTouchEvent(true)
