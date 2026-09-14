@@ -294,7 +294,13 @@ object NativeBridge {
             DdBuildResult(
                 success = true,
                 output = json.optString("output", ""),
-                zipPath = json.optString("zip_path", null),
+                // AUDIT-F7: org.json's optString(key, fallback) only returns
+                // the fallback when the KEY is absent — a JSON null value
+                // yields the literal string "null". Guard with isNull()
+                // (same pattern as parseDeviceCodenameResult / …Partitions)
+                // so a null field stays null instead of leaking "null"
+                // into zipPath / downstream file operations.
+                zipPath = if (json.has("zip_path") && !json.isNull("zip_path")) json.optString("zip_path") else null,
                 zipSize = if (json.has("zip_size")) json.optLong("zip_size") else null,
                 bundleSize = if (json.has("bundle_size")) json.optLong("bundle_size") else null,
                 totalUncSize = if (json.has("total_unc_size")) json.optLong("total_unc_size") else null,
@@ -305,7 +311,7 @@ object NativeBridge {
             DdBuildResult(
                 success = false,
                 output = json.optString("output", ""),
-                error = json.optString("error", "Unknown error"),
+                error = if (json.has("error") && !json.isNull("error")) json.optString("error") else "Unknown error",
                 durationMs = json.optLong("duration_ms", 0)
             )
         }

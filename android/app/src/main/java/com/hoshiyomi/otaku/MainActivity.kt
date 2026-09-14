@@ -385,9 +385,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Mark all partition progress as complete (companion state)
-            for (i in 0 until partitionCount) {
-                partitionProgress[i] = 100
-            }
+            // AUDIT-F2: use the locked helper (IMPL-011) instead of raw array
+            // writes — direct writes here bypassed progressLock and raced
+            // with concurrent onProgress writes from Dispatchers.Default.
+            markAllProgressComplete()
 
             // Stop foreground service (uses appContext, works in background)
             try {
@@ -439,10 +440,6 @@ class MainActivity : AppCompatActivity() {
             if (uris.isNotEmpty()) handleImageFilesSelected(uris)
         }
     }
-
-    private val removeImageConfirm = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { /* Not used — placeholder for future file save */ }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -957,11 +954,15 @@ class MainActivity : AppCompatActivity() {
         val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
             ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
         if (barRow != null) {
+            // AUDIT-F2: read through the locked snapshot (IMPL-011) — a raw
+            // indexed read could observe a partially-written array while the
+            // build coroutine (Dispatchers.Default) is updating elements.
+            val snapshot = snapshotPartitionProgress()
             for (i in 0 until partitionCount) {
                 val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
                 if (bar != null) {
                     bar.isIndeterminate = false
-                    bar.progress = if (forceComplete) 100 else partitionProgress[i]
+                    bar.progress = if (forceComplete) 100 else snapshot[i]
                 }
             }
         }
@@ -1658,6 +1659,28 @@ class MainActivity : AppCompatActivity() {
                     wasDragging = false
                     true
                 }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    // AUDIT-F3: the system cancelled the gesture (parent
+                    // intercepted, accessibility action, multi-window
+                    // switches…). Previously this fell through to
+                    // `else -> false`, leaving the card frozen mid-morph
+                    // with explicit geometry, no running animation, and
+                    // wasDragging stuck true until the next touch.
+                    // Settle toward the nearest state so the surface is
+                    // never left stranded (same fling-aware logic as UP).
+                    if (wasDragging) {
+                        val shouldExpand = when {
+                            dragVelocity > FLING_THRESHOLD -> true
+                            dragVelocity < -FLING_THRESHOLD -> false
+                            else -> morphProgress > 0.5f
+                        }
+                        springTo(if (shouldExpand) 1f else 0f, dragVelocity)
+                    } else {
+                        springTo(if (morphProgress > 0.5f) 1f else 0f)
+                    }
+                    wasDragging = false
+                    true
+                }
                 else -> false
             }
         }
@@ -2066,6 +2089,20 @@ class MainActivity : AppCompatActivity() {
                         tempFile.delete()
                         showLog("Loading cancelled.", LogLevel.WARN)
                         throw e
+                    } catch (e: Exception) {
+                        // AUDIT-F4: any non-cancellation failure here
+                        // (provider died, stream broken, disk full,
+                        // SecurityException on the stream…) previously
+                        // propagated out of the lifecycleScope coroutine
+                        // and CRASHED the whole app. Handle it like the
+                        // rename-failure path: clean up, drop the
+                        // placeholder, log, and keep loading the rest.
+                        tempFile.delete()
+                        destFile.delete()
+                        showLog("Failed to load $partitionName: ${e.message ?: e.javaClass.simpleName}", LogLevel.ERROR)
+                        imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
+                        runOnUiThread { updateImageListUI() }
+                        continue
                     }
                     val copyDurationMs = System.currentTimeMillis() - copyStartTime
 
@@ -2294,6 +2331,18 @@ class MainActivity : AppCompatActivity() {
         }
         val outPath = File(outDir, outputFileName).absolutePath
 
+        // AUDIT-F5: capture ROM name + Maker HERE, on the UI thread
+        // (startBuild is called from onBuildClicked), BEFORE entering
+        // buildScope (Dispatchers.Default). The old code read these view
+        // properties inside the buildScope coroutine — a background thread
+        // — while its comment claimed a withContext(Dispatchers.Main)
+        // wrapper that never existed. Reading TextView text off the UI
+        // thread risks CalledFromWrongThreadException / stale values.
+        val romName = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextRomName)
+            ?.text?.toString()?.trim() ?: ""
+        val maker = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextMaker)
+            ?.text?.toString()?.trim() ?: ""
+
         // Store state in companion object (survives Activity recreation)
         lastOutputPath = outPath
         lastProgressMessage = ""
@@ -2352,15 +2401,10 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 try {
-                    // BUG-H01 fix: Read ROM name and Maker on the UI thread BEFORE
-                    // passing to OTABridge.dd(). The outer buildScope runs on
-                    // Dispatchers.Default — accessing View properties from a non-UI
-                    // thread can throw CalledFromWrongThreadException or return stale
-                    // values. These values are captured here while still on Main
-                    // (the withContext(Dispatchers.Main) block wraps the entire build).
-                    val romName = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextRomName)?.text?.toString()?.trim() ?: ""
-                    val maker = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextMaker)?.text?.toString()?.trim() ?: ""
-
+                    // romName/maker were captured on the UI thread in
+                    // startBuild() before this coroutine launched
+                    // (AUDIT-F5) — no view access from this background
+                    // dispatcher.
                     val result = OTABridge.dd(
                         images = images,
                         device = deviceValue,
@@ -2465,11 +2509,15 @@ class MainActivity : AppCompatActivity() {
                                     }
                                     val barRow = current.cachedBarRow
                                     if (barRow != null && barRow.childCount == partitionCount) {
+                                        // AUDIT-F2: read through the locked snapshot
+                                        // (IMPL-011) — raw indexed reads here raced with
+                                        // onProgress writes from Dispatchers.Default.
+                                        val snapshot = snapshotPartitionProgress()
                                         for (i in 0 until partitionCount) {
                                             val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
                                             bar?.let {
                                                 it.isIndeterminate = false
-                                                it.progress = partitionProgress[i]
+                                                it.progress = snapshot[i]
                                             }
                                         }
                                     }
@@ -2534,25 +2582,6 @@ class MainActivity : AppCompatActivity() {
                     current.setUIExecuting(false)
                 }
             }
-        }
-    }
-
-    /**
-     * Handle build result — updates UI with success/failure status.
-     */
-    private fun handleBuildResult(success: Boolean, output: String, error: String?, durationMs: Long) {
-        isExecuting = false
-        setUIExecuting(false)
-
-        if (success) {
-            val duration = if (durationMs < 60000) "${durationMs / 1000}s"
-                else "${durationMs / 60000}m ${durationMs % 60000 / 1000}s"
-            // Show 100% progress bar briefly before switching to completion notification
-            showProgressNotification("Build complete!", 100)
-            showCompletionNotification(true, "Finished in $duration")
-        } else {
-            showLog("${error ?: "Unknown error"}", LogLevel.ERROR)
-            showCompletionNotification(false, error ?: "Unknown error")
         }
     }
 
@@ -3165,13 +3194,6 @@ class MainActivity : AppCompatActivity() {
         cachedLogView = findViewById(R.id.textViewLog)
         cachedScrollView = findViewById(R.id.scrollViewLog)
     }
-
-    // Convenience log methods — shorter call sites, Logcat alongside UI
-    private fun logInfo(text: String)    = showLog(text, LogLevel.INFO)
-    private fun logWarn(text: String)    = showLog(text, LogLevel.WARN)
-    private fun logError(text: String)   = showLog(text, LogLevel.ERROR)
-    private fun logSuccess(text: String) = showLog(text, LogLevel.SUCCESS)
-    private fun logDebug(text: String)   = showLog(text, LogLevel.DEBUG)
 
     /**
      * UI-only log append — does NOT persist to savedLogText.

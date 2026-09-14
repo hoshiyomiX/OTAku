@@ -248,61 +248,75 @@ object OTABridge {
             }
         }
 
-        return withContext(Dispatchers.IO) {
-            try {
-                // IMPL-018: Use -4 (THREAD_PRIORITY_URGENT_DISPLAY) instead of -10.
-                // -10 is in the audio priority range and can cause audio glitching
-                // during long compression builds. -4 gives I/O work higher priority
-                // than default (0) without interfering with audio playback.
-                Process.setThreadPriority(Process.myTid(), -4)
-            } catch (_: Exception) {}
+        // AUDIT-F1: try/finally OUTSIDE withContext. Previously the cleanup
+        // lived only inside the withContext block's own finally — if the
+        // caller's coroutine was cancelled before withContext could enter
+        // the block, the polling scope would leak forever (500ms polling
+        // loop with no owner) and the .progress sidecar would never be
+        // deleted. Moving cleanup to an outer finally guarantees it runs
+        // on every exit path, including early CancellationException.
+        try {
+            return withContext(Dispatchers.IO) {
+                try {
+                    // IMPL-018: Use -4 (THREAD_PRIORITY_URGENT_DISPLAY) instead of -10.
+                    // -10 is in the audio priority range and can cause audio glitching
+                    // during long compression builds. -4 gives I/O work higher priority
+                    // than default (0) without interfering with audio playback.
+                    Process.setThreadPriority(Process.myTid(), -4)
+                } catch (_: Exception) {}
 
-            try {
-                val ddResult = NativeBridge.buildDd(
-                    images = images,
-                    compression = compression,
-                    level = level,
-                    outputPath = outputPath,
-                    device = effectiveDevice,
-                    skipVerify = skipVerify,
-                    romName = romName,
-                    maker = maker
-                )
+                try {
+                    val ddResult = NativeBridge.buildDd(
+                        images = images,
+                        compression = compression,
+                        level = level,
+                        outputPath = outputPath,
+                        device = effectiveDevice,
+                        skipVerify = skipVerify,
+                        romName = romName,
+                        maker = maker
+                    )
 
-                // Emit all Rust output lines to the log
-                ddResult.output.split("\n").forEach { line ->
-                    if (line.isNotBlank()) {
-                        onOutputLine?.invoke(line)
+                    // Emit all Rust output lines to the log
+                    ddResult.output.split("\n").forEach { line ->
+                        if (line.isNotBlank()) {
+                            onOutputLine?.invoke(line)
+                        }
+                    }
+
+                    // Log result summary after the JNI call returns
+                    val durationMs = System.currentTimeMillis() - buildStartTime
+                    val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
+                    val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
+                    val totalUncSizeStr = ddResult.totalUncSize?.let { formatSize(it) } ?: "N/A"
+                    val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
+                        "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
+                        "bundle_size=$bundleSizeStr, total_flash_size=$totalUncSizeStr"
+                    Log.d(TAG, debugEndMsg)
+                    onOutputLine?.invoke(debugEndMsg)
+
+                    if (ddResult.success) {
+                        OTAResult.success(ddResult.output, ddResult.durationMs)
+                    } else {
+                        OTAResult.error(
+                            ddResult.error ?: "Native build failed",
+                            ddResult.durationMs
+                        ).copy(output = ddResult.output)
                     }
                 }
-
-                // Log result summary after the JNI call returns
-                val durationMs = System.currentTimeMillis() - buildStartTime
-                val zipSizeStr = ddResult.zipSize?.let { formatSize(it) } ?: "N/A"
-                val bundleSizeStr = ddResult.bundleSize?.let { formatSize(it) } ?: "N/A"
-                val totalUncSizeStr = ddResult.totalUncSize?.let { formatSize(it) } ?: "N/A"
-                val debugEndMsg = "[DEBUG] dd() returned: success=${ddResult.success}, " +
-                    "duration=${ddResult.durationMs}ms, zip_size=$zipSizeStr, " +
-                    "bundle_size=$bundleSizeStr, total_flash_size=$totalUncSizeStr"
-                Log.d(TAG, debugEndMsg)
-                onOutputLine?.invoke(debugEndMsg)
-
-                if (ddResult.success) {
-                    OTAResult.success(ddResult.output, ddResult.durationMs)
-                } else {
-                    OTAResult.error(
-                        ddResult.error ?: "Native build failed",
-                        ddResult.durationMs
-                    ).copy(output = ddResult.output)
-                }
-            } finally {
-                // Always cancel progress polling and clean up.
-                // IMPL-015: Cancel scope first (cancels all children including progressJob),
-                // then delete the sidecar file so stale data doesn't persist.
-                progressScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
-                progressJob.cancel()  // redundant but explicit
-                progressFile.delete()
+                // NOTE: progressScope/progressFile cleanup deliberately NOT here —
+                // handled by the outer finally (AUDIT-F1) so it also covers the
+                // withContext-entry cancellation path.
             }
+        } finally {
+            // Always cancel progress polling and clean up — on EVERY exit path
+            // (normal return, JNI exception, or caller cancellation).
+            // IMPL-015: Cancel the scope (cancels all children including
+            // progressJob), then delete the sidecar file so stale data
+            // doesn't persist into the next build.
+            progressScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            progressJob.cancel()
+            progressFile.delete()
         }
     }
 
