@@ -563,6 +563,61 @@
 
                         </LinearLayout>
 
+                        <!-- Divider -->
+                        <View
+                            android:layout_width="match_parent"
+                            android:layout_height="1dp"
+                            android:background="?attr/colorOutlineVariant"
+                            android:layout_marginTop="12dp"
+                            android:layout_marginBottom="12dp" />
+
+                        <!-- ── 6. Dynamic Color (Material You) ──
+                             MD3-FIX IMPL-004: user-facing toggle for Material You
+                             dynamic color. Hidden entirely on API < 31 (set from
+                             MainActivity.setupDynamicColorToggle()) where Material
+                             You is unavailable — those devices always use the
+                             Suisei Blue brand palette as the default accent.
+                             OFF (or unsupported) = Suisei Blue; ON (API 31+) =
+                             system accent from wallpaper. -->
+                        <LinearLayout
+                            android:id="@+id/containerDynamicColor"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="@string/dynamic_color_label"
+                                style="@style/TextAppearance.OTAku.SectionTitle"
+                                android:layout_marginBottom="4dp" />
+
+                            <LinearLayout
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="horizontal"
+                                android:gravity="center_vertical">
+
+                                <TextView
+                                    android:layout_width="0dp"
+                                    android:layout_height="wrap_content"
+                                    android:layout_weight="1"
+                                    android:text="@string/dynamic_color_summary"
+                                    android:textSize="12sp"
+                                    android:textColor="?attr/colorOnSurfaceVariant"
+                                    android:layout_marginEnd="12dp" />
+
+                                <!-- M3 MaterialSwitch — self-themes via the
+                                     active Material3 theme's color tokens. -->
+                                <com.google.android.material.materialswitch.MaterialSwitch
+                                    android:id="@+id/switchDynamicColor"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="48dp" />
+
+                            </LinearLayout>
+
+                        </LinearLayout>
+
                     </LinearLayout>
 
                 </com.google.android.material.card.MaterialCardView>

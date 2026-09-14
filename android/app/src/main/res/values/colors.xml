@@ -113,22 +113,27 @@
          is created programmatically and ContextCompat.getColor needs a
          concrete resource ID that Android can resolve per-configuration. -->
     <color name="partition_text">#191C1B</color>
-    <!-- P1-fix C-T-04: was hardcoded teal #80CBC4. Now uses ?attr/colorPrimary tint
-         for theme-awareness (teal/Suisei/dynamic). The hardcoded teal didn't adapt
-         when user switched to Suisei Blue palette. -->
+    <!-- DEPRECATED (MD3-FIX IMPL-002): loading entries now resolve ?attr/colorPrimary
+         at runtime so they follow the active palette (Suisei Blue default / Material
+         You). This teal resource is kept only as a runtime-resolution fallback and
+         is no longer the primary source. -->
     <color name="partition_text_loading">#80CBC4</color>
-    <!-- Log level colors — P1-fix C-T-02: aligned with M3 semantic color tokens.
-         log_error: M3 error (#BA1A1A)
-         log_success: derived from M3 primary tone (success green concept)
-         log_warning: derived from M3 tertiary tone
-         log_info overridden to use ?attr/colorPrimary (accent) via code in showLog(). -->
+    <!-- DEPRECATED (MD3-FIX IMPL-001): log level colors are now resolved at runtime
+         from the ACTIVE theme's color tokens — INFO ?attr/colorPrimary, SUCCESS
+         ?attr/colorSecondary, WARN ?attr/colorTertiary, ERROR ?attr/colorError,
+         DEBUG ?android:textColorSecondary — so log lines follow the active palette
+         (Suisei Blue brand accent or Material You dynamic). These teal-derived
+         resources are no longer referenced (release builds strip via
+         shrinkResources); kept for reference. -->
     <color name="log_error">#BA1A1A</color>
     <color name="log_success">#4B635B</color>
     <color name="log_warning">#426278</color>
     <color name="log_info">#80CBC4</color>
     <color name="log_debug">#9E9E9E</color>
 
-    <!-- Status colors — P1-fix C-T-02: aligned with M3 semantic tokens -->
+    <!-- DEPRECATED (MD3-FIX IMPL-007): status_running and status_success are
+         unreferenced (dead resources). status_error is still used for the
+         remove-partition icon tint — keep; it maps to the M3 error token anyway. -->
     <color name="status_running">#426278</color>
     <color name="status_success">#4B635B</color>
     <color name="status_error">#BA1A1A</color>

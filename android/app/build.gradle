@@ -92,7 +92,10 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-    implementation 'com.google.android.material:material:1.11.0'
+    // MD3-FIX IMPL-008: 1.11.0 → 1.12.0 — final stable feature release of
+    // MDC-Android Views (library now in maintenance mode; 1.12.x brings
+    // dynamic-color + contrast fixes). Drop-in minor bump, API compatible.
+    implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'

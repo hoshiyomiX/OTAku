@@ -241,6 +241,35 @@ class MainActivity : AppCompatActivity() {
         // missed (condition "lastUiMode != 0" always fails on first change).
         @Volatile var lastUiMode: Int = 0
 
+        /** MD3-FIX IMPL-003: Cached notification accent — set by MainActivity
+         *  onCreate() from the FINAL activity theme (night variant + DynamicColors
+         *  overlay applied) so notifications match the active palette. Null until
+         *  the first Activity creation; falls back to resolving colorPrimary from
+         *  the application context theme (Suisei base palette). */
+        @Volatile private var notificationAccentColor: Int? = null
+
+        /** MD3-FIX IMPL-003: Resolve the notification accent color — cached
+         *  Activity-theme value first (dynamic-aware), application-theme
+         *  fallback (Suisei Blue base). Never throws; null = unresolvable. */
+        private fun resolveNotificationAccent(ctx: Context): Int? {
+            notificationAccentColor?.let { return it }
+            return try {
+                val tv = android.util.TypedValue()
+                if (ctx.theme.resolveAttribute(
+                        com.google.android.material.R.attr.colorPrimary, tv, true
+                    )
+                ) {
+                    if (tv.resourceId != 0) {
+                        ContextCompat.getColor(ctx, tv.resourceId)
+                    } else {
+                        tv.data
+                    }
+                } else {
+                    null
+                }
+            } catch (_: Exception) { null }
+        }
+
         /** Show ongoing progress notification with determinate progress bar. */
         fun showProgressNotification(message: String, percent: Int) {
             val ctx = appContext ?: return
@@ -253,7 +282,7 @@ class MainActivity : AppCompatActivity() {
                     ctx, 0, intent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
-                val notification = NotificationCompat.Builder(ctx, OTAkuApp.CHANNEL_ID)
+                val builder = NotificationCompat.Builder(ctx, OTAkuApp.CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_media_play)
                     .setContentTitle("OTAku")
                     .setContentText(message)
@@ -262,8 +291,10 @@ class MainActivity : AppCompatActivity() {
                     .setSilent(true)
                     .setContentIntent(pi)
                     .setPriority(NotificationCompat.PRIORITY_LOW)
-                    .build()
-                nm.notify(NOTIFICATION_ID, notification)
+                // MD3-FIX IMPL-003: brand the notification with the active
+                // palette's primary (Material You on 12+, Suisei Blue below).
+                resolveNotificationAccent(ctx)?.let { builder.setColor(it) }
+                nm.notify(NOTIFICATION_ID, builder.build())
             } catch (_: Exception) { /* notification is non-critical */ }
         }
 
@@ -279,7 +310,7 @@ class MainActivity : AppCompatActivity() {
                     ctx, 0, intent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
-                val notification = NotificationCompat.Builder(ctx, OTAkuApp.CHANNEL_ID)
+                val builder = NotificationCompat.Builder(ctx, OTAkuApp.CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_media_play)
                     .setContentTitle(if (success) "Build Complete" else "Build Failed")
                     .setContentText(message)
@@ -287,8 +318,10 @@ class MainActivity : AppCompatActivity() {
                     .setAutoCancel(true)
                     .setContentIntent(pi)
                     .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                    .build()
-                nm.notify(NOTIFICATION_ID, notification)
+                // MD3-FIX IMPL-003: brand the notification with the active
+                // palette's primary (Material You on 12+, Suisei Blue below).
+                resolveNotificationAccent(ctx)?.let { builder.setColor(it) }
+                nm.notify(NOTIFICATION_ID, builder.build())
             } catch (_: Exception) { /* notification is non-critical */ }
         }
 
@@ -549,6 +582,14 @@ class MainActivity : AppCompatActivity() {
         // window attributes from the now-correct theme and applies them.
         syncWindowToTheme()
 
+        // MD3-FIX IMPL-003: Cache the notification accent from the FINAL
+        // activity theme (night variant + DynamicColors overlay applied).
+        // Companion-level notifications reuse this even after the Activity
+        // is destroyed, so they always match the active palette — Material
+        // You on API 31+, Suisei Blue brand accent otherwise.
+        notificationAccentColor =
+            resolveThemeColorAttr(com.google.android.material.R.attr.colorPrimary)
+
         setContentView(R.layout.activity_main)
         // IMPL-013: Eagerly cache all view references after inflation.
         // Eliminates the lazy-if-null check in setUIExecuting() which
@@ -628,6 +669,7 @@ class MainActivity : AppCompatActivity() {
         setupDeviceMetaFields()
         setupOutputField()
         setupCustomFilenameField()
+        setupDynamicColorToggle()  // MD3-FIX IMPL-005: Material You switch (API 31+)
         setupBackPressedHandler()  // BUG-H07: OnBackPressedDispatcher
         updateOutputPreview()  // Show default filename preview immediately
         updateBuildButtonState()  // Disable Build button until partitions are added
@@ -766,6 +808,40 @@ class MainActivity : AppCompatActivity() {
                 android.util.Log.e("OTAku", "DynamicColors.applyToActivityIfAvailable() " +
                     "threw: ${e.message}")
             }
+        }
+    }
+
+    /**
+     * MD3-FIX IMPL-005: Wire the Dynamic Color (Material You) toggle.
+     *
+     * The whole section is hidden on API < 31, where Material You is
+     * unavailable — those devices always use the Suisei Blue brand
+     * palette (Theme.OTAku.Suisei) as the default accent.
+     *
+     * On API 31+ the switch reflects pref_use_dynamic_color (default ON).
+     * Toggling persists the preference and recreates the Activity so
+     * onCreate() re-evaluates applyDynamicColorsOverlay() — DynamicColors
+     * cannot be un-applied in place, so a full recreation is required
+     * (same pattern as cycleTheme()).
+     */
+    private fun setupDynamicColorToggle() {
+        val container = findViewById<View>(R.id.containerDynamicColor) ?: return
+        if (!SuiseiColors.isDynamicColorAvailable) {
+            container.visibility = View.GONE
+            return
+        }
+        val toggle = findViewById<com.google.android.material.materialswitch.MaterialSwitch>(
+            R.id.switchDynamicColor
+        ) ?: return
+        toggle.isChecked = prefs.getBoolean("pref_use_dynamic_color", true)
+        toggle.setOnCheckedChangeListener { _, checked ->
+            prefs.edit { putBoolean("pref_use_dynamic_color", checked) }
+            // Mirror cycleTheme()'s recreate pattern: set the flag to
+            // suppress onConfigurationChanged double-recreate, then fade.
+            themeSwitchInProgress = true
+            recreate()
+            @Suppress("DEPRECATION")
+            overridePendingTransition(android.R.anim.fade_in, 0)
         }
     }
 
@@ -2932,17 +3008,26 @@ class MainActivity : AppCompatActivity() {
                         "  ${idx + 1}. $name  ($sizeStr)"
                     }
                     textSize = 13f
-                    // FIX: Use explicit color resource instead of runtime attribute resolution.
-                    // The previous code used context.theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
-                    // which could return 0 or an invalid color in some theme configurations, making
-                    // the text invisible. Using ContextCompat.getColor with an explicit color resource
-                    // guarantees the text is always visible.
-                    setTextColor(
-                        androidx.core.content.ContextCompat.getColor(
-                            this@MainActivity,
-                            if (isLoading) R.color.partition_text_loading else R.color.partition_text
+                    // MD3-FIX IMPL-002: loading entries use the theme accent
+                    // (?attr/colorPrimary) resolved at runtime so "Loading…" text
+                    // follows the active palette (Suisei Blue default, Material
+                    // You on 12+) — the old hardcoded teal (#80CBC4) clashed with
+                    // the Suisei theme. Loaded entries keep the explicit neutral
+                    // resource (P1-fix C-T-03: night-qualified, always visible).
+                    if (isLoading) {
+                        setTextColor(
+                            resolveThemeColorAttr(com.google.android.material.R.attr.colorPrimary)
+                                ?: androidx.core.content.ContextCompat.getColor(
+                                    this@MainActivity, R.color.partition_text_loading
+                                )
                         )
-                    )
+                    } else {
+                        setTextColor(
+                            androidx.core.content.ContextCompat.getColor(
+                                this@MainActivity, R.color.partition_text
+                            )
+                        )
+                    }
                     // Italicize loading entries to visually distinguish them
                     if (isLoading) {
                         typeface = android.graphics.Typeface.create(
@@ -3373,6 +3458,34 @@ class MainActivity : AppCompatActivity() {
         container.addView(labelRow)
     }
 
+    /**
+     * MD3-FIX IMPL-001: Resolve a theme color attribute (e.g. colorPrimary)
+     * to a concrete ARGB int from the ACTIVITY theme — which already includes
+     * the night-mode variant AND the DynamicColors overlay when active. This
+     * is what makes runtime-colored views follow the active palette:
+     *   - API 31+ + dynamic color ON  → Material You system palette
+     *   - API 26-30 / toggle OFF      → Suisei Blue brand palette (default)
+     *
+     * @return the resolved color, or null if the attribute can't be resolved
+     *         (callers keep their own sensible fallback).
+     */
+    private fun resolveThemeColorAttr(attrResId: Int): Int? {
+        return try {
+            val typedValue = android.util.TypedValue()
+            if (!theme.resolveAttribute(attrResId, typedValue, true)) {
+                return null
+            }
+            if (typedValue.resourceId != 0) {
+                androidx.core.content.ContextCompat.getColor(this, typedValue.resourceId)
+            } else {
+                typedValue.data
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("OTAku", "resolveThemeColorAttr failed: ${e.message}")
+            null
+        }
+    }
+
     private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).toInt()
 
     /**
@@ -3418,12 +3531,22 @@ class MainActivity : AppCompatActivity() {
     //  Log Level System
     // ═══════════════════════════════════════════════════════════════
 
-    enum class LogLevel(val tag: String, val colorRes: Int, val priority: Int) {
-        DEBUG("DBG ", R.color.log_debug,    android.util.Log.VERBOSE),
-        INFO("INFO", R.color.log_info,     android.util.Log.INFO),
-        WARN("WARN", R.color.log_warning,  android.util.Log.WARN),
-        ERROR("ERR ", R.color.log_error,   android.util.Log.ERROR),
-        SUCCESS("OK  ", R.color.log_success, android.util.Log.INFO),
+    // MD3-FIX IMPL-001: log level colors resolve from the ACTIVE theme's
+    // color tokens (not static color resources) so log lines follow the
+    // active palette — Suisei Blue brand accent (API 26-30 or toggle OFF)
+    // or Material You dynamic color (API 31+). The old @color/log_* values
+    // were teal-specific and clashed with the default Suisei theme.
+    //   DEBUG   → textColorSecondary (neutral, muted)
+    //   INFO    → colorPrimary        (theme accent)
+    //   WARN    → colorTertiary       (warm accent slot)
+    //   ERROR   → colorError          (semantic red)
+    //   SUCCESS → colorSecondary      (muted secondary slot)
+    enum class LogLevel(val tag: String, val themeAttr: Int, val priority: Int) {
+        DEBUG("DBG ", android.R.attr.textColorSecondary, android.util.Log.VERBOSE),
+        INFO("INFO", com.google.android.material.R.attr.colorPrimary, android.util.Log.INFO),
+        WARN("WARN", com.google.android.material.R.attr.colorTertiary, android.util.Log.WARN),
+        ERROR("ERR ", com.google.android.material.R.attr.colorError, android.util.Log.ERROR),
+        SUCCESS("OK  ", com.google.android.material.R.attr.colorSecondary, android.util.Log.INFO),
         PLAIN("", 0, android.util.Log.DEBUG),
     }
 
@@ -3472,10 +3595,16 @@ class MainActivity : AppCompatActivity() {
             val prefix = "[$timestamp] [${level.tag}] "
             val colored = SpannableString("$prefix$line")
             try {
-                colored.setSpan(
-                    ForegroundColorSpan(ContextCompat.getColor(this, level.colorRes)),
-                    0, prefix.length, SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
-                )
+                // MD3-FIX IMPL-001: color the prefix with the ACTIVE theme's
+                // token for this level (see LogLevel) — resolved through the
+                // activity theme, so DynamicColors (API 31+) and the night
+                // variant are both honored. Falls back to plain text.
+                resolveThemeColorAttr(level.themeAttr)?.let { c ->
+                    colored.setSpan(
+                        ForegroundColorSpan(c),
+                        0, prefix.length, SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                }
             } catch (_: Exception) { /* fallback to plain */ }
             textView.append(colored)
         }
