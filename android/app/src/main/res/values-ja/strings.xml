@@ -74,8 +74,6 @@
     <string name="theme_label">テーマ切替</string>
 
     <!-- Dynamic color -->
-    <string name="dynamic_color_label">ダイナミックカラー</string>
-    <string name="dynamic_color_summary">Android 12+でシステムアクセントカラーを使用。旧バージョンではSuisei Blue（#00B0F0）にフォールバック。</string>
     <string name="color_source_material_you">Material You（システムアクセント）</string>
     <string name="color_source_suisei">Suisei Blue（デフォルト）</string>
 </resources>

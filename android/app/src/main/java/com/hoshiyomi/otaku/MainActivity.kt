@@ -666,7 +666,9 @@ class MainActivity : AppCompatActivity() {
         setupDeviceMetaFields()
         setupOutputField()
         setupCustomFilenameField()
-        setupDynamicColorToggle()  // MD3-FIX IMPL-005: Material You switch (API 31+)
+        // Dynamic color toggle REMOVED (AUDIT-DC) — color source is pure
+        // auto-detect: applyDynamicColorsOverlay() applies Material You on
+        // API 31+ via SuiseiColors.isDynamicColorAvailable, no user pref.
         setupBackPressedHandler()  // BUG-H07: OnBackPressedDispatcher
         updateOutputPreview()  // Show default filename preview immediately
         updateBuildButtonState()  // Disable Build button until partitions are added
@@ -796,8 +798,10 @@ class MainActivity : AppCompatActivity() {
      * during view inflation.
      */
     private fun applyDynamicColorsOverlay() {
-        val useDynamic = SuiseiColors.shouldUseDynamicTheme(prefs)
-        if (useDynamic) {
+        // AUDIT-DC: pure auto-detect — no user preference. Material You
+        // dynamic color is applied whenever the device supports it (API 31+);
+        // older devices keep the Suisei Blue base theme untouched.
+        if (SuiseiColors.isDynamicColorAvailable) {
             try {
                 com.google.android.material.color.DynamicColors
                     .applyToActivityIfAvailable(this)
@@ -805,40 +809,6 @@ class MainActivity : AppCompatActivity() {
                 android.util.Log.e("OTAku", "DynamicColors.applyToActivityIfAvailable() " +
                     "threw: ${e.message}")
             }
-        }
-    }
-
-    /**
-     * MD3-FIX IMPL-005: Wire the Dynamic Color (Material You) toggle.
-     *
-     * The whole section is hidden on API < 31, where Material You is
-     * unavailable — those devices always use the Suisei Blue brand
-     * palette (Theme.OTAku.Suisei) as the default accent.
-     *
-     * On API 31+ the switch reflects pref_use_dynamic_color (default ON).
-     * Toggling persists the preference and recreates the Activity so
-     * onCreate() re-evaluates applyDynamicColorsOverlay() — DynamicColors
-     * cannot be un-applied in place, so a full recreation is required
-     * (same pattern as cycleTheme()).
-     */
-    private fun setupDynamicColorToggle() {
-        val container = findViewById<View>(R.id.containerDynamicColor) ?: return
-        if (!SuiseiColors.isDynamicColorAvailable) {
-            container.visibility = View.GONE
-            return
-        }
-        val toggle = findViewById<com.google.android.material.materialswitch.MaterialSwitch>(
-            R.id.switchDynamicColor
-        ) ?: return
-        toggle.isChecked = prefs.getBoolean("pref_use_dynamic_color", true)
-        toggle.setOnCheckedChangeListener { _, checked ->
-            prefs.edit { putBoolean("pref_use_dynamic_color", checked) }
-            // Mirror cycleTheme()'s recreate pattern: set the flag to
-            // suppress onConfigurationChanged double-recreate, then fade.
-            themeSwitchInProgress = true
-            recreate()
-            @Suppress("DEPRECATION")
-            overridePendingTransition(android.R.anim.fade_in, 0)
         }
     }
 
@@ -2687,7 +2657,7 @@ class MainActivity : AppCompatActivity() {
                     insetBottom = 0
                     minimumWidth = 0
                     minWidth = 0
-                    setPadding(dpToPx(8), 0, dpToPx(8), 0)
+                    setPadding(0, 0, 0, 0)
                     background = null
                     // Tint icon with colorError (red) so the delete action is
                     // visually distinct. colorError resolves correctly across
@@ -2697,9 +2667,16 @@ class MainActivity : AppCompatActivity() {
                             this@MainActivity, R.color.status_error
                         )
                     )
+                    // SIZE-AUDIT S2: explicit 48×48dp — M3 minimum touch target.
+                    // Previously wrap_content with an 18dp icon and 8dp
+                    // horizontal padding rendered ~34×40dp, below the 48dp
+                    // accessibility floor (same defect class as P0-fix A-02
+                    // on buttonToggleLog). Fixed size + zero padding lets the
+                    // default content gravity center the icon in the 48dp box;
+                    // the visual icon stays 18dp so rows remain compact.
                     layoutParams = android.widget.LinearLayout.LayoutParams(
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                        dpToPx(48),
+                        dpToPx(48)
                     )
                     setOnClickListener {
                         imageFiles.removeAll { it.first == name && it.second == path }

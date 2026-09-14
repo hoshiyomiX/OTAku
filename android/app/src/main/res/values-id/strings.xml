@@ -74,8 +74,6 @@
     <string name="theme_label">Ganti tema</string>
 
     <!-- Dynamic color -->
-    <string name="dynamic_color_label">Warna dinamis</string>
-    <string name="dynamic_color_summary">Pakai warna aksen sistem di Android 12+. Kembali ke Suisei Blue (#00B0F0) di versi lebih lama.</string>
     <string name="color_source_material_you">Material You (aksen sistem)</string>
     <string name="color_source_suisei">Suisei Blue (default)</string>
 </resources>

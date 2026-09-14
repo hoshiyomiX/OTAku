@@ -132,13 +132,10 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextRomName"
                                     android:layout_width="match_parent"
-                                    android:layout_height="48dp"
+                                    android:layout_height="wrap_content"
                                     android:inputType="text"
                                     android:maxLines="1"
-                                    android:textSize="14sp"
-                                    android:gravity="center_vertical"
-                                    android:paddingTop="10dp"
-                                    android:paddingBottom="10dp" />
+                                    android:gravity="center_vertical" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -158,13 +155,10 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextMaker"
                                     android:layout_width="match_parent"
-                                    android:layout_height="48dp"
+                                    android:layout_height="wrap_content"
                                     android:inputType="text"
                                     android:maxLines="1"
-                                    android:textSize="14sp"
-                                    android:gravity="center_vertical"
-                                    android:paddingTop="10dp"
-                                    android:paddingBottom="10dp" />
+                                    android:gravity="center_vertical" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -241,13 +235,10 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextDevice"
                                     android:layout_width="match_parent"
-                                    android:layout_height="48dp"
+                                    android:layout_height="wrap_content"
                                     android:inputType="text"
                                     android:maxLines="1"
-                                    android:textSize="14sp"
-                                    android:gravity="center_vertical"
-                                    android:paddingTop="10dp"
-                                    android:paddingBottom="10dp" />
+                                    android:gravity="center_vertical" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -468,13 +459,10 @@
                             <com.google.android.material.textfield.TextInputEditText
                                 android:id="@+id/editTextCustomFilename"
                                 android:layout_width="match_parent"
-                                android:layout_height="48dp"
+                                android:layout_height="wrap_content"
                                 android:inputType="text"
                                 android:maxLines="1"
-                                android:textSize="14sp"
                                 android:gravity="center_vertical"
-                                android:paddingTop="10dp"
-                                android:paddingBottom="10dp"
                                 android:maxLength="128" />
 
                         </com.google.android.material.textfield.TextInputLayout>
@@ -532,17 +520,14 @@
                                 <com.google.android.material.textfield.TextInputEditText
                                     android:id="@+id/editTextOutput"
                                     android:layout_width="match_parent"
-                                    android:layout_height="48dp"
+                                    android:layout_height="wrap_content"
                                     android:hint="@string/hint_output_dir"
                                     android:inputType="none"
                                     android:focusable="false"
                                     android:clickable="false"
                                     android:maxLines="2"
                                     android:ellipsize="middle"
-                                    android:textSize="14sp"
-                                    android:gravity="center_vertical"
-                                    android:paddingTop="10dp"
-                                    android:paddingBottom="10dp" />
+                                    android:gravity="center_vertical" />
 
                             </com.google.android.material.textfield.TextInputLayout>
 
@@ -571,52 +556,11 @@
                             android:layout_marginTop="12dp"
                             android:layout_marginBottom="12dp" />
 
-                        <!-- ── 6. Dynamic Color (Material You) ──
-                             MD3-FIX IMPL-004: user-facing toggle for Material You
-                             dynamic color. Hidden entirely on API < 31 (set from
-                             MainActivity.setupDynamicColorToggle()) where Material
-                             You is unavailable — those devices always use the
-                             Suisei Blue brand palette as the default accent.
-                             OFF (or unsupported) = Suisei Blue; ON (API 31+) =
-                             system accent from wallpaper. -->
-                        <LinearLayout
-                            android:id="@+id/containerDynamicColor"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical">
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="@string/dynamic_color_label"
-                                style="@style/TextAppearance.OTAku.SectionTitle"
-                                android:layout_marginBottom="4dp" />
-
-                            <LinearLayout
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:orientation="horizontal"
-                                android:gravity="center_vertical">
-
-                                <TextView
-                                    android:layout_width="0dp"
-                                    android:layout_height="wrap_content"
-                                    android:layout_weight="1"
-                                    android:text="@string/dynamic_color_summary"
-                                    android:textSize="12sp"
-                                    android:textColor="?attr/colorOnSurfaceVariant"
-                                    android:layout_marginEnd="12dp" />
-
-                                <!-- M3 MaterialSwitch — self-themes via the
-                                     active Material3 theme's color tokens. -->
-                                <com.google.android.material.materialswitch.MaterialSwitch
-                                    android:id="@+id/switchDynamicColor"
-                                    android:layout_width="wrap_content"
-                                    android:layout_height="48dp" />
-
-                            </LinearLayout>
-
-                        </LinearLayout>
+                        <!-- Dynamic Color section REMOVED — color source is now
+                             pure auto-detect (AUDIT-DC): Material You dynamic color
+                             on API 31+ (applied by applyDynamicColorsOverlay() via
+                             SuiseiColors.isDynamicColorAvailable), Suisei Blue brand
+                             palette on API < 31. No user-facing toggle. -->
 
                     </LinearLayout>
 

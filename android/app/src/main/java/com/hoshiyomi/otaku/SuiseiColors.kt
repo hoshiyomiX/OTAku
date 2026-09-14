@@ -17,22 +17,23 @@ import androidx.core.content.ContextCompat
  * (#00B0F0).
  *
  * Two main entry points:
- *   - [getSystemAccentColor]    — returns the user's wallpaper-derived accent
- *   - [shouldUseDynamicTheme]   — true if API 31+ AND user hasn't disabled it
+ *   - [getSystemAccentColor]       — returns the user's wallpaper-derived accent
+ *   - [isDynamicColorAvailable]    — true on API 31+ (Material You capable)
  *
  * THEME-DEFAULT-FIX: MainActivity.onCreate() ALWAYS sets Theme.OTAku.Suisei
  * as the base theme (Suisei Blue #00B0F0 as the brand default) — after
  * super.onCreate() and applyTheme(), per the IMPL-007/IMPL-008 ordering —
  * then applyDynamicColorsOverlay() applies DynamicColors on top when
- * shouldUseDynamicTheme() is true. This means:
- *   - API 31+ with dynamic color enabled: Suisei Blue base + Material You overlay
+ * isDynamicColorAvailable is true. This means:
+ *   - API 31+: Suisei Blue base + Material You overlay
  *     (system accent, including cyan, is applied without restriction)
- *   - API 26-30 or dynamic color disabled: Suisei Blue palette only
+ *   - API 26-30: Suisei Blue palette only
  * The generic teal/cyan Theme.OTAku is NO LONGER used as the default.
  *
- * Dynamic color is user-controllable (Settings → "Dynamic color" switch,
- * pref_use_dynamic_color, default ON, shown only on API 31+): turning it
- * OFF forces the Suisei Blue brand palette even on Material You devices.
+ * AUDIT-DC: dynamic color is pure auto-detect — the user-facing toggle
+ * in Settings and its backing preference key were removed.
+ * Material You is applied automatically on every device that supports it
+ * (Android 12+); older devices always get the Suisei Blue brand palette.
  *
  * Why not just use DynamicColors.applyToActivityIfAvailable()?
  *   - That API only colors Material3 components that opt in via
@@ -82,26 +83,4 @@ object SuiseiColors {
         }
     }
 
-
-    /**
-     * Whether the app should apply the dynamic Material You theme.
-     *
-     * True when ALL of:
-     *   1. Device is API 31+ (Material You available)
-     *   2. User hasn't explicitly disabled dynamic color in app settings
-     *
-     * When false, MainActivity uses Theme.OTAku.Suisei (Suisei Blue palette)
-     * instead of Theme.OTAku (default teal, which DynamicColors would
-     * override on API 31+).
-     *
-     * @param prefs The app's SharedPreferences ("otaku" preferences)
-     */
-    fun shouldUseDynamicTheme(prefs: android.content.SharedPreferences): Boolean {
-        // Default: dynamic color ON if available. Users on older devices
-        // get Suisei Blue; users on API 31+ get Material You unless they
-        // explicitly opt out via Settings → "Dynamic color" (MD3-FIX
-        // IMPL-005 — the switch is hidden on API < 31).
-        val userEnabled = prefs.getBoolean("pref_use_dynamic_color", true)
-        return isDynamicColorAvailable && userEnabled
-    }
 }
