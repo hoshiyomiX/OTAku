@@ -51,10 +51,11 @@ data class ProgressUpdate(
  * Primary mode: DD-mode — generates otaku-format flashable ZIPs from partition
  * images (.img) for TWRP/OrangeFox recovery flashing.
  *
- * Prototype: payload.bin inspect + extract — reads an AOSP OTA payload.bin
- * (e.g. from a full OTA ZIP) and extracts partition images from it. Extraction
- * targets the images at the DD-mode input stage: extract → verify → (optionally)
- * re-pack into a flashable ZIP.
+ * Payload.bin toolchain (prototype): inspect → extract → verify → write —
+ * reads an AOSP OTA payload.bin (e.g. from a full OTA ZIP), extracts
+ * partition images from it (sidecar progress + WakeLock for long runs),
+ * self-verifies generated payloads, and can build a payload.bin from the
+ * loaded partition images.
  *
  * Supported compression: zstd, xz, bzip2, gzip, lz4  ("none" and "brotli" excluded from user-facing options)
  *
@@ -387,13 +388,21 @@ object OTABridge {
      * over partitions and aggregate results — this function handles
      * exactly one partition per call.
      *
-     * PROTOTYPE NOTE: unlike dd(), there is no .progress sidecar and no
-     * OTAService WakeLock yet — for large payloads keep the app in the
-     * foreground while extracting.
+     * Progress: Rust writes a `.progress` sidecar next to the output image
+     * (same convention as dd()); this function polls it every 500ms and
+     * emits ProgressUpdate with partitionPercent (Rust-authoritative) and
+     * the batch-aware overall percent — callers must pass `current`/`total`
+     * from their loop so the math matches the visible batch position:
+     *   overall = ((current - 1) * 100 + partitionPercent) / total.
+     * CPU/CPU-alive for long extractions is the CALLER's job (OTAService
+     * foreground + WakeLock — see MainActivity.extractAllPayloadPartitions).
      *
      * @param payloadPath Absolute path to the payload.bin file
      * @param partitionName Partition to extract (from inspectPayload)
      * @param outputPath Destination .img file path
+     * @param current 1-based position of this partition in the batch
+     * @param total Number of partitions in the batch
+     * @param onProgress Optional progress callback (sidecar-driven)
      * @param onOutputLine Optional log-line callback
      * @return PayloadExtractResult with size + duration, or error
      */
@@ -401,18 +410,175 @@ object OTABridge {
         payloadPath: String,
         partitionName: String,
         outputPath: String,
+        current: Int = 1,
+        total: Int = 1,
+        onProgress: ((ProgressUpdate) -> Unit)? = null,
         onOutputLine: ((String) -> Unit)? = null
     ): NativeBridge.PayloadExtractResult {
+        // Delete stale progress sidecar from a previous run of this output
+        val progressFile = java.io.File("${outputPath}.progress")
+        progressFile.delete()
+
+        // Sidecar poller — same pattern as dd() (AUDIT-F1: the try/finally
+        // lives OUTSIDE withContext so a caller cancellation before entry
+        // still cancels the polling scope and deletes the sidecar).
+        val progressScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val progressJob = progressScope.launch {
+            var lastPartitionPercent = -1
+            var lastOverallPercent = -1
+            while (isActive) {
+                delay(500)
+                if (!isActive) break
+                try {
+                    if (!progressFile.exists()) continue
+                    val content = progressFile.readText().trim()
+                    if (content.isEmpty()) continue
+                    try {
+                        val json = org.json.JSONObject(content)
+                        val name = json.optString("name", "")
+                        val bytesWritten = json.optLong("bytes_written", 0L)
+                        val totalEstimated = json.optLong("total_estimated", 0L)
+                        val partitionPercent = json.optInt("partition_percent", 0)
+
+                        // Batch-aware overall percent — current/total come
+                        // from the caller's loop; Rust only knows the
+                        // single-partition view (sidecar current/total = 1/1).
+                        val overallPercent =
+                            (((current - 1) * 100 + partitionPercent) / total.coerceAtLeast(1))
+                                .coerceIn(0, 100)
+
+                        // Emit only when something visibly changed (same
+                        // dedup discipline as dd()'s poller).
+                        if (partitionPercent != lastPartitionPercent ||
+                            overallPercent != lastOverallPercent
+                        ) {
+                            lastPartitionPercent = partitionPercent
+                            lastOverallPercent = overallPercent
+                            val message = when {
+                                // No estimate in the manifest → byte counter
+                                totalEstimated <= 0L && name.isNotEmpty() ->
+                                    "Extracting $name (${formatSize(bytesWritten)})"
+                                name.isNotEmpty() -> "Extracting $name"
+                                else -> "Extracting…"
+                            }
+                            onProgress?.invoke(ProgressUpdate(
+                                current = current,
+                                total = total,
+                                message = message,
+                                percent = overallPercent,
+                                partitionPercent = partitionPercent
+                            ))
+                        }
+                    } catch (_: Exception) {
+                        // JSON parse error — mid-write read; retry next poll
+                    }
+                } catch (_: Exception) {
+                    // Progress polling is non-critical — ignore all errors
+                }
+            }
+        }
+
+        try {
+            return withContext(Dispatchers.IO) {
+                onOutputLine?.invoke("[*] Extracting '$partitionName' …")
+                val result = NativeBridge.extractPartition(payloadPath, partitionName, outputPath)
+                if (result.success) {
+                    onOutputLine?.invoke(
+                        "[+] '$partitionName' → ${result.outputPath} " +
+                            "(${result.humanSize}, ${result.durationMs} ms)"
+                    )
+                } else {
+                    onOutputLine?.invoke("[!] Extract '$partitionName' failed: ${result.error}")
+                }
+                result
+            }
+        } finally {
+            // Every exit path: cancel the poller and remove the sidecar so
+            // stale data can't leak into the next extraction.
+            progressScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            progressJob.cancel()
+            progressFile.delete()
+        }
+    }
+
+    /**
+     * Self-verify a payload.bin by re-reading it (header + manifest only —
+     * fast even for multi-GB payloads).
+     *
+     * @param path Absolute path to the payload.bin file
+     * @param onOutputLine Optional log-line callback for the check log
+     * @return VerifyPayloadResult with the human-readable check log
+     */
+    suspend fun verifyPayload(
+        path: String,
+        onOutputLine: ((String) -> Unit)? = null
+    ): NativeBridge.VerifyPayloadResult {
+        if (!NativeBridge.isLoaded) {
+            val msg = "Native backend not loaded: ${NativeBridge.loadError}"
+            Log.e(TAG, msg)
+            onOutputLine?.invoke("[!] $msg")
+            return NativeBridge.VerifyPayloadResult.error(msg)
+        }
         return withContext(Dispatchers.IO) {
-            onOutputLine?.invoke("[*] Extracting '$partitionName' …")
-            val result = NativeBridge.extractPartition(payloadPath, partitionName, outputPath)
-            if (result.success) {
-                onOutputLine?.invoke(
-                    "[+] '$partitionName' → ${result.outputPath} " +
-                        "(${result.humanSize}, ${result.durationMs} ms)"
-                )
-            } else {
-                onOutputLine?.invoke("[!] Extract '$partitionName' failed: ${result.error}")
+            onOutputLine?.invoke("[*] Verifying payload: $path")
+            val result = NativeBridge.verifyPayload(path)
+            result.output.split("\n").forEach { line ->
+                if (line.isNotBlank()) onOutputLine?.invoke(line)
+            }
+            if (!result.success) {
+                onOutputLine?.invoke("[!] Verification failed: ${result.error}")
+            }
+            result
+        }
+    }
+
+    /**
+     * Build a payload.bin from partition images.
+     *
+     * Streams each partition's compressed data to a temp file in the output
+     * directory (~8 MB RAM per partition — same OOM discipline as dd()),
+     * then assembles header + manifest + data blobs. The per-partition log
+     * lines arrive when the call returns — no .progress sidecar yet
+     * (prototype parity with the pre-sidecar DD build).
+     *
+     * CPU-alive for long builds is the CALLER's job (OTAService foreground
+     * + WakeLock — see MainActivity.buildPayloadBin).
+     *
+     * @param images Map of partition name -> absolute path to .img file
+     * @param compression Algorithm shared by ALL partitions
+     * @param level Compression level (0 = algorithm default)
+     * @param outputPath Destination payload.bin path
+     * @param onOutputLine Optional log-line callback
+     * @return WritePayloadResult with per-partition summaries, or error
+     */
+    suspend fun writePayload(
+        images: Map<String, String>,
+        compression: String,
+        level: Int,
+        outputPath: String,
+        onOutputLine: ((String) -> Unit)? = null
+    ): NativeBridge.WritePayloadResult {
+        if (images.isEmpty()) {
+            return NativeBridge.WritePayloadResult.error("No images specified for payload.bin")
+        }
+        if (compression !in ALL_COMPRESSION) {
+            return NativeBridge.WritePayloadResult.error("Invalid compression: '$compression'")
+        }
+        if (!NativeBridge.isLoaded) {
+            val msg = "Native backend not loaded: ${NativeBridge.loadError}"
+            Log.e(TAG, msg)
+            onOutputLine?.invoke("[!] $msg")
+            return NativeBridge.WritePayloadResult.error(msg)
+        }
+        return withContext(Dispatchers.IO) {
+            val result = NativeBridge.writePayload(
+                images = images,
+                compression = compression,
+                level = level,
+                outputPath = outputPath
+            )
+            result.output.split("\n").forEach { line ->
+                if (line.isNotBlank()) onOutputLine?.invoke(line)
             }
             result
         }

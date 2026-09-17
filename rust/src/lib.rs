@@ -449,8 +449,10 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeScanDevicePar
 ///     exists before dd write)
 ///   - False positives just mean user CAN pick a file — flasher catches
 ///     non-existent partitions
-///   - False negatives (partition exists but not in list) would BLOCK
-///     user from picking valid files — that's unacceptable
+///   - False negatives (partition exists but not in the static known list,
+///     e.g. OEM-specific dynamic partitions) are demoted app-side to a
+///     WARNING, not a refusal — the file still loads and the flasher
+///     script remains the authoritative gate at recovery time.
 fn scan_device_partitions() -> String {
     let getprop = |prop: &str| -> String {
         std::process::Command::new("getprop")
@@ -650,20 +652,31 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
             }
         }
 
-        let mut output_file = match std::fs::File::create(&output_str) {
+        let output_file = match std::fs::File::create(&output_str) {
             Ok(f) => f,
             Err(e) => {
                 return make_error_json(&env, &format!("Cannot create output file: {}", e));
             }
         };
 
+        // Progress sidecar — same convention as the DD build: Rust writes
+        // <output>.progress, Kotlin polls every 500ms (locked design
+        // decision: sidecar file, NOT a JNI callback). The expected size
+        // from the manifest drives partition_percent; batch position is
+        // tracked Kotlin-side by the extract loop.
+        let total_estimated = payload::partition_expected_size(&info, &partition_str);
+        let mut progress_writer = payload::ProgressSidecarWriter::new(
+            output_file, &output_str, &partition_str, total_estimated,
+        );
+
         let decompressed_size = match payload::extract_and_decompress_partition_to_writer(
-            &info, &partition_str, &mut output_file,
+            &info, &partition_str, &mut progress_writer,
         ) {
             Ok(size) => size,
             Err(e) => {
                 // Clean up the partial output file — don't leave corrupt
                 // .img files that the user might later flash by mistake.
+                progress_writer.remove_sidecar();
                 let _ = std::fs::remove_file(&output_str);
                 return make_error_json(
                     &env,
@@ -671,6 +684,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
                 );
             }
         };
+        progress_writer.remove_sidecar();
 
         let elapsed = start.elapsed();
         let file_size = decompressed_size;
@@ -691,6 +705,155 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
     }));
     result.unwrap_or_else(|panic_info| {
         log_panic("nativeExtractPartition", &format!("{:?}", panic_info));
+        null_jstring()
+    })
+}
+
+// ---------------------------------------------------------------------------
+//  JNI: nativeWritePayload
+// ---------------------------------------------------------------------------
+
+/// Generate a payload.bin from partition images.
+///
+/// Kotlin: `external fun nativeWritePayload(
+///     imagesJson: String, compression: String, level: Int,
+///     outputPath: String, blockSize: Int, minorVersion: Int
+/// ): String`
+///
+/// imagesJson: {"partition_name": "/path/to/image.img", ...}
+/// All partitions share one compression algorithm + level (the UI exposes a
+/// single global choice; PartitionData still carries per-partition `compress`
+/// for future mixed-algorithm support).
+///
+/// Returns the serialized WritePayloadResult (success, output log lines,
+/// output_path, file_size, per-partition summaries, duration_ms, error).
+///
+/// PROTOTYPE NOTE: unlike nativeBuildDd there is no .progress sidecar yet —
+/// the output log lines arrive when the JNI call returns.
+#[no_mangle]
+pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
+    mut env: JNIEnv,
+    _class: JClass,
+    images_json: JString,
+    compression: JString,
+    level: jint,
+    output_path: JString,
+    block_size: jint,
+    minor_version: jint,
+) -> jstring {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let images_str: String = match env.get_string(&images_json) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid images JSON"),
+        };
+        let comp_str: String = match env.get_string(&compression) {
+            Ok(s) => s.into(),
+            Err(_) => "gzip".to_string(),
+        };
+        let output_str: String = match env.get_string(&output_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid output path"),
+        };
+
+        // Parse images JSON: {"partition_name": "path", ...}
+        let images_map: std::collections::HashMap<String, String> =
+            match serde_json::from_str(&images_str) {
+                Ok(m) => m,
+                Err(e) => {
+                    return make_error_json(&env, &format!("Invalid images JSON: {}", e));
+                }
+            };
+
+        // Sort alphabetically by partition name — same ordering discipline
+        // as nativeBuildDd so manifest partition order is deterministic and
+        // matches what the UI displayed when the user picked the files.
+        let mut partitions_data: Vec<payload::PartitionData> = images_map
+            .into_iter()
+            .map(|(name, path)| payload::PartitionData {
+                name,
+                image_path: path,
+                compress: comp_str.clone(),
+            })
+            .collect();
+        partitions_data.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Level 0 (and negatives) = algorithm default. The old
+        // jint_to_level_opt helper was removed with the orphan exports in
+        // the Task-10 ABI cleanup — the conversion is inlined here instead.
+        let level_opt = if level > 0 { Some(level) } else { None };
+
+        let result = payload::write_payload(
+            &output_str,
+            &partitions_data,
+            if block_size > 0 {
+                block_size as u32
+            } else {
+                payload::DEFAULT_BLOCK_SIZE
+            },
+            // Guard negative jint — (-1i32) as u32 produces 4294967295,
+            // which is not a valid AOSP payload minor version.
+            if minor_version < 0 { 0u32 } else { minor_version as u32 },
+            level_opt,
+        );
+
+        // Serialize result to JSON
+        let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(
+                "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
+                e
+            )
+        });
+
+        match env.new_string(json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeWritePayload", &format!("{:?}", panic_info));
+        null_jstring()
+    })
+}
+
+// ---------------------------------------------------------------------------
+//  JNI: nativeVerifyPayload
+// ---------------------------------------------------------------------------
+
+/// Verify a payload.bin by re-reading and checking its structure.
+///
+/// Kotlin: `external fun nativeVerifyPayload(path: String): String`
+///
+/// Checks the "CrAU" magic, header + manifest parseability, partition
+/// count, and echoes each partition's manifest hash. Header/manifest only —
+/// it does NOT re-hash the data blobs, so it is fast even for multi-GB
+/// payloads. Returns the serialized VerifyResult (success, output, error).
+#[no_mangle]
+pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeVerifyPayload(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: JString,
+) -> jstring {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let path_str: String = match env.get_string(&path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid path string"),
+        };
+
+        let result = payload::verify_payload(&path_str);
+        let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(
+                "{{\"success\":false,\"error\":\"Serialize error: {}\"}}",
+                e
+            )
+        });
+
+        match env.new_string(json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeVerifyPayload", &format!("{:?}", panic_info));
         null_jstring()
     })
 }

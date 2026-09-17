@@ -456,6 +456,166 @@ fn find_partition<'a>(
 }
 
 // ---------------------------------------------------------------------------
+//  Extraction progress sidecar (same convention as dd.rs build progress)
+// ---------------------------------------------------------------------------
+
+/// Chunk size used to slice large write_all calls so the sidecar file is
+/// updated at a smooth cadence — matches dd.rs's 4MB compression chunk
+/// granularity, which Kotlin's 500ms poller was tuned for.
+const PROGRESS_CHUNK: usize = 4 * 1024 * 1024;
+
+/// Write the extraction progress sidecar JSON atomically (tmp + rename),
+/// mirroring dd.rs `write_progress_with_percent`.
+///
+/// Field semantics match the DD build sidecar so the Kotlin polling code
+/// follows the same shape. `current`/`total` are 1/1: the JNI bridge is
+/// called once per partition, so the BATCH position (partition 3 of 7) is
+/// tracked Kotlin-side by the extract loop — only `partition_percent` is
+/// authoritative here. `overall_percent` mirrors `partition_percent` and
+/// is recomputed by Kotlin when a batch is in flight.
+fn write_extract_progress(sidecar_path: &str, name: &str, bytes_written: u64, total_estimated: u64) {
+    // total_estimated = 0 (unknowable manifest) → percent stays 0; Kotlin
+    // renders the byte counter instead of a percentage in that case.
+    let partition_percent: i32 = if total_estimated > 0 {
+        // Clamp bytes at total so a corrupt payload (decompressed output
+        // larger than the manifest estimate) can't push percent past 100.
+        ((bytes_written.min(total_estimated) * 100) / total_estimated).min(100) as i32
+    } else {
+        0
+    };
+    let content = serde_json::json!({
+        "current": 1,
+        "total": 1,
+        "name": name,
+        "phase": "extracting",
+        "bytes_written": bytes_written,
+        "tmp_path": "",
+        "total_estimated": total_estimated,
+        "partition_percent": partition_percent,
+        "overall_percent": partition_percent,
+    });
+    // Atomic write: tmp file + rename (same-filesystem rename is atomic on
+    // Linux/ext4) — prevents Kotlin's poller from reading truncated JSON.
+    let _ = (|| {
+        let tmp_progress_path = format!("{}.tmp", sidecar_path);
+        std::fs::write(&tmp_progress_path, content.to_string()).ok()?;
+        std::fs::rename(&tmp_progress_path, sidecar_path).ok()
+    })();
+}
+
+/// Delete the extraction progress sidecar file (completion or error path).
+fn delete_extract_progress(sidecar_path: &str) {
+    let _ = std::fs::remove_file(sidecar_path);
+}
+
+/// Writer wrapper that reports extraction progress through a `.progress`
+/// sidecar file next to the output image.
+///
+/// Locked design decision (same as the DD build): progress is reported via
+/// a sidecar file that Kotlin polls — NOT via a JNI callback (callbacks
+/// failed in v3.4/v3.5 with JNIEnv re-entrancy and local-ref overflow).
+///
+/// Every `write_all` is sliced into ≤4MB chunks; after each chunk the
+/// sidecar JSON is rewritten atomically. A multi-GB system.img therefore
+/// produces ~1250 tiny sidecar writes over the whole extraction — the same
+/// I/O overhead class the DD build has always paid.
+pub struct ProgressSidecarWriter<W: std::io::Write> {
+    inner: W,
+    sidecar_path: String,
+    name: String,
+    total_estimated: u64,
+    bytes_written: u64,
+}
+
+impl<W: std::io::Write> ProgressSidecarWriter<W> {
+    /// Wrap `inner` (the output .img file) with progress reporting.
+    ///
+    /// `output_path` is the image path — the sidecar lands at
+    /// `<output_path>.progress`, exactly like the DD build's ZIP sidecar.
+    /// `total_estimated` comes from [`partition_expected_size`].
+    pub fn new(inner: W, output_path: &str, name: &str, total_estimated: u64) -> Self {
+        Self {
+            inner,
+            sidecar_path: format!("{}.progress", output_path),
+            name: name.to_string(),
+            total_estimated,
+            bytes_written: 0,
+        }
+    }
+
+    /// Remove the progress sidecar file. Call on BOTH the success and the
+    /// error path — Kotlin's finally-block also deletes it (belt and
+    /// suspenders, same as the DD build).
+    pub fn remove_sidecar(&self) {
+        delete_extract_progress(&self.sidecar_path);
+    }
+
+    fn note_progress(&self) {
+        write_extract_progress(&self.sidecar_path, &self.name, self.bytes_written, self.total_estimated);
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for ProgressSidecarWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bytes_written += n as u64;
+        self.note_progress();
+        Ok(n)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        // Slice into ≤4MB chunks so the sidecar cadence matches dd.rs.
+        // extract_and_decompress_partition_to_writer issues one large
+        // write_all per operation (up to hundreds of MB) — without slicing,
+        // the poller would see 0% → 100% jumps per operation.
+        let mut off = 0;
+        while off < buf.len() {
+            let end = (off + PROGRESS_CHUNK).min(buf.len());
+            self.inner.write_all(&buf[off..end])?;
+            self.bytes_written += (end - off) as u64;
+            self.note_progress();
+            off = end;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Expected decompressed size of a partition (progress denominator).
+///
+/// Sums `dst_extents.num_blocks × block_size` over ALL install operations
+/// — each op pads its output up to its own extent size, so the sum is
+/// exactly the expected total output. Falls back to
+/// `new_partition_info.partition_size` when the manifest carries no
+/// extents. Returns 0 when the partition is unknown or has no size info
+/// (Kotlin then shows a byte counter instead of a percentage).
+pub fn partition_expected_size(info: &PayloadInfo, partition_name: &str) -> u64 {
+    let partition = match find_partition(&info.manifest, partition_name) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let block_size = info.manifest.block_size;
+    let from_extents: u64 = partition
+        .install_operations
+        .iter()
+        .flat_map(|op| op.dst_extents.iter())
+        .map(|e| e.num_blocks.saturating_mul(block_size))
+        .sum();
+    if from_extents > 0 {
+        from_extents
+    } else {
+        partition
+            .new_partition_info
+            .as_ref()
+            .map(|i| i.partition_size)
+            .unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  WRITE — generate a payload.bin from partition images
 // ---------------------------------------------------------------------------
 

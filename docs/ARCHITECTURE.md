@@ -43,7 +43,9 @@
 │  │  ├── detectDeviceCodename() → DeviceCodenameResult             │  │
 │  │  ├── scanDevicePartitions() → DevicePartitionsResult           │  │
 │  │  ├── readPayload(path) → PayloadInspectResult [prototype]      │  │
-│  │  └── extractPartition(payload, name, out) → PayloadExtractResult │  │
+│  │  ├── extractPartition(payload, name, out) → PayloadExtractResult │  │
+│  │  ├── writePayload(images, comp, level, out) → WritePayloadResult │ │
+│  │  └── verifyPayload(path) → VerifyPayloadResult [prototype]     │  │
 │  └────────────────────────┬───────────────────────────────────────┘  │
 │                           │ JNI (System.loadLibrary("otaku_native")) │
 │  ┌────────────────────────▼───────────────────────────────────────┐  │
@@ -54,7 +56,7 @@
 │  │  Statically links: flate2, bzip2, xz2, zstd, lz4, sha2, prost, │  │
 │  │                    serde, serde_json, zip, chrono, log          │  │
 │  │                                                                │  │
-│  │  src/lib.rs        — 7 JNI entry points (JSON in/out)          │  │
+│  │  src/lib.rs        — 9 JNI entry points (JSON in/out)          │  │
 │  │  src/dd.rs         — DD-mode flashable ZIP generator           │  │
 │  │  src/payload.rs    — AOSP payload.bin read/write               │  │
 │  │  src/proto.rs      — Hand-written prost structs                │  │
@@ -140,6 +142,22 @@ OTABridge: emit Rust output lines to log, cancel progress polling,
 UI: Per-partition progress bars + log output + notification
 ```
 
+## Payload.bin Toolchain Flow (prototype)
+
+```
+Inspect:  menu "Inspect payload.bin…" → SAF picker → readPayload →
+          partition table in the log card → extract-all dialog
+Extract:  extractAllPayloadPartitions → OTAService("Extracting payload…")
+          + companion WakeLock → per partition:
+          extractPartition → <output>.img.progress sidecar → 500ms poller
+          → split bars + notification "Extracting system (2/7) — 43%"
+Write:    menu "Build payload.bin…" → compression dialog → writePayload
+          (images, compression, level) → OTAService("Building payload…")
+          + WakeLock → per-partition summaries in the log
+Verify:   verifyPayload(output) — CrAU magic + header + manifest re-read
+          (fast: no data-blob re-hash) → check log in the UI
+```
+
 ## Kotlin → JNI → Rust Call Chain
 
 ```kotlin
@@ -221,11 +239,11 @@ The progress sidecar file is the **only** mechanism for Rust → Kotlin progress
 
 ### File location
 
-`<output_path>.progress` — same directory + filename as the output ZIP, with `.progress` suffix appended.
+`<output_path>.progress` — same directory + filename as the output ZIP, with `.progress` suffix appended. Payload extraction uses the same convention: the sidecar sits next to the extracted `.img` (`<output>.img.progress`), written by `payload::ProgressSidecarWriter` (4 MB chunk cadence, `partition_percent` from the manifest's expected size; batch position is tracked Kotlin-side by the extract loop).
 
 ### Write side (Rust)
 
-`write_progress_with_percent()` in `dd.rs` writes the JSON after every 4 MB chunk during compression. The write is best-effort — failures are silently ignored (`let _ = std::fs::write(...)`).
+`write_progress_with_percent()` in `dd.rs` writes the JSON after every 4 MB chunk during compression. For payload extraction, `ProgressSidecarWriter` in `payload.rs` slices every `write_all` into ≤4 MB chunks and rewrites the sidecar atomically (tmp + rename) after each. The write is best-effort — failures are silently ignored (`let _ = std::fs::write(...)`).
 
 ### Read side (Kotlin)
 
@@ -316,7 +334,9 @@ Main Thread (UI)
 
 buildScope (Application-scoped CoroutineScope)
 ├── OTABridge.dd() → withContext(Dispatchers.IO) → NativeBridge.buildDd()
-├── WakeLock held during build operation (via OTAService foreground service)
+├── extractPayloadPartition() per partition (sidecar poller per call)
+├── writePayload() / verifyPayload() → NativeBridge (single JNI call each)
+├── WakeLock held during build / extract / payload-write operations (via OTAService foreground service)
 ├── Process.setThreadPriority(-10) for the build thread
 └── Progress polling coroutine (Dispatchers.IO, 500ms interval)
 

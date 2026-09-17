@@ -89,4 +89,7 @@
     <string name="payload_extract_title">Extract partitions</string>
     <string name="payload_extract_message">payload.bin contains %1$d partitions (%2$s image data).\n\nExtract all to:\n%3$s</string>
     <string name="payload_extract_all">Extract all</string>
+    <string name="menu_build_payload">Build payload.bin…</string>
+    <string name="payload_no_images">Load at least one partition image first</string>
+    <string name="payload_compress_title">payload.bin compression</string>
 </resources>

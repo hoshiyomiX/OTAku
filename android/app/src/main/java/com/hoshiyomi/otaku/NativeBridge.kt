@@ -191,11 +191,14 @@ object NativeBridge {
      * getprop queries (ro.boot.dynamic_partitions, ro.boot.slot_suffix,
      * ro.build.version.release). No root required.
      *
-     * The app uses this list to validate user-picked .img files: if the
-     * filename (minus .img) does not match any partition in this list, the
-     * app refuses to load it and prints a warning. This prevents the user
-     * from accidentally renaming system.img to vendor.img (which would brick
-     * the device when flashed to the wrong partition).
+     * The app uses this list to WARN about user-picked .img files whose
+     * name (minus .img) is not in the list: the file still loads, but the
+     * log tells the user to double-check the target partition name. A hard
+     * refusal was demoted to a warning because the scan list is a static
+     * known-list filtered by getprop — OEM-specific partitions absent from
+     * the list are false negatives that must not block valid files. The
+     * flasher script's recovery-time validation (resolve_target /
+     * validate_target) remains the authoritative gate.
      *
      * @return DevicePartitionsResult with list of supported partitions
      */
@@ -283,6 +286,69 @@ object NativeBridge {
         }
     }
 
+    /**
+     * Generate a payload.bin from partition images.
+     *
+     * Streams each partition's compressed data to a temp file in the
+     * output directory (~8 MB RAM per partition — never holds the full
+     * compressed output in memory), then assembles header + manifest +
+     * data blobs into the output payload.bin.
+     *
+     * No .progress sidecar yet (prototype): the per-partition log lines
+     * arrive when the call returns.
+     *
+     * @param images Map of partition name -> absolute path to .img file
+     * @param compression Algorithm shared by ALL partitions
+     * @param level Compression level (0 = algorithm default)
+     * @param outputPath Destination payload.bin path
+     * @param blockSize Manifest block size (<= 0 = 4096 default)
+     * @param minorVersion Payload minor version (< 0 = 0)
+     * @return WritePayloadResult with per-partition summaries, or error
+     */
+    fun writePayload(
+        images: Map<String, String>,
+        compression: String,
+        level: Int,
+        outputPath: String,
+        blockSize: Int = 0,
+        minorVersion: Int = 0
+    ): WritePayloadResult {
+        if (!isLoaded) {
+            return WritePayloadResult.error("Native library not loaded: $loadError")
+        }
+        return try {
+            val imagesJson = JSONObject(images).toString()
+            parseWritePayloadResult(
+                nativeWritePayload(imagesJson, compression, level, outputPath, blockSize, minorVersion)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "writePayload failed: ${e.message}")
+            WritePayloadResult.error("Native write failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Self-verify a payload.bin by re-reading it.
+     *
+     * Checks the CrAU magic, header + manifest parseability, partition
+     * count, and echoes each partition's manifest hash. Header/manifest
+     * only — fast even for multi-GB payloads.
+     *
+     * @param path Absolute path to the payload.bin file
+     * @return VerifyPayloadResult with a human-readable check log
+     */
+    fun verifyPayload(path: String): VerifyPayloadResult {
+        if (!isLoaded) {
+            return VerifyPayloadResult.error("Native library not loaded: $loadError")
+        }
+        return try {
+            parseVerifyPayloadResult(nativeVerifyPayload(path))
+        } catch (e: Exception) {
+            Log.e(TAG, "verifyPayload failed: ${e.message}")
+            VerifyPayloadResult.error("Native verify failed: ${e.message}")
+        }
+    }
+
     /** One partition entry from a payload.bin manifest. */
     data class PayloadPartitionInfo(
         val name: String,
@@ -325,6 +391,43 @@ object NativeBridge {
     ) {
         companion object {
             fun error(msg: String) = PayloadExtractResult(success = false, error = msg)
+        }
+    }
+
+    /** Per-partition summary from a payload.bin build (writePayload). */
+    data class PayloadPartitionSummary(
+        val name: String,
+        val originalSize: Long,
+        val compressedSize: Long,
+        /** compressed / original (0.0-1.0+; >1 means incompressible data grew). */
+        val ratio: Double,
+        val algorithm: String,
+        val sha256: String
+    )
+
+    /** Result of building a payload.bin (writePayload). */
+    data class WritePayloadResult(
+        val success: Boolean,
+        val output: String = "",
+        val outputPath: String? = null,
+        val fileSize: Long = 0L,
+        val partitions: List<PayloadPartitionSummary> = emptyList(),
+        val durationMs: Long = 0L,
+        val error: String? = null
+    ) {
+        companion object {
+            fun error(msg: String) = WritePayloadResult(success = false, error = msg)
+        }
+    }
+
+    /** Result of self-verifying a payload.bin (verifyPayload). */
+    data class VerifyPayloadResult(
+        val success: Boolean,
+        val output: String = "",
+        val error: String? = null
+    ) {
+        companion object {
+            fun error(msg: String) = VerifyPayloadResult(success = false, error = msg)
         }
     }
 
@@ -520,6 +623,68 @@ object NativeBridge {
         }
     }
 
+    private fun parseWritePayloadResult(jsonStr: String): WritePayloadResult {
+        val json = JSONObject(jsonStr)
+        val partitions = mutableListOf<PayloadPartitionSummary>()
+        json.optJSONArray("partitions")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val p = arr.optJSONObject(i) ?: continue
+                partitions.add(
+                    PayloadPartitionSummary(
+                        name = p.optString("name", ""),
+                        originalSize = p.optLong("original_size", 0L),
+                        compressedSize = p.optLong("compressed_size", 0L),
+                        ratio = p.optDouble("ratio", 1.0),
+                        algorithm = p.optString("algorithm", ""),
+                        sha256 = p.optString("sha256", "")
+                    )
+                )
+            }
+        }
+        // AUDIT-F7 pattern: isNull() guards so JSON null stays null instead
+        // of leaking the literal string "null" into file operations.
+        return if (json.optBoolean("success", false)) {
+            WritePayloadResult(
+                success = true,
+                output = json.optString("output", ""),
+                outputPath = if (json.has("output_path") && !json.isNull("output_path")) {
+                    json.optString("output_path")
+                } else null,
+                fileSize = json.optLong("file_size", 0L),
+                partitions = partitions,
+                durationMs = json.optLong("duration_ms", 0L)
+            )
+        } else {
+            WritePayloadResult(
+                success = false,
+                output = json.optString("output", ""),
+                partitions = partitions,
+                durationMs = json.optLong("duration_ms", 0L),
+                error = if (json.has("error") && !json.isNull("error")) {
+                    json.optString("error")
+                } else "Unknown error"
+            )
+        }
+    }
+
+    private fun parseVerifyPayloadResult(jsonStr: String): VerifyPayloadResult {
+        val json = JSONObject(jsonStr)
+        return if (json.optBoolean("success", false)) {
+            VerifyPayloadResult(
+                success = true,
+                output = json.optString("output", "")
+            )
+        } else {
+            VerifyPayloadResult(
+                success = false,
+                output = json.optString("output", ""),
+                error = if (json.has("error") && !json.isNull("error")) {
+                    json.optString("error")
+                } else "Unknown error"
+            )
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  JNI external declarations
     // ═══════════════════════════════════════════════════════════════
@@ -562,4 +727,21 @@ object NativeBridge {
         partitionName: String,
         outputPath: String
     ): String
+
+    // Payload.bin build (prototype)
+    // Rust signature: nativeWritePayload(images_json, compression, level,
+    //                                    output_path, block_size,
+    //                                    minor_version) -> jstring (JSON)
+    private external fun nativeWritePayload(
+        imagesJson: String,
+        compression: String,
+        level: Int,
+        outputPath: String,
+        blockSize: Int,
+        minorVersion: Int
+    ): String
+
+    // Payload.bin self-verification (prototype)
+    // Rust signature: nativeVerifyPayload(path) -> jstring (JSON)
+    private external fun nativeVerifyPayload(path: String): String
 }

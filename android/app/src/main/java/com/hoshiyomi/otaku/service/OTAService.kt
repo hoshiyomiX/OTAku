@@ -14,25 +14,29 @@ import androidx.core.app.NotificationCompat
 import com.hoshiyomi.otaku.OTAkuApp
 
 /**
- * OTAService — Foreground service that keeps the build process alive during Doze.
+ * OTAService — Foreground service that keeps long native operations alive during Doze.
  *
  * Android can kill background coroutines under Doze/App Standby, even when
  * the app holds a WakeLock and is whitelisted for battery optimization.
  * A foreground service gives the process "foreground priority" which prevents
- * the OS from killing it during long compression operations.
+ * the OS from killing it during long compression/extraction operations.
  *
  * Architecture:
  *   - This service is a lightweight "lifecycle protector" — it does NOT run
- *     the build itself. The build coroutine continues in MainActivity.buildScope.
+ *     the work itself. The coroutine continues in MainActivity.buildScope
+ *     (DD ZIP build, payload.bin extraction, payload.bin write — the label
+ *     passed to start() only customizes the notification text).
  *   - onStartCommand() calls startForeground() to elevate process priority.
- *   - The service holds a PARTIAL_WAKE_LOCK (3 hours) to prevent CPU sleep.
+ *   - The service holds a PARTIAL_WAKE_LOCK (3 hours) to prevent CPU sleep —
+ *     this is the WakeLock that covers long payload extractions (multi-GB
+ *     system.img decompression) as well as builds.
  *   - MainActivity updates the foreground notification directly via NotificationManager
  *     (same NOTIFICATION_ID = 1001), which updates the service's foreground notification.
- *   - The service stops itself when told to via ACTION_STOP_BUILD or when the build
- *     completes (called by MainActivity).
+ *   - The service stops itself when told to via ACTION_STOP_BUILD or when the
+ *     operation completes (called by MainActivity).
  *
- * Why not run the build IN the service?
- *   - The build uses a companion-object coroutine scope (buildScope) that survives
+ * Why not run the work IN the service?
+ *   - The work uses a companion-object coroutine scope (buildScope) that survives
  *     Activity recreation. Moving it here would require major refactoring of progress
  *     tracking, split progress bars, log text, etc.
  *   - The service's only job is to keep the process alive — separating concerns.
@@ -43,14 +47,21 @@ class OTAService : Service() {
         private const val TAG = "OTAService"
         const val NOTIFICATION_ID = 1001
 
-        // Intent actions
+        // Intent actions. Kept the START_BUILD name for the generic "protect
+        // a long native operation" action (build, extract, payload write) —
+        // renaming would churn every call site for zero behavior change.
         const val ACTION_START_BUILD = "com.hoshiyomi.otaku.ACTION_START_BUILD"
         const val ACTION_STOP_BUILD = "com.hoshiyomi.otaku.ACTION_STOP_BUILD"
 
-        /** Start the foreground service for build protection. */
-        fun start(context: Context) {
+        // Notification text override ("Preparing build…" / "Extracting payload…" /
+        // "Building payload…"). Read in onStartCommand.
+        const val EXTRA_LABEL = "com.hoshiyomi.otaku.EXTRA_LABEL"
+
+        /** Start the foreground service for long-operation protection. */
+        fun start(context: Context, label: String = "Preparing build…") {
             val intent = Intent(context, OTAService::class.java).apply {
                 action = ACTION_START_BUILD
+                putExtra(EXTRA_LABEL, label)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -59,7 +70,7 @@ class OTAService : Service() {
             }
         }
 
-        /** Stop the foreground service after build completes. */
+        /** Stop the foreground service after the operation completes. */
         fun stop(context: Context) {
             val intent = Intent(context, OTAService::class.java).apply {
                 action = ACTION_STOP_BUILD
@@ -79,6 +90,10 @@ class OTAService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Label from the launching call site — "Preparing build…" default
+        // keeps the original build behavior; extraction/payload-write call
+        // sites pass their own label so the user can tell operations apart.
+        val label = intent?.getStringExtra(EXTRA_LABEL) ?: "Preparing build…"
         when (intent?.action) {
             ACTION_STOP_BUILD -> {
                 stopBuild()
@@ -86,13 +101,13 @@ class OTAService : Service() {
             }
             ACTION_START_BUILD -> {
                 // Start foreground immediately — this is what prevents Doze from killing us
-                startForegroundNotification("Preparing build…")
+                startForegroundNotification(label)
                 acquireWakeLock()
                 return START_NOT_STICKY
             }
             else -> {
-                // No action specified — default: start foreground
-                startForegroundNotification("Preparing build…")
+                // No action specified (e.g. service restart) — default label
+                startForegroundNotification(label)
                 acquireWakeLock()
                 return START_NOT_STICKY
             }

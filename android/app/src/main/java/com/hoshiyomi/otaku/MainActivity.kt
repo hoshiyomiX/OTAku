@@ -181,9 +181,11 @@ class MainActivity : AppCompatActivity() {
         }
         @Volatile private var partitionNames: List<String> = emptyList()
         // Device-supported partition names (from nativeScanDevicePartitions).
-        // Populated once on app start, used to validate user-picked .img files.
+        // Populated once on app start, used to check user-picked .img files.
         // If a filename (minus .img) does not match any name in this list,
-        // the app refuses to load it and prints a warning.
+        // the app logs a WARNING but still loads the file (hard refusal was
+        // demoted in Task 12 — the scan list is a static known-list whose
+        // false negatives must not block valid OEM-specific partitions).
         @Volatile private var deviceSupportedPartitions: List<String> = emptyList()
 
         // Notification management (survives Activity recreation)
@@ -975,6 +977,10 @@ class MainActivity : AppCompatActivity() {
             }
             R.id.action_inspect_payload -> {
                 launchPayloadPicker()
+                true
+            }
+            R.id.action_build_payload -> {
+                onBuildPayloadClicked()
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -1994,28 +2000,27 @@ class MainActivity : AppCompatActivity() {
                 val partitionName = fileName.removeSuffix(".img")
                     .removeSuffix(".IMG")
 
-                // ── Validate partition name against device's supported list ──
+                // ── Whitelist check on input partitions (DEMOTED to warning) ──
                 // If deviceSupportedPartitions is populated (scan succeeded) and
-                // the partition name is NOT in the list, refuse to load the file
-                // and print a warning. This prevents the user from accidentally
-                // renaming system.img to vendor.img (which would brick the device
-                // when flashed to the wrong partition).
+                // the partition name is NOT in the list, WARN but still load the
+                // file. This was a hard refusal until Task 12 — demoted because
+                // the scan list is a static known-list filtered by getprop:
+                // OEM-specific partitions (e.g. some dynamic my_*/odm variants)
+                // are false negatives that must not block valid files from
+                // loading. Safety is preserved by two later gates:
+                //   1. The flasher script validates targets at recovery time
+                //      (resolve_target + validate_target on /dev/block/by-name).
+                //   2. The user sees the warning in the log before flashing.
                 //
                 // If deviceSupportedPartitions is empty (scan failed or not yet
-                // completed), skip validation (permissive mode) — better to allow
-                // the file than to block the user from working.
+                // completed), skip the check entirely (permissive mode).
                 if (deviceSupportedPartitions.isNotEmpty() &&
                     partitionName !in deviceSupportedPartitions) {
-                    showLog("! Refused: '$fileName' → partition '$partitionName' is not " +
-                            "supported by this device.", LogLevel.ERROR)
-                    showLog("  Supported partitions: " + deviceSupportedPartitions.joinToString(", "),
+                    showLog("[!] '$partitionName' is not in this device's scanned partition list — " +
+                            "double-check the target partition name before flashing.", LogLevel.WARN)
+                    showLog("  Scanned partitions: " + deviceSupportedPartitions.joinToString(", "),
                             LogLevel.WARN)
-                    showLog("  Rename the file to match a supported partition name, or " +
-                            "disable validation by clearing device codename field.", LogLevel.WARN)
-                    // Remove placeholder if it was added during the earlier batch loop
-                    imageFiles.removeAll { it.first == partitionName && it.second.startsWith("loading:") }
-                    runOnUiThread { updateImageListUI() }
-                    continue
+                    // Fall through — the file loads normally (warn, don't refuse).
                 }
 
                 // Skip if already added (real file, not placeholder).
@@ -2293,53 +2298,321 @@ class MainActivity : AppCompatActivity() {
      * from the manifest are sanitized before being used as filenames —
      * a malicious payload must not be able to write outside the extract
      * directory via crafted partition_name values (path traversal).
+     *
+     * Long-run protection (Task 12): multi-GB system.img decompression can
+     * take minutes — the OTAService foreground notification (with its
+     * PARTIAL_WAKE_LOCK) plus a belt-and-suspenders companion WakeLock keep
+     * the CPU alive under Doze, exactly like the DD build path. Progress is
+     * reported through the per-partition `.progress` sidecar (Rust writes,
+     * OTABridge polls) and surfaces in the split progress bars, the log,
+     * and the foreground notification.
      */
     private fun extractAllPayloadPartitions(
         payloadPath: String,
         result: NativeBridge.PayloadInspectResult
     ) {
         setUIExecuting(true)
+        isExecuting = true
+        appContext = applicationContext
+        val names = result.partitions.map { it.name }
+        partitionNames = names
+        lastProgressMessage = ""
+        lastNotifPercent = -1
+        showProgressNotification("Extracting payload…", 0)
+
+        // Foreground service — process priority + service-side WakeLock.
+        OTAService.start(applicationContext, "Extracting payload…")
+
         buildScope.launch {
-            val dir = File(payloadExtractDir())
-            dir.mkdirs()
-            val startMs = System.currentTimeMillis()
-            var ok = 0
-            var failed = 0
-            var totalExtracted = 0L
-
-            result.partitions.forEach { p ->
-                // Sanitize: manifest-controlled name → safe filename component
-                val safeName = p.name.replace(Regex("[^a-zA-Z0-9_.\\-]"), "_")
-                if (safeName != p.name) {
-                    showLog("[!] Partition name '${p.name}' sanitized → '$safeName'", LogLevel.WARN)
+            try {
+                // Belt-and-suspenders WakeLock (same pattern as startBuild):
+                // the service holds one, this one survives even if the
+                // service is killed and restarted by the OS.
+                val act = activityRef?.get()
+                if (act != null) {
+                    val pm = act.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    wakeLock = pm.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "OTAku::ExtractWakeLock"
+                    ).apply {
+                        setReferenceCounted(false)
+                        acquire(3 * 60 * 60 * 1000L) // 3 hours — enough for any extraction batch
+                    }
                 }
-                val outFile = File(dir, "$safeName.img")
-                val r = OTABridge.extractPayloadPartition(
-                    payloadPath, safeName, outFile.absolutePath
-                ) { line -> showLog(line, LogLevel.PLAIN) }
-                if (r.success) {
-                    ok++
-                    totalExtracted += r.fileSize
+
+                // Split progress bars — one bar per manifest partition.
+                runOnUiThread { setupSplitProgressBar(names) }
+
+                val dir = File(payloadExtractDir())
+                dir.mkdirs()
+                val startMs = System.currentTimeMillis()
+                var ok = 0
+                var failed = 0
+                var totalExtracted = 0L
+                val total = result.partitions.size
+
+                result.partitions.forEachIndexed { idx, p ->
+                    // Sanitize: manifest-controlled name → safe filename component
+                    val safeName = p.name.replace(Regex("[^a-zA-Z0-9_.\\-]"), "_")
+                    if (safeName != p.name) {
+                        showLog("[!] Partition name '${p.name}' sanitized → '$safeName'", LogLevel.WARN)
+                    }
+                    val outFile = File(dir, "$safeName.img")
+                    val r = OTABridge.extractPayloadPartition(
+                        payloadPath, safeName, outFile.absolutePath,
+                        current = idx + 1,
+                        total = total,
+                        onProgress = { progress ->
+                            // Per-partition bar + mark previous bars complete
+                            if (partitionCount > 0) {
+                                val pIdx = progress.current - 1
+                                if (pIdx in 0 until partitionCount) {
+                                    updatePartitionProgress(pIdx, progress.partitionPercent)
+                                    synchronized(progressLock) {
+                                        for (j in 0 until pIdx) {
+                                            if (partitionProgress[j] < 100) partitionProgress[j] = 100
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Foreground notification — "Extracting system (2/7) — 43%"
+                            val notifMsg = if (progress.partitionPercent in 1..99) {
+                                "${progress.message} (${progress.current}/${progress.total}) — ${progress.partitionPercent}%"
+                            } else {
+                                "${progress.message} (${progress.current}/${progress.total})"
+                            }
+                            if (notifMsg != lastProgressMessage || progress.percent != lastNotifPercent) {
+                                lastProgressMessage = notifMsg
+                                lastNotifPercent = progress.percent
+                                showProgressNotification(notifMsg, progress.percent)
+                            }
+
+                            // Log line on percent change (persist always — K3 pattern)
+                            if (progress.partitionPercent != lastProgressPercent) {
+                                lastProgressPercent = progress.partitionPercent
+                                val logMsg = if (progress.partitionPercent in 1..99) {
+                                    "${progress.message} ${progress.partitionPercent}%"
+                                } else {
+                                    progress.message
+                                }
+                                val line = if (logMsg.endsWith("\n")) logMsg else "$logMsg\n"
+                                appendToSavedLog(line)
+                                val current = activityRef?.get()
+                                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                                    current.runOnUiThread { current.appendLogLineUI(line, LogLevel.PLAIN) }
+                                }
+                            }
+
+                            // Live bar re-render
+                            val current = activityRef?.get()
+                            if (current != null && !current.isFinishing && !current.isDestroyed) {
+                                current.runOnUiThread {
+                                    val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                                    val barRow = container?.findViewWithTag("bar_row") as? android.widget.LinearLayout
+                                    if (barRow != null && barRow.childCount == partitionCount) {
+                                        val snapshot = snapshotPartitionProgress()
+                                        for (i in 0 until partitionCount) {
+                                            val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                                            bar?.let {
+                                                it.isIndeterminate = false
+                                                it.progress = snapshot[i]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ) { line -> showLog(line, LogLevel.PLAIN) }
+                    if (r.success) {
+                        ok++
+                        totalExtracted += r.fileSize
+                        if (partitionCount > 0 && idx in 0 until partitionCount) {
+                            updatePartitionProgress(idx, 100)
+                        }
+                    } else {
+                        failed++
+                    }
+                }
+
+                val durMs = System.currentTimeMillis() - startMs
+                markAllProgressComplete()
+                if (failed == 0) {
+                    showLog(
+                        "═══ Payload extraction done — $ok partitions, " +
+                            "${formatFileSize(totalExtracted)}, ${durMs} ms ═══",
+                        LogLevel.SUCCESS
+                    )
                 } else {
-                    failed++
+                    showLog(
+                        "═══ Payload extraction finished with errors — $ok ok / $failed failed " +
+                            "(${formatFileSize(totalExtracted)}, ${durMs} ms) ═══",
+                        LogLevel.WARN
+                    )
+                }
+            } finally {
+                // Release WakeLock + stop the foreground service on every exit
+                // path (mirrors the DD build's finally discipline).
+                try { wakeLock?.release() } catch (_: Exception) {}
+                wakeLock = null
+                try { OTAService.stop(appContext ?: applicationContext) } catch (_: Exception) {}
+                isExecuting = false
+                lastProgressMessage = ""
+                lastNotifPercent = -1
+                lastProgressPercent = -1
+                val current = activityRef?.get()
+                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    current.setUIExecuting(false)
                 }
             }
+        }
+    }
 
-            val durMs = System.currentTimeMillis() - startMs
-            if (failed == 0) {
-                showLog(
-                    "═══ Payload extraction done — $ok partitions, " +
-                        "${formatFileSize(totalExtracted)}, ${durMs} ms ═══",
-                    LogLevel.SUCCESS
-                )
-            } else {
-                showLog(
-                    "═══ Payload extraction finished with errors — $ok ok / $failed failed " +
-                        "(${formatFileSize(totalExtracted)}, ${durMs} ms) ═══",
-                    LogLevel.WARN
-                )
+    // ═══════════════════════════════════════════════════════════════
+    //  Payload.bin build + verify (prototype)
+    //  Packs the loaded partition images into an AOSP payload.bin and
+    //  self-verifies the result (header + manifest re-read).
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Menu entry: validate inputs, then let the user pick the payload
+     * compression (single global algorithm — pre-selected to whatever the
+     * DD build spinner currently uses).
+     */
+    private fun onBuildPayloadClicked() {
+        if (isExecuting) {
+            Toast.makeText(this, R.string.payload_busy, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!NativeBridge.isLoaded) {
+            showLog("Native backend not available: ${NativeBridge.loadError}", LogLevel.ERROR)
+            return
+        }
+        if (imageFiles.isEmpty()) {
+            showLog(getString(R.string.payload_no_images), LogLevel.ERROR)
+            return
+        }
+        // Don't allow a payload build while a copy is still in flight —
+        // same placeholder guard as the DD build button.
+        if (imageFiles.any { it.second.startsWith("loading:") }) {
+            showLog("Wait for partition images to finish loading.", LogLevel.WARN)
+            return
+        }
+
+        val algorithms = OTABridge.COMPRESSION_ALGORITHMS.toTypedArray()
+        val checkedIdx = algorithms.indexOf(selectedCompression).coerceAtLeast(0)
+        var chosen = selectedCompression
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.payload_compress_title))
+            .setSingleChoiceItems(algorithms, checkedIdx) { _, which -> chosen = algorithms[which] }
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                buildPayloadBin(imageFiles.toMap(), chosen)
             }
-            setUIExecuting(false)
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Build payload.bin from the loaded images on buildScope, then
+     * self-verify the output. Long-run protection mirrors the DD build:
+     * OTAService foreground + WakeLock. No .progress sidecar yet — the
+     * per-partition log lines arrive when the native call returns.
+     */
+    private fun buildPayloadBin(images: Map<String, String>, compression: String) {
+        // AUDIT-F5 pattern: capture on the UI thread BEFORE buildScope.
+        val level = selectedCompressionLevel
+        val effectiveLevel = if (level > 0) level
+            else OTABridge.COMPRESS_LEVELS[compression]?.third ?: 0
+
+        val outDir = outputDirPath ?: outputDir.absolutePath
+        File(outDir).mkdirs()
+        // Auto-unique output: payload.bin, payload-1.bin, … (never silently
+        // overwrite a previous build — or the payload the user just inspected).
+        var out = File(outDir, "payload.bin")
+        var n = 1
+        while (out.exists()) {
+            out = File(outDir, "payload-$n.bin")
+            n++
+        }
+        val outPath = out.absolutePath
+
+        setUIExecuting(true)
+        isExecuting = true
+        appContext = applicationContext
+        lastProgressMessage = ""
+        lastNotifPercent = -1
+        showProgressNotification("Building payload…", 0)
+        OTAService.start(applicationContext, "Building payload…")
+
+        buildScope.launch {
+            try {
+                // Belt-and-suspenders WakeLock — same discipline as the DD
+                // build and the payload extract paths.
+                val act = activityRef?.get()
+                if (act != null) {
+                    val pm = act.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    wakeLock = pm.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "OTAku::PayloadWakeLock"
+                    ).apply {
+                        setReferenceCounted(false)
+                        acquire(3 * 60 * 60 * 1000L) // 3 hours — enough for any compression job
+                    }
+                }
+
+                showLog(
+                    "[*] Building payload.bin — ${images.size} partitions, " +
+                        "compression=$compression, level=$effectiveLevel, output=$outPath",
+                    LogLevel.INFO
+                )
+
+                val result = OTABridge.writePayload(
+                    images = images,
+                    compression = compression,
+                    level = level,
+                    outputPath = outPath
+                ) { line -> showLog(line, LogLevel.PLAIN) }
+
+                if (result.success) {
+                    showLog(
+                        "[+] payload.bin written: ${result.outputPath ?: outPath} " +
+                            "(${formatFileSize(result.fileSize)}, ${result.durationMs} ms)",
+                        LogLevel.SUCCESS
+                    )
+                    result.partitions.forEach { s ->
+                        showLog(
+                            "    • ${s.name}: ${formatFileSize(s.originalSize)} → " +
+                                "${formatFileSize(s.compressedSize)} " +
+                                "(${(s.ratio * 100).toInt()}% ${s.algorithm})",
+                            LogLevel.PLAIN
+                        )
+                    }
+
+                    // Self-verify — cheap (header + manifest re-read only)
+                    // and catches truncation/corruption from storage issues.
+                    val verify = OTABridge.verifyPayload(outPath) { line ->
+                        showLog(line, LogLevel.PLAIN)
+                    }
+                    if (verify.success) {
+                        showLog("[+] Self-verification passed", LogLevel.SUCCESS)
+                    } else {
+                        showLog("[!] Self-verification FAILED: ${verify.error}", LogLevel.ERROR)
+                    }
+                } else {
+                    showLog("[!] payload.bin build failed: ${result.error}", LogLevel.ERROR)
+                }
+            } finally {
+                try { wakeLock?.release() } catch (_: Exception) {}
+                wakeLock = null
+                try { OTAService.stop(appContext ?: applicationContext) } catch (_: Exception) {}
+                isExecuting = false
+                lastProgressMessage = ""
+                lastNotifPercent = -1
+                val current = activityRef?.get()
+                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    current.setUIExecuting(false)
+                }
+            }
         }
     }
 

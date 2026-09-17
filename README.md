@@ -9,7 +9,7 @@ A **non-root** Android app for building flashable OTA ZIP packages from partitio
 ## Features
 
 - **DD-mode flashable ZIP generation** — Build otaku-format flashable ZIPs that work with TWRP/OrangeFox recovery
-- **Payload.bin inspector + extractor (prototype)** — Parse AOSP OTA `payload.bin` files and extract partition images directly on-device
+- **Payload.bin toolchain (prototype)** — Parse AOSP OTA `payload.bin` files, extract partition images on-device (sidecar progress + WakeLock for long runs), build `payload.bin` from loaded images, and self-verify the output
 - **Multiple compression algorithms** — zstd, xz, bzip2, gzip, lz4 (all statically compiled into the native library)
 - **Per-partition progress tracking** — Real-time compression progress for each partition via a JSON sidecar file
 - **Device safety check** — Prevents flashing on wrong device models (comma-separated codename list supported)
@@ -67,7 +67,7 @@ All five algorithms are **always available** — they are statically compiled in
 │  │  Statically links: flate2, bzip2, xz2, lz4, zstd,  │  │
 │  │                    sha2, prost, zip, chrono         │  │
 │  │  Modules:                                          │  │
-│  │  ├─ lib.rs     JNI entry points (7 external fns)   │  │
+│  │  ├─ lib.rs     JNI entry points (9 external fns)   │  │
 │  │  ├─ dd.rs      DD-mode flashable ZIP generator     │  │
 │  │  ├─ payload.rs AOSP payload.bin read/write         │  │
 │  │  ├─ proto.rs   Hand-written prost structs          │  │
@@ -85,9 +85,9 @@ All five algorithms are **always available** — they are statically compiled in
 ### Key Components
 
 - **Rust native backend** — `libotaku_native.so` is compiled by `cargo-ndk` for `arm64-v8a` and `armeabi-v7a`, placed in `android/app/src/main/jniLibs/` by the CI build step. All compression algorithms are statically linked — no runtime dependency checks.
-- **NativeBridge.kt** — Kotlin `object` that loads `libotaku_native.so` via `System.loadLibrary("otaku_native")` and exposes typed wrappers (`buildDd`, `getVersion`, `checkDeps`, `detectDeviceCodename`, `scanDevicePartitions`, plus prototype payload.bin bridges `readPayload` / `extractPartition`). Each wrapper parses the JSON returned by Rust into a typed data class.
-- **OTABridge.kt** — High-level Kotlin API. `OTABridge.dd()` calls `NativeBridge.buildDd()` on `Dispatchers.IO`, polls `<output_path>.progress` every 500ms to emit `ProgressUpdate` callbacks to the UI, and translates `DdBuildResult` into `OTAResult`.
-- **OTAService.kt** — Foreground service that holds a `WakeLock` during long builds so the OS doesn't kill the app under Doze.
+- **NativeBridge.kt** — Kotlin `object` that loads `libotaku_native.so` via `System.loadLibrary("otaku_native")` and exposes typed wrappers (`buildDd`, `getVersion`, `checkDeps`, `detectDeviceCodename`, `scanDevicePartitions`, plus prototype payload.bin bridges `readPayload` / `extractPartition` / `writePayload` / `verifyPayload`). Each wrapper parses the JSON returned by Rust into a typed data class.
+- **OTABridge.kt** — High-level Kotlin API. `OTABridge.dd()` calls `NativeBridge.buildDd()` on `Dispatchers.IO`, polls `<output_path>.progress` every 500ms to emit `ProgressUpdate` callbacks to the UI, and translates `DdBuildResult` into `OTAResult`. `extractPayloadPartition()` uses the same sidecar-polling pattern; `writePayload()` / `verifyPayload()` round out the payload.bin toolchain.
+- **OTAService.kt** — Foreground service that holds a `WakeLock` during long builds and payload extractions so the OS doesn't kill the app under Doze.
 - **DD mode (`rust/src/dd.rs`)** — Generates an otaku-format flashable ZIP containing `otaku.bin` (DDBU header + compressed partition data), `META-INF/com/google/android/update-binary` (TWRP/OrangeFox flasher script), `META-INF/com/google/android/updater-script` (stub), and `flash_info.txt` (human-readable metadata).
 
 ### otaku.bin (DDBU) Format
@@ -215,7 +215,7 @@ OTAku/
 │   ├── proto/
 │   │   └── update_metadata.proto     # AOSP payload.bin protobuf schema
 │   └── src/
-│       ├── lib.rs                    # JNI entry points (7 external fns)
+│       ├── lib.rs                    # JNI entry points (9 external fns)
 │       ├── dd.rs                     # DD-mode flashable ZIP generator
 │       ├── payload.rs                # AOSP payload.bin read/write
 │       ├── proto.rs                  # Hand-written prost structs

@@ -17,4 +17,11 @@
         android:title="@string/menu_inspect_payload"
         app:showAsAction="never" />
 
+    <!-- Payload.bin builder (prototype) — overflow item next to the
+         inspector; packs the loaded partition images into payload.bin. -->
+    <item
+        android:id="@+id/action_build_payload"
+        android:title="@string/menu_build_payload"
+        app:showAsAction="never" />
+
 </menu>
