@@ -684,7 +684,7 @@ class MainActivity : AppCompatActivity() {
         updateOutputPreview()  // Show default filename preview immediately
 
         requestStoragePermissions()
-        // T17: initial floating Build FAB state (hidden until inputs ready)
+        // T17/T19: initial Build FAB gate state (always visible, enabled-gated)
         updateBuildFab()
         handleIncomingIntent(intent)
     }
@@ -3219,8 +3219,31 @@ class MainActivity : AppCompatActivity() {
      * so "invisible" is impossible by construction; readiness is expressed
      * as the enabled state. Taps while unready are additionally guarded in
      * onBuildClicked() (busy/inputs checks) — defense in depth.
+     *
+     * T22 postscript: the "never rendered after the first layout pass"
+     * reading above was a misdiagnosis — the real culprit was cache
+     * starvation: onPause (IMPL-008) nulls cachedEditDevice, onResume never
+     * re-resolved it, so every FAB update after a SAF picker trip read
+     * device="" and froze the FAB state. Fixed in T22 by re-running
+     * cacheViews() + updateBuildFab() at the end of onResume and making
+     * this gate self-heal null caches.
      */
     private fun updateBuildFab() {
+        // T22 self-heal: a readiness gate must never silently no-op on a null
+        // cache — the old `?: return` froze whatever enabled state the FAB last
+        // had (the 3rd-generation "grayed-out until theme switch" freeze). If a
+        // cache is null, re-resolve it from the live view tree first; the null
+        // path below can then only trigger when the view is genuinely absent.
+        if (cachedFabBuild == null) {
+            val fab = findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabBuild)
+            if (fab != null) {
+                fab.setOnClickListener { onBuildClicked() }
+                cachedFabBuild = fab
+            }
+        }
+        if (cachedEditDevice == null) {
+            cachedEditDevice = findViewById(R.id.editTextDevice)
+        }
         val fab = cachedFabBuild ?: return
         val device = (cachedEditDevice as? android.widget.EditText)?.text?.toString()?.trim() ?: ""
         val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
@@ -3526,6 +3549,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        // T22 — IMPL-008 debt paid: onPause nulls the control caches and its
+        // comment promised "re-resolve on next onResume" — this is that promise,
+        // three FAB-bug generations late. Without it, any trip to the SAF image
+        // picker left cachedEditDevice null, so updateBuildFab() read device=""
+        // and the Build FAB stayed grayed-out no matter what the user typed;
+        // only a theme-switch recreate() repopulated the caches. Re-resolution
+        // must run AFTER the isBuilding branches above (they call
+        // setUIExecuting → updateBuildFab with the caches still stale).
+        // cacheViews() is idempotent: plain findViewById re-assignment + FAB
+        // click-listener re-set; it attaches no TextWatchers, so re-running it
+        // never doubles anything up.
+        cacheViews()
+        updateBuildFab()
     }
 
 

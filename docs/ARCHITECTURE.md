@@ -18,7 +18,7 @@
 │  │  │   ├── Compression algorithm + level                        │  │
 │  │  │   └── Output directory + Browse (SAF directory picker)     │  │
 │  │  ├── ActionSection                                             │  │
-│  │  │   ├── FFloating Build FAB "Build OTA Now" (T19 —           │
+│  │  │   ├── Floating Build FAB "Build OTA Now" (T19 —            │
 │  │  │   │ enabled when ready; bottom-end overlay)                │
 │  │  │   └── Per-partition progress bars (full actions also    │  │
 │  │  │       in the TopAppBar overflow menu since T14: Build   │  │
@@ -81,6 +81,16 @@
 │  └────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+
+UI lifecycle invariant (T22): `onPause` invalidates the cached view
+references (IMPL-008) and the end of `onResume` re-resolves them via
+`cacheViews()` before re-syncing the Build FAB gate (`updateBuildFab()`).
+Any code that gates UI state on cached views must tolerate a null cache
+between onPause and onResume — the FAB gate self-heals by re-resolving
+on demand. Until T22 the re-resolve half of IMPL-008 was missing, which
+froze the Build FAB grayed-out after every SAF picker trip until a
+theme-switch `recreate()` rebuilt the caches.
 
 ## Data Flow — DD Mode (only mode)
 
