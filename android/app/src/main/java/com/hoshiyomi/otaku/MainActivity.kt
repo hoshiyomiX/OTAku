@@ -1159,7 +1159,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupCompressionSelector() {
-        val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompression)
+        // T19: AppCompatSpinner upgraded to the M3 ExposedDropdownMenu pattern
+        // (TextInputLayout + MaterialAutoCompleteTextView — same as the payload
+        // build dialog since T14). The id still resolves to the dropdown text
+        // field. displayLabels map 1:1 onto OTABridge.COMPRESSION_ALGORITHMS
+        // indices, and inputType=none in the XML means the only reachable
+        // values are the adapter items — no free-text validation needed.
+        val dropdown = findViewById<android.widget.AutoCompleteTextView>(R.id.spinnerCompression)
         // Ordered by compression ratio: best → fastest (matches OTABridge.COMPRESSION_ALGORITHMS)
         val displayLabels = listOf(
             "zstd — supreme (~35%)",
@@ -1168,34 +1174,28 @@ class MainActivity : AppCompatActivity() {
             "gzip — standard (~60%)",
             "lz4 — fast (~70%)"
         )
-        val adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            displayLabels
-        ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        spinner.adapter = adapter
+        dropdown?.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, displayLabels))
 
         // Restore persisted compression selection (survives Activity recreation from
         // theme switch, config change, etc). Without this, recreate() resets the
-        // spinner to position 0 and selectedCompression to the default "gzip".
+        // selector and selectedCompression to the default "gzip". setText(.., false)
+        // never fires the item-click listener, so restoring is silent by design.
         val savedCompression = prefs.getString("pref_compression", "gzip") ?: "gzip"
-        val savedPosition = OTABridge.COMPRESSION_ALGORITHMS.indexOf(savedCompression)
-        if (savedPosition >= 0) {
-            spinner.setSelection(savedPosition)
-            selectedCompression = savedCompression
+        var restoreIdx = OTABridge.COMPRESSION_ALGORITHMS.indexOf(savedCompression)
+        if (restoreIdx < 0) restoreIdx = OTABridge.COMPRESSION_ALGORITHMS.indexOf("gzip")
+        if (restoreIdx >= 0 && restoreIdx < displayLabels.size) {
+            dropdown?.setText(displayLabels[restoreIdx], false)
+            selectedCompression = OTABridge.COMPRESSION_ALGORITHMS[restoreIdx]
         }
 
-        spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                selectedCompression = OTABridge.COMPRESSION_ALGORITHMS[position]
-                prefs.edit { putString("pref_compression", selectedCompression) }
-                updateCompressionLevelSpinner()
-                updateOutputPreview()
-            }
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        dropdown?.setOnItemClickListener { _, _, position, _ ->
+            selectedCompression = OTABridge.COMPRESSION_ALGORITHMS[position]
+            prefs.edit { putString("pref_compression", selectedCompression) }
+            updateCompressionLevelSpinner()
+            updateOutputPreview()
         }
 
-        // Initialize compression level spinner
+        // Initialize compression level selector
         setupCompressionLevelSpinner()
     }
 
@@ -1219,17 +1219,18 @@ class MainActivity : AppCompatActivity() {
     )
 
     private fun setupCompressionLevelSpinner() {
-        val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompressionLevel)
-        updateCompressionLevelSpinner()
+        // T19: M3 ExposedDropdownMenu — item clicks are the ONLY way to change
+        // the level (inputType=none; setText(.., false) never fires the
+        // listener), so the ghost onItemSelected events of the old Spinner
+        // (adapter swap auto-firing position 0) are gone by construction.
+        val dropdown = findViewById<android.widget.AutoCompleteTextView>(R.id.spinnerCompressionLevel)
 
-        spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                val items = getCurrentLevelItems()
-                selectedCompressionLevel = if (position < items.size) items[position] else 0
-                prefs.edit { putInt("pref_compression_level", selectedCompressionLevel) }
-            }
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        dropdown?.setOnItemClickListener { _, _, position, _ ->
+            val items = getCurrentLevelItems()
+            selectedCompressionLevel = if (position < items.size) items[position] else 0
+            prefs.edit { putInt("pref_compression_level", selectedCompressionLevel) }
         }
+        updateCompressionLevelSpinner()
     }
 
     private fun getCurrentLevelItems(): List<Int> {
@@ -1247,18 +1248,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateCompressionLevelSpinner() {
-        val spinner = findViewById<android.widget.Spinner>(R.id.spinnerCompressionLevel) ?: return
+        // T19: M3 ExposedDropdownMenu — rebuild the adapter for the newly
+        // selected algorithm, then reset the field to "Default". The label
+        // scheme is unchanged from the Spinner era: sentinel 0 renders as
+        // "Default (<algo default>)", explicit levels render as the number.
+        val dropdown = findViewById<android.widget.AutoCompleteTextView>(R.id.spinnerCompressionLevel) ?: return
         val items = getCurrentLevelItems()
         val defaultLevel = DEFAULT_COMPRESSION_LEVELS[selectedCompression] ?: 0
         val labels = items.map { if (it == 0) "Default ($defaultLevel)" else "$it" }
-        val adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            labels
-        ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        spinner.adapter = adapter
-        // Reset selection to "Default"
-        spinner.setSelection(0)
+        dropdown.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, labels))
+        // Reset selection to "Default" (labels is never empty — sentinel 0
+        // always present, see getCurrentLevelItems).
+        dropdown.setText(labels[0], false)
         selectedCompressionLevel = 0
     }
 
@@ -1944,8 +1945,12 @@ class MainActivity : AppCompatActivity() {
     private var cachedBtnAddImages: View? = null
     private var cachedBtnRemoveAll: View? = null
     private var cachedBtnBrowseOutput: View? = null
-    private var cachedSpinnerCompression: android.widget.Spinner? = null
-    private var cachedSpinnerCompressionLevel: android.widget.Spinner? = null
+    // T19: compression selectors are M3 ExposedDropdownMenus now — cache the
+    // TextInputLayout wrappers. setEnabled on the layout recursively disables
+    // the inner MaterialAutoCompleteTextView AND greys the outlined box
+    // (verified against material 1.12.0 source: setEnabled → recursiveSetEnabled).
+    private var cachedLayoutCompression: com.google.android.material.textfield.TextInputLayout? = null
+    private var cachedLayoutCompressionLevel: com.google.android.material.textfield.TextInputLayout? = null
     private var cachedEditDevice: View? = null
     private var cachedBtnAutoDetect: View? = null
     private var cachedEditFilename: View? = null
@@ -1967,8 +1972,8 @@ class MainActivity : AppCompatActivity() {
         cachedBtnAddImages = findViewById(R.id.buttonAddImages)
         cachedBtnRemoveAll = findViewById(R.id.buttonRemoveAll)
         cachedBtnBrowseOutput = findViewById(R.id.buttonBrowseOutput)
-        cachedSpinnerCompression = findViewById(R.id.spinnerCompression)
-        cachedSpinnerCompressionLevel = findViewById(R.id.spinnerCompressionLevel)
+        cachedLayoutCompression = findViewById(R.id.layoutCompression)
+        cachedLayoutCompressionLevel = findViewById(R.id.layoutCompressionLevel)
         cachedEditDevice = findViewById(R.id.editTextDevice)
         cachedBtnAutoDetect = findViewById(R.id.buttonAutoDetect)
         cachedEditFilename = findViewById(R.id.editTextCustomFilename)
@@ -1976,7 +1981,8 @@ class MainActivity : AppCompatActivity() {
         // Also cache log views (previously done in a separate cacheLogViews())
         cachedLogView = findViewById(R.id.textViewLog)
         cachedScrollView = findViewById(R.id.scrollViewLog)
-        // T17 — floating Build FAB (bottom-end, across the log pill)
+        // T17 — floating Build FAB (bottom-end, across the log pill);
+        // T19 — permanently visible, availability gated by isEnabled.
         cachedFabBuild = findViewById(R.id.fabBuild)
         cachedFabBuild?.setOnClickListener { onBuildClicked() }
     }
@@ -2524,7 +2530,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Menu entry: validate inputs, then let the user pick the payload
      * build parameters — compression algorithm (pre-selected to whatever
-     * the DD build spinner currently uses), manifest block size, and
+     * the DD build selector currently uses), manifest block size, and
      * payload minor version. Block size / minor version were previously
      * hardcoded to the Rust defaults (4096 / 0); they are exposed here so
      * advanced users can match a target updater's expectations.
@@ -3192,40 +3198,34 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * T18 — floating Build FAB visibility (deterministic). The FAB sits at
-     * bottom-end, across the collapsed log pill (bottom-start). It appears
-     * only when the build inputs are ready: at least one partition image
-     * loaded (none still in the "loading:" placeholder state), a device
-     * codename present, and no native operation executing.
+     * T19 — floating Build FAB availability (enabled-gated). The FAB sits at
+     * bottom-end, across the collapsed log pill (bottom-start), and is
+     * PERMANENTLY part of the layout: it renders disabled until the build
+     * inputs are ready — at least one partition image loaded (none still in
+     * the "loading:" placeholder state), a device codename present, and no
+     * native operation executing. The M3 disabled-FAB colors come
+     * automatically from the style's state-enabled color selectors — no
+     * custom alpha/color hacks.
      *
-     * FATAL-BUG FIX (reported: FAB stayed invisible until a theme-switch
-     * recreate() refreshed the view): ExtendedFAB.show()/hide() run an
-     * internal animation state machine that can strand the view — a hide()
-     * re-armed on an already-hidden FAB, or a show() whose scale/alpha
-     * animation never ran, leaves visibility=VISIBLE with alpha/scale 0.
-     * A fresh post-recreate view starts with a clean machine, which is
-     * why the theme toggle appeared to "fix" it. Visibility is now
-     * hard-set against an identity alpha/scale baseline: idempotent,
-     * self-healing (any stranded state is corrected on the next call),
-     * and no library animation state is ever armed. Transitions are
-     * instant — this screen's M3 motion identity lives in the log-card
-     * morph, not in the FAB.
+     * DESIGN CHANGE (fatal-bug fix, 3rd attempt): T17/T18 drove the FAB via
+     * visibility toggling (show()/hide(), then hard setVisibility against an
+     * identity alpha/scale baseline) — and on the target device the
+     * GONE→VISIBLE flip made AFTER the first layout pass never rendered.
+     * The FAB appeared only after a theme-switch recreate(), i.e. exactly
+     * when visibility was set BEFORE the first layout of a fresh view tree.
+     * Two very different implementations failed the same way; meanwhile the
+     * pre-T14 FAB of this app — always visible, gated by isEnabled — worked
+     * for years. The proven pattern wins: the view never leaves the layout,
+     * so "invisible" is impossible by construction; readiness is expressed
+     * as the enabled state. Taps while unready are additionally guarded in
+     * onBuildClicked() (busy/inputs checks) — defense in depth.
      */
     private fun updateBuildFab() {
         val fab = cachedFabBuild ?: return
         val device = (cachedEditDevice as? android.widget.EditText)?.text?.toString()?.trim() ?: ""
         val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
         val canBuild = imageFiles.isNotEmpty() && !anyLoading && device.isNotEmpty() && !isExecuting
-        if (canBuild) {
-            if (fab.visibility != View.VISIBLE || fab.alpha < 1f || fab.scaleX < 1f || fab.scaleY < 1f) {
-                fab.alpha = 1f
-                fab.scaleX = 1f
-                fab.scaleY = 1f
-                fab.visibility = View.VISIBLE
-            }
-        } else if (fab.visibility != View.GONE) {
-            fab.visibility = View.GONE
-        }
+        fab.isEnabled = canBuild
     }
 
     private fun updateImageListUI() {
@@ -3612,8 +3612,8 @@ class MainActivity : AppCompatActivity() {
         cachedBtnAddImages = null
         cachedBtnRemoveAll = null
         cachedBtnBrowseOutput = null
-        cachedSpinnerCompression = null
-        cachedSpinnerCompressionLevel = null
+        cachedLayoutCompression = null
+        cachedLayoutCompressionLevel = null
         cachedEditDevice = null
         cachedBtnAutoDetect = null
         cachedEditFilename = null
@@ -3764,12 +3764,16 @@ class MainActivity : AppCompatActivity() {
             // changing settings that have no effect on the running build
             // but would mislead them into thinking they do.
             cachedBtnBrowseOutput?.isEnabled = !executing
-            cachedSpinnerCompression?.isEnabled = !executing
-            cachedSpinnerCompressionLevel?.isEnabled = !executing
+            // T19: disable the ExposedDropdownMenu TextInputLayout wrappers —
+            // recursive disable covers the inner dropdown fields and greys
+            // the outlined boxes (M3 disabled state).
+            cachedLayoutCompression?.isEnabled = !executing
+            cachedLayoutCompressionLevel?.isEnabled = !executing
             cachedEditDevice?.isEnabled = !executing
             cachedBtnAutoDetect?.isEnabled = !executing
             cachedEditFilename?.isEnabled = !executing
-            // T17: FAB hides while executing, returns when inputs still valid
+            // T19: FAB disables while executing, re-enables when inputs
+            // are still valid (enabled-gated — see updateBuildFab).
             updateBuildFab()
         }
     }

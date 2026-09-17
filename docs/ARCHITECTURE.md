@@ -18,8 +18,8 @@
 │  │  │   ├── Compression algorithm + level                        │  │
 │  │  │   └── Output directory + Browse (SAF directory picker)     │  │
 │  │  ├── ActionSection                                             │  │
-│  │  │   ├── Floating Build FAB "Build OTA Now" (T17 — shows   │  │
-│  │  │   │   when inputs are ready; bottom-end overlay)        │  │
+│  │  │   ├── FFloating Build FAB "Build OTA Now" (T19 —           │
+│  │  │   │ enabled when ready; bottom-end overlay)                │
 │  │  │   └── Per-partition progress bars (full actions also    │  │
 │  │  │       in the TopAppBar overflow menu since T14: Build   │  │
 │  │  │       OTA ZIP / Inspect / Build payload.bin)            │  │

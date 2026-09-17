@@ -383,14 +383,30 @@
                             android:textColor="?attr/colorOnSurfaceVariant"
                             android:layout_marginBottom="8dp" />
 
-                        <androidx.appcompat.widget.AppCompatSpinner
-                            android:id="@+id/spinnerCompression"
+                        <!-- T19: AppCompatSpinner upgraded to the M3
+                             ExposedDropdownMenu pattern (TextInputLayout +
+                             MaterialAutoCompleteTextView) — same pattern as
+                             the payload build dialog since T14. inputType=none
+                             makes the field non-editable: the only reachable
+                             values are the adapter items. The id keeps the
+                             spinnerCompression name (now resolves to the
+                             MaterialAutoCompleteTextView) to minimize churn. -->
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:id="@+id/layoutCompression"
+                            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
                             android:layout_width="match_parent"
-                            android:layout_height="48dp"
-                            android:background="?attr/selectableItemBackground"
-                            android:spinnerMode="dropdown"
-                            android:paddingStart="8dp"
-                            android:paddingEnd="8dp" />
+                            android:layout_height="wrap_content"
+                            android:hint="@string/hint_compression_algorithm">
+
+                            <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                                android:id="@+id/spinnerCompression"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="none"
+                                android:maxLines="1"
+                                android:gravity="center_vertical" />
+
+                        </com.google.android.material.textfield.TextInputLayout>
 
                         <!-- Divider -->
                         <View
@@ -416,14 +432,25 @@
                             android:textColor="?attr/colorOnSurfaceVariant"
                             android:layout_marginBottom="8dp" />
 
-                        <androidx.appcompat.widget.AppCompatSpinner
-                            android:id="@+id/spinnerCompressionLevel"
+                        <!-- T19: AppCompatSpinner upgraded to the M3
+                             ExposedDropdownMenu pattern — see the compression
+                             algorithm selector above for the rationale. -->
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:id="@+id/layoutCompressionLevel"
+                            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
                             android:layout_width="match_parent"
-                            android:layout_height="48dp"
-                            android:background="?attr/selectableItemBackground"
-                            android:spinnerMode="dropdown"
-                            android:paddingStart="8dp"
-                            android:paddingEnd="8dp" />
+                            android:layout_height="wrap_content"
+                            android:hint="@string/hint_compression_level">
+
+                            <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                                android:id="@+id/spinnerCompressionLevel"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="none"
+                                android:maxLines="1"
+                                android:gravity="center_vertical" />
+
+                        </com.google.android.material.textfield.TextInputLayout>
 
                         <!-- Divider -->
                         <View
@@ -732,14 +759,16 @@
         <!-- ═══════════════════════════════════════════════════ -->
         <!-- Floating Build FAB — bottom-END, across the log pill  -->
         <!-- (bottom-START). Persistent overlay (no scroll-away    -->
-        <!-- behavior — parity with the log pill): shows ONLY when  -->
-        <!-- build inputs are ready: images loaded + codename set,  -->
-        <!-- none still loading, nothing executing. Visibility is   -->
-        <!-- driven by updateBuildFab() in MainActivity (T17).      -->
+        <!-- behavior — parity with the log pill): PERMANENTLY in   -->
+        <!-- the layout (T19) — renders DISABLED until the build    -->
+        <!-- inputs are ready: images loaded + codename set, none   -->
+        <!-- still loading, nothing executing. Gating is by         -->
+        <!-- isEnabled via updateBuildFab() in MainActivity; the    -->
+        <!-- M3 disabled colors come from the style's state-enabled -->
+        <!-- selectors (visibility toggling never rendered after    -->
+        <!-- the first layout pass on the target device).           -->
         <!-- T18: explicit 56dp height (M3 Extended FAB canonical   -->
-        <!-- size — deterministic regardless of style resolution);  -->
-        <!-- visibility is hard-set there (no show()/hide() state   -->
-        <!-- machine — fatal-bug fix for the stranded FAB).         -->
+        <!-- size — deterministic regardless of style resolution).  -->
         <!-- ═══════════════════════════════════════════════════ -->
 
         <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
@@ -748,10 +777,10 @@
             android:layout_height="56dp"
             android:layout_gravity="bottom|end"
             android:layout_margin="16dp"
-            android:visibility="gone"
+            android:enabled="false"
             android:text="@string/button_build_now"
             android:contentDescription="@string/button_build_now"
-            app:icon="@android:drawable/ic_media_play"
+            app:icon="@drawable/ic_play"
             app:cornerRadius="16dp" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

@@ -32,6 +32,10 @@
     <string name="description_compression">Compression algorithm used to reduce the output file size.</string>
     <string name="label_compression_level">COMPRESSION LEVEL</string>
     <string name="description_compression_level">Higher values produce smaller files with longer processing time. Default uses the recommended setting.</string>
+    <!-- T19: floating hints inside the M3 ExposedDropdownMenu boxes
+         (EN-only per the payload-era i18n convention for new strings). -->
+    <string name="hint_compression_algorithm">Algorithm</string>
+    <string name="hint_compression_level">Level</string>
 
     <!-- Device section -->
     <string name="label_device">DEVICE</string>

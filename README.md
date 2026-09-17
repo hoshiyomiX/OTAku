@@ -46,7 +46,7 @@ All five algorithms are **always available** — they are statically compiled in
 │  │  ├─ Partition image picker (SAF)                   │  │
 │  │  ├─ Compression selector + level                   │  │
 │  │  ├─ Per-partition progress bars                    │  │
-│  │  ├─ Floating "Build OTA Now" button (T17)       │  │
+│  │  ├─ Floating "Build OTA Now" button (T19)       │  │
 │  │  └─ Log output + Copy/Clear                        │  │
 │  └───────────────────────┬───────────────────────────┘  │
 │                          │                              │
