@@ -319,7 +319,7 @@
                                 android:paddingHorizontal="24dp"
                                 style="@style/Widget.OTAku.Button.Tonal"
                                 app:cornerRadius="12dp"
-                                app:icon="@android:drawable/ic_input_add"
+                                app:icon="@drawable/ic_add"
                                 app:iconSize="16dp"
                                 app:iconGravity="textStart"
                                 app:iconPadding="4dp" />
@@ -572,7 +572,7 @@
                                 android:minWidth="0dp"
                                 android:paddingHorizontal="24dp"
                                 app:cornerRadius="12dp"
-                                app:icon="@android:drawable/ic_menu_view"
+                                app:icon="@drawable/ic_folder_open"
                                 app:iconSize="16dp"
                                 app:iconGravity="textStart"
                                 app:iconPadding="4dp" />
