@@ -5,18 +5,20 @@
     Single-purpose: Build partition images (.img) into flashable OTA ZIP.
 
     Layout (single scroll architecture):
-    ┌─────────────────────────────────────────┐
-    │ TopAppBar (title + version + theme btn) │
-    ├─────────────────────────────────────────┤
-    │ NestedScrollView (full height)          │
-    │   Settings Card                         │
-    │     Device / Partitions / Compression   │
-    │     Level / Output                      │
-    │   [BUILD OTA NOW] + ProgressBar         │
-    │   Log Card (below Build button)         │
-    │     Header + Copy/Clear + NestedScrollView │
-    │ ↓ 88dp bottom padding (FAB clearance)  │
-    └─────────────────────────────────────────┘
+    ┌────────────────────────────────────────┐
+    │ TopAppBar (title + version + theme  │
+    │   btn + overflow: Build OTA ZIP /   │
+    │   Inspect / Build payload.bin)      │
+    ├────────────────────────────────────────┤
+    │ NestedScrollView (full height)      │
+    │   Settings Card                     │
+    │     Device / Partitions /           │
+    │     Compression / Level / Output    │
+    │   ProgressBar (per-partition bars)  │
+    │   Log Card (morphable pill ↔ card)  │
+    │     Header + Copy/Clear +           │
+    │     NestedScrollView                │
+    └────────────────────────────────────────┘
 -->
 <androidx.coordinatorlayout.widget.CoordinatorLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
@@ -48,7 +50,6 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
-        android:paddingBottom="88dp"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
         <!-- ═══════════════════════════════════════════════════ -->
@@ -721,23 +722,5 @@
         </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
-
-    <!-- ═══════════════════════════════════════════════════ -->
-    <!-- Floating Action Button — Build OTA Now                 -->
-    <!-- Appears at bottom-right, enabled only when all          -->
-    <!-- required fields are filled (partitions + codename).     -->
-    <!-- ═══════════════════════════════════════════════════ -->
-    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
-        android:id="@+id/buttonExecute"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="16dp"
-        android:text="@string/button_repack"
-        android:contentDescription="@string/button_repack"
-        app:icon="@android:drawable/ic_media_play"
-        app:cornerRadius="16dp"
-        app:layout_behavior="com.google.android.material.behavior.HideBottomViewOnScrollBehavior"
-        android:enabled="false" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

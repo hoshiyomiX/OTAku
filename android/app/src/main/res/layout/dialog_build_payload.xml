@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    dialog_build_payload.xml — OTAku
+
+    Build-payload.bin parameter dialog: compression algorithm (pre-selected
+    to the DD build spinner's current choice), manifest block size, and
+    payload minor version. Exposed-dropdown menus (MD3) instead of the old
+    single-choice radio list — uniform with the compression spinners in
+    the main settings card.
+
+    Values are fed from MainActivity (fixed adapter arrays — no free-text
+    entry, inputType="none"), so every combination reaching Rust is valid.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingHorizontal="16dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp">
+
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/layoutPayloadCompression"
+        style="@style/Widget.Material3.TextInputLayout.ExposedDropdownMenu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="@string/payload_label_compression"
+        app:boxCornerRadiusTopStart="12dp"
+        app:boxCornerRadiusTopEnd="12dp"
+        app:boxCornerRadiusBottomStart="12dp"
+        app:boxCornerRadiusBottomEnd="12dp">
+
+        <AutoCompleteTextView
+            android:id="@+id/dropdownPayloadCompression"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="none"
+            android:maxLines="1"
+            android:gravity="center_vertical" />
+
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/layoutPayloadBlockSize"
+        style="@style/Widget.Material3.TextInputLayout.ExposedDropdownMenu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/payload_label_blocksize"
+        app:boxCornerRadiusTopStart="12dp"
+        app:boxCornerRadiusTopEnd="12dp"
+        app:boxCornerRadiusBottomStart="12dp"
+        app:boxCornerRadiusBottomEnd="12dp">
+
+        <AutoCompleteTextView
+            android:id="@+id/dropdownPayloadBlockSize"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="none"
+            android:maxLines="1"
+            android:gravity="center_vertical" />
+
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/layoutPayloadMinorVersion"
+        style="@style/Widget.Material3.TextInputLayout.ExposedDropdownMenu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/payload_label_minor_version"
+        app:boxCornerRadiusTopStart="12dp"
+        app:boxCornerRadiusTopEnd="12dp"
+        app:boxCornerRadiusBottomStart="12dp"
+        app:boxCornerRadiusBottomEnd="12dp">
+
+        <AutoCompleteTextView
+            android:id="@+id/dropdownPayloadMinorVersion"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="none"
+            android:maxLines="1"
+            android:gravity="center_vertical" />
+
+    </com.google.android.material.textfield.TextInputLayout>
+
+</LinearLayout>

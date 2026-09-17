@@ -10,6 +10,16 @@
         app:showAsAction="always"
         app:tint="?attr/colorOnSurface" />
 
+    <!-- Build OTA ZIP — moved here from the removed ExtendedFAB (the
+         floating button covered a strip of the main settings UI and
+         forced 88dp of dead FAB-clearance space at the bottom).
+         Validation lives in onBuildClicked(): in-progress guard, native
+         availability, device codename, compression availability. -->
+    <item
+        android:id="@+id/action_build_ota"
+        android:title="@string/menu_build_ota"
+        app:showAsAction="never" />
+
     <!-- Payload.bin inspector (prototype) — overflow item keeps the MD3
          toolbar surface minimal: one always-shown action (theme) only. -->
     <item

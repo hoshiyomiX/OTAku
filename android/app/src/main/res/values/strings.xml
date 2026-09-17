@@ -51,8 +51,6 @@
     <string name="button_browse">Browse</string>
 
     <!-- Actions -->
-    <string name="button_repack">BUILD OTA NOW</string>
-    <string name="button_execute">Execute</string>
     <string name="button_copy_log">Copy</string>
     <string name="button_clear_log">Clear</string>
     <string name="log_copied">Log copied to clipboard</string>
@@ -91,5 +89,13 @@
     <string name="payload_extract_all">Extract all</string>
     <string name="menu_build_payload">Build payload.bin…</string>
     <string name="payload_no_images">Load at least one partition image first</string>
-    <string name="payload_compress_title">payload.bin compression</string>
+
+    <!-- Payload.bin build dialog (compression / block size / minor version) -->
+    <string name="payload_build_title">Build payload.bin</string>
+    <string name="payload_label_compression">Compression algorithm</string>
+    <string name="payload_label_blocksize">Manifest block size (bytes)</string>
+    <string name="payload_label_minor_version">Payload minor version</string>
+
+    <!-- Build OTA ZIP — toolbar overflow entry (replaces the removed FAB) -->
+    <string name="menu_build_ota">Build OTA ZIP</string>
 </resources>

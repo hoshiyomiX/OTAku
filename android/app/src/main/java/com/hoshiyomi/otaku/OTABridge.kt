@@ -555,6 +555,8 @@ object OTABridge {
      * @param compression Algorithm shared by ALL partitions
      * @param level Compression level (0 = algorithm default)
      * @param outputPath Destination payload.bin path
+     * @param blockSize Manifest block size in bytes (<= 0 = Rust default 4096)
+     * @param minorVersion Payload minor version (< 0 = 0 at the JNI boundary)
      * @param onProgress Optional progress callback (sidecar-driven)
      * @param onOutputLine Optional log-line callback
      * @return WritePayloadResult with per-partition summaries, or error
@@ -564,6 +566,8 @@ object OTABridge {
         compression: String,
         level: Int,
         outputPath: String,
+        blockSize: Int = 0,
+        minorVersion: Int = 0,
         onProgress: ((ProgressUpdate) -> Unit)? = null,
         onOutputLine: ((String) -> Unit)? = null
     ): NativeBridge.WritePayloadResult {
@@ -659,7 +663,9 @@ object OTABridge {
                     images = images,
                     compression = compression,
                     level = level,
-                    outputPath = outputPath
+                    outputPath = outputPath,
+                    blockSize = blockSize,
+                    minorVersion = minorVersion
                 )
                 result.output.split("\n").forEach { line ->
                     if (line.isNotBlank()) onOutputLine?.invoke(line)

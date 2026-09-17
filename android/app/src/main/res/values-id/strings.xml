@@ -46,8 +46,6 @@
     <string name="button_browse">Telusuri</string>
 
     <!-- Actions -->
-    <string name="button_repack">BANGUN OTA</string>
-    <string name="button_execute">Jalankan</string>
     <string name="button_copy_log">Salin</string>
     <string name="button_clear_log">Bersihkan</string>
     <string name="log_copied">Log disalin ke clipboard</string>

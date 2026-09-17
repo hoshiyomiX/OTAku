@@ -363,7 +363,7 @@ class MainActivity : AppCompatActivity() {
          *   - Stops the foreground service
          *
          * Conditionally runs (if Activity is alive):
-         *   - setUIExecuting(false) — resets build button text + hides progress bars
+         *   - setUIExecuting(false) — hides progress bars + re-enables inputs
          *   - Sets buildResultDisplayed = true
          *
          * If Activity is dead/null (user backgrounded the app), the UI reset is
@@ -682,7 +682,6 @@ class MainActivity : AppCompatActivity() {
         // API 31+ via SuiseiColors.isDynamicColorAvailable, no user pref.
         setupBackPressedHandler()  // BUG-H07: OnBackPressedDispatcher
         updateOutputPreview()  // Show default filename preview immediately
-        updateBuildButtonState()  // Disable Build button until partitions are added
 
         requestStoragePermissions()
         handleIncomingIntent(intent)
@@ -975,6 +974,10 @@ class MainActivity : AppCompatActivity() {
                 cycleTheme()
                 true
             }
+            R.id.action_build_ota -> {
+                onBuildClicked()
+                true
+            }
             R.id.action_inspect_payload -> {
                 launchPayloadPicker()
                 true
@@ -1095,7 +1098,6 @@ class MainActivity : AppCompatActivity() {
                         editDevice?.setText(result.codename)
                         prefs.edit { putString("device", result.codename) }
                         updateOutputPreview()
-                        updateBuildButtonState()
                         showLog("Auto-detected device: ${result.codename}")
                         if (result.vendorDevice.isNotEmpty() && result.board.isNotEmpty()
                             && result.vendorDevice != result.board) {
@@ -1111,13 +1113,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Listen for changes in device codename — update Build button state
+        // Listen for changes in device codename — persist it + refresh the
+        // output filename preview (build gating lives in onBuildClicked()).
         editDevice?.addTextChangedListener(object : android.text.TextWatcher {
             override fun afterTextChanged(s: android.text.Editable?) {
                 val text = s?.toString()?.trim() ?: ""
                 prefs.edit { putString("device", text) }
                 updateOutputPreview()
-                updateBuildButtonState()
             }
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -1291,10 +1293,6 @@ class MainActivity : AppCompatActivity() {
             updateImageListUI()
             updateOutputPreview()
             showLog("All images removed.")
-        }
-
-        findViewById<View>(R.id.buttonExecute).setOnClickListener {
-            onBuildClicked()
         }
 
         findViewById<View>(R.id.buttonCopyLog).setOnClickListener {
@@ -1896,7 +1894,6 @@ class MainActivity : AppCompatActivity() {
     // IMPL-008: Cached view references — avoids repeated findViewById() calls
     // in setUIExecuting() which runs on every progress update during builds.
     // findViewById() is O(n) view hierarchy traversal; caching eliminates jank.
-    private var cachedBtnExecute: com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton? = null
     private var cachedBtnAddImages: View? = null
     private var cachedBtnRemoveAll: View? = null
     private var cachedBtnBrowseOutput: View? = null
@@ -1919,7 +1916,6 @@ class MainActivity : AppCompatActivity() {
     // redundant overhead after the first call. Eager resolution is
     // cleaner and avoids the null-check branching on the hot path.
     private fun cacheViews() {
-        cachedBtnExecute = findViewById(R.id.buttonExecute)
         cachedBtnAddImages = findViewById(R.id.buttonAddImages)
         cachedBtnRemoveAll = findViewById(R.id.buttonRemoveAll)
         cachedBtnBrowseOutput = findViewById(R.id.buttonBrowseOutput)
@@ -2476,8 +2472,11 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Menu entry: validate inputs, then let the user pick the payload
-     * compression (single global algorithm — pre-selected to whatever the
-     * DD build spinner currently uses).
+     * build parameters — compression algorithm (pre-selected to whatever
+     * the DD build spinner currently uses), manifest block size, and
+     * payload minor version. Block size / minor version were previously
+     * hardcoded to the Rust defaults (4096 / 0); they are exposed here so
+     * advanced users can match a target updater's expectations.
      */
     private fun onBuildPayloadClicked() {
         if (isExecuting) {
@@ -2501,12 +2500,52 @@ class MainActivity : AppCompatActivity() {
 
         val algorithms = OTABridge.COMPRESSION_ALGORITHMS.toTypedArray()
         val checkedIdx = algorithms.indexOf(selectedCompression).coerceAtLeast(0)
-        var chosen = selectedCompression
+
+        // Fixed-value dropdowns — every AutoCompleteTextView is
+        // inputType=none, so the only reachable values are the ones below;
+        // no free-text validation needed. Index 0 of each array is the
+        // previous hardcoded behavior (4096 / 0), labeled "(default)".
+        // Rust still guards the degenerate cases (block_size <= 0 → 4096,
+        // minor_version < 0 → 0) at the JNI boundary.
+        val blockSizeValues = intArrayOf(4096, 2048, 1024, 512, 8192, 16384, 65536)
+        val minorVersionValues = intArrayOf(0, 1, 2, 3, 4)
+        val blockSizeLabels = blockSizeValues.indices.map { i ->
+            if (i == 0) "${blockSizeValues[i]} (default)" else "${blockSizeValues[i]}"
+        }
+        val minorVersionLabels = minorVersionValues.indices.map { i ->
+            if (i == 0) "${minorVersionValues[i]} (default)" else "${minorVersionValues[i]}"
+        }
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_build_payload, null)
+        val dropdownCompression = dialogView.findViewById<android.widget.AutoCompleteTextView>(R.id.dropdownPayloadCompression)
+        val dropdownBlockSize = dialogView.findViewById<android.widget.AutoCompleteTextView>(R.id.dropdownPayloadBlockSize)
+        val dropdownMinorVersion = dialogView.findViewById<android.widget.AutoCompleteTextView>(R.id.dropdownPayloadMinorVersion)
+
+        var chosenCompression = algorithms[checkedIdx]
+        var chosenBlockSize = blockSizeValues[0]
+        var chosenMinorVersion = minorVersionValues[0]
+
+        dropdownCompression?.let { dd ->
+            dd.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, algorithms))
+            dd.setText(algorithms[checkedIdx], false)
+            dd.setOnItemClickListener { _, _, position, _ -> chosenCompression = algorithms[position] }
+        }
+        dropdownBlockSize?.let { dd ->
+            dd.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, blockSizeLabels))
+            dd.setText(blockSizeLabels[0], false)
+            dd.setOnItemClickListener { _, _, position, _ -> chosenBlockSize = blockSizeValues[position] }
+        }
+        dropdownMinorVersion?.let { dd ->
+            dd.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, minorVersionLabels))
+            dd.setText(minorVersionLabels[0], false)
+            dd.setOnItemClickListener { _, _, position, _ -> chosenMinorVersion = minorVersionValues[position] }
+        }
+
         MaterialAlertDialogBuilder(this)
-            .setTitle(getString(R.string.payload_compress_title))
-            .setSingleChoiceItems(algorithms, checkedIdx) { _, which -> chosen = algorithms[which] }
+            .setTitle(getString(R.string.payload_build_title))
+            .setView(dialogView)
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                buildPayloadBin(imageFiles.toMap(), chosen)
+                buildPayloadBin(imageFiles.toMap(), chosenCompression, chosenBlockSize, chosenMinorVersion)
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -2520,7 +2559,12 @@ class MainActivity : AppCompatActivity() {
      * sidecar, OTABridge polls it, and it surfaces in the split progress
      * bars, the log, and the foreground notification.
      */
-    private fun buildPayloadBin(images: Map<String, String>, compression: String) {
+    private fun buildPayloadBin(
+        images: Map<String, String>,
+        compression: String,
+        blockSize: Int,
+        minorVersion: Int
+    ) {
         // AUDIT-F5 pattern: capture on the UI thread BEFORE buildScope.
         val level = selectedCompressionLevel
         val effectiveLevel = if (level > 0) level
@@ -2574,7 +2618,8 @@ class MainActivity : AppCompatActivity() {
 
                 showLog(
                     "[*] Building payload.bin — ${images.size} partitions, " +
-                        "compression=$compression, level=$effectiveLevel, output=$outPath",
+                        "compression=$compression, level=$effectiveLevel, " +
+                        "block_size=$blockSize, minor_version=$minorVersion, output=$outPath",
                     LogLevel.INFO
                 )
 
@@ -2583,6 +2628,8 @@ class MainActivity : AppCompatActivity() {
                     compression = compression,
                     level = level,
                     outputPath = outPath,
+                    blockSize = blockSize,
+                    minorVersion = minorVersion,
                     onProgress = { progress ->
                         // Per-partition bar + mark previous bars complete
                         // (same consumer as the extract batch loop).
@@ -3231,33 +3278,6 @@ class MainActivity : AppCompatActivity() {
         // Show/hide empty state hint
         val emptyHint = findViewById<View>(R.id.textEmptyHint)
         emptyHint?.visibility = if (imageFiles.isEmpty()) View.VISIBLE else View.GONE
-
-        // Update Build button enabled state
-        updateBuildButtonState()
-    }
-
-    /**
-     * Disable the Build OTA Now button when required fields are empty.
-     * Required: at least one partition image AND a device codename must be set.
-     * The codename is mandatory for the flasher script's device verification
-     * step in custom recovery (TWRP/OrangeFox).
-     */
-    private fun updateBuildButtonState() {
-        val btnExecute = findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.buttonExecute)
-        val device = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editTextDevice)
-            ?.text?.toString()?.trim() ?: ""
-        // Don't allow Build if any partition is still loading (placeholder)
-        val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
-        val canBuild = imageFiles.isNotEmpty() && !anyLoading && device.isNotEmpty() && !isBuilding
-        // Hide the FAB entirely when requirements aren't met — disabled FAB
-        // takes up screen space and looks like dead UI. Use ExtendedFAB's
-        // built-in hide()/show() which animates and adjusts CoordinatorLayout
-        // anchor behavior.
-        if (canBuild) {
-            btnExecute?.show()
-        } else {
-            btnExecute?.hide()
-        }
     }
 
     private fun updateOutputPreview() {
@@ -3498,7 +3518,6 @@ class MainActivity : AppCompatActivity() {
         activityRef = null
         // IMPL-008: Invalidate cached view references — views may be
         // detached/invalid after pause; re-resolve on next onResume.
-        cachedBtnExecute = null
         cachedBtnAddImages = null
         cachedBtnRemoveAll = null
         cachedBtnBrowseOutput = null
@@ -3638,9 +3657,6 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             // IMPL-013: Cached views are eagerly resolved in cacheViews()
             // (called from onCreate after setContentView). No lazy resolution needed.
-            cachedBtnExecute?.text = if (executing) "BUILDING OTA..." else getString(R.string.button_repack)
-            cachedBtnExecute?.isEnabled = !executing
-            updateBuildButtonState()
             if (executing) {
                 cachedProgressContainer?.visibility = View.VISIBLE
             } else {

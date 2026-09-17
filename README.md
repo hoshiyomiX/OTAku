@@ -9,7 +9,7 @@ A **non-root** Android app for building flashable OTA ZIP packages from partitio
 ## Features
 
 - **DD-mode flashable ZIP generation** — Build otaku-format flashable ZIPs that work with TWRP/OrangeFox recovery
-- **Payload.bin toolchain (prototype)** — Parse AOSP OTA `payload.bin` files, extract partition images on-device (sidecar progress + WakeLock for long runs), build `payload.bin` from loaded images, and self-verify the output
+- **Payload.bin toolchain (prototype)** — Parse AOSP OTA `payload.bin` files, extract partition images on-device (sidecar progress + WakeLock for long runs), build `payload.bin` from loaded images (compression, manifest block size, and payload minor version configurable in the build dialog), and self-verify the output
 - **Multiple compression algorithms** — zstd, xz, bzip2, gzip, lz4 (all statically compiled into the native library)
 - **Per-partition progress tracking** — Real-time compression progress for each partition via a JSON sidecar file
 - **Device safety check** — Prevents flashing on wrong device models (comma-separated codename list supported)
