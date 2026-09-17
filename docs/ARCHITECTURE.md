@@ -37,14 +37,11 @@
 │  │                                                                │  │
 │  │  NativeBridge.kt (Kotlin object — JNI wrapper)                 │  │
 │  │  ├── isLoaded / loadError                                      │  │
+│  │  ├── getVersion() → String                                     │  │
 │  │  ├── checkDeps() → DepCheckResult                              │  │
-│  │  ├── readPayload(path) → PayloadResult                         │  │
-│  │  ├── extractPartition(payload, name, output) → ExtractResult   │  │
-│  │  ├── writePayload(images, compress, output, ...) → WritePayloadResult │  │
-│  │  ├── verifyPayload(path) → VerifyResult                        │  │
-│  │  ├── compress(input, output, alg, level) → CompressResult      │  │
-│  │  ├── decompress(input, output, alg) → CompressResult           │  │
-│  │  └── buildDd(images, compress, level, output, device, skip) → DdBuildResult │  │
+│  │  ├── buildDd(images, compress, level, output, device, skip) → DdBuildResult │  │
+│  │  ├── detectDeviceCodename() → DeviceCodenameResult             │  │
+│  │  └── scanDevicePartitions() → DevicePartitionsResult           │  │
 │  └────────────────────────┬───────────────────────────────────────┘  │
 │                           │ JNI (System.loadLibrary("otaku_native")) │
 │  ┌────────────────────────▼───────────────────────────────────────┐  │
@@ -52,14 +49,14 @@
 │  │              libotaku_native.so                                │  │
 │  │                                                                │  │
 │  │  cargo-ndk compiled for arm64-v8a + armeabi-v7a                │  │
-│  │  Statically links: flate2, bzip2, xz2, brotli, sha2, prost,    │  │
+│  │  Statically links: flate2, bzip2, xz2, zstd, lz4, sha2, prost, │  │
 │  │                    serde, serde_json, zip, chrono, log          │  │
 │  │                                                                │  │
-│  │  src/lib.rs        — 8 JNI entry points (JSON in/out)          │  │
+│  │  src/lib.rs        — 5 JNI entry points (JSON in/out)          │  │
 │  │  src/dd.rs         — DD-mode flashable ZIP generator           │  │
 │  │  src/payload.rs    — AOSP payload.bin read/write               │  │
 │  │  src/proto.rs      — Hand-written prost structs                │  │
-│  │  src/compression.rs — gzip/bz2/xz/brotli + SHA-256             │  │
+│  │  src/compression.rs — gzip/bz2/xz/zstd/lz4 + SHA-256           │  │
 │  └────────────────────────────────────────────────────────────────┘  │
 │                                                                      │
 │  ┌────────────────────────────────────────────────────────────────┐  │
@@ -367,7 +364,7 @@ Adding a name is safe — `is_dynamic_partition()` returns false for partitions 
 | Operation | Mechanism | Storage Location |
 |-----------|-----------|-----------------|
 | Select partition images | SAF file picker | App storage / SAF |
-| Compress partition images | Rust native library (flate2, bzip2, xz2, brotli) | App storage / SAF |
+| Compress partition images | Rust native library (flate2, bzip2, xz2, zstd/lz4) | App storage / SAF |
 | Generate flashable ZIP | Rust `zip` crate (ZIP64, Stored) | App storage / SAF |
 | Stream progress to UI | JSON sidecar file polling | App storage |
 | Verify post-flash integrity | `sha256sum` in flasher script | N/A (recovery-side) |

@@ -698,9 +698,13 @@ class MainActivity : AppCompatActivity() {
 
             // Check native (Rust) backend
             if (NativeBridge.isLoaded) {
-                val nativeVersion = NativeBridge.getVersion()
+                // AUDIT-T9 (cosmetic #4): keep every JNI call off the Main
+                // thread for a uniform discipline, even though these two are
+                // trivial in-memory calls (version string + static JSON).
+                val (nativeVersion, depCheck) = withContext(Dispatchers.IO) {
+                    NativeBridge.getVersion() to NativeBridge.checkDeps()
+                }
                 showLog("Native backend: $nativeVersion", LogLevel.INFO)
-                val depCheck = NativeBridge.checkDeps()
                 val available = depCheck.available.joinToString(", ")
                 showLog("Native compression: $available", LogLevel.INFO)
                 cachedDepCheck = depCheck
@@ -725,6 +729,12 @@ class MainActivity : AppCompatActivity() {
      * of wiping the entire log. The banner is reconstructed from the live
      * NativeBridge state so the version + compression list stays accurate
      * even if the user clears logs after a native reload.
+     *
+     * Threading: getVersion()/checkDeps() here are trivial in-memory JNI
+     * calls (checkDeps prefers the cached DepCheckResult), so running them
+     * on the caller's Main thread is safe by design — documented rather
+     * than wrapped in Dispatchers.IO to keep the Clear Log handler
+     * synchronous.
      *
      * Format:
      *   Initializing OTAku...
