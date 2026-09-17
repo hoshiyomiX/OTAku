@@ -2241,7 +2241,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            val payloadPath = path
+            // Kotlin flow analysis won't smart-cast the `var` (assigned
+            // inside a nested try) — elvis-bail keeps this a non-null
+            // String for both uses below without a `!!`.
+            val payloadPath = path ?: return@launch
             val result = OTABridge.inspectPayload(payloadPath) { line ->
                 showLog(line, LogLevel.PLAIN)
             }
