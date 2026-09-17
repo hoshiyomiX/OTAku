@@ -617,7 +617,11 @@
                 android:layout_height="match_parent"
                 android:orientation="vertical">
 
-                <!-- Log header bar — clickable + swipeable to toggle expand/collapse -->
+                <!-- Log header bar — clickable + swipeable to toggle expand/collapse.
+                     T18: paddingVertical 4dp keeps the collapsed pill at 56dp
+                     (48dp arrow + 2×4dp) — exact M3 parity with the 56dp
+                     Build FAB across from it. Was 10dp → 68dp pill that
+                     visually dwarfed the FAB. -->
                 <LinearLayout
                     android:id="@+id/logHeaderBar"
                     android:layout_width="match_parent"
@@ -625,7 +629,7 @@
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="24dp"
-                    android:paddingVertical="10dp"
+                    android:paddingVertical="4dp"
                     android:clickable="true"
                     android:focusable="true"
                     android:background="?attr/selectableItemBackgroundBorderless">
@@ -732,12 +736,16 @@
         <!-- build inputs are ready: images loaded + codename set,  -->
         <!-- none still loading, nothing executing. Visibility is   -->
         <!-- driven by updateBuildFab() in MainActivity (T17).      -->
+        <!-- T18: explicit 56dp height (M3 Extended FAB canonical   -->
+        <!-- size — deterministic regardless of style resolution);  -->
+        <!-- visibility is hard-set there (no show()/hide() state   -->
+        <!-- machine — fatal-bug fix for the stranded FAB).         -->
         <!-- ═══════════════════════════════════════════════════ -->
 
         <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
             android:id="@+id/fabBuild"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_height="56dp"
             android:layout_gravity="bottom|end"
             android:layout_margin="16dp"
             android:visibility="gone"

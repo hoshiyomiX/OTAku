@@ -1416,7 +1416,7 @@ class MainActivity : AppCompatActivity() {
                 buttonCopyLog?.visibility = cpWas
                 buttonClearLog?.visibility = clWas
             }
-            if (pillHeight <= 0) pillHeight = (52 * density).toInt()  // fallback (old header estimate)
+            if (pillHeight <= 0) pillHeight = (56 * density).toInt()  // fallback — 56dp M3 pill/FAB parity (T18)
             if (pillWidth <= 0) pillWidth = (160 * density).toInt()   // fallback
         }
 
@@ -1604,7 +1604,14 @@ class MainActivity : AppCompatActivity() {
         var lastMoveY = 0f
         var dragVelocity = 0f  // px/sec, + = expand direction (up)
 
-        logHeader?.setOnTouchListener { _, event ->
+        // T18 — the gesture handler is a SHARED surface: attached to both
+        // the header bar and the arrow icon. The arrow previously relied on
+        // touch fall-through (isClickable=false), which still left icon-area
+        // taps and drags dead — an XML clickable/focusable/ripple child can
+        // blur the dispatch chain. An explicit handler on the child makes
+        // tap AND drag deterministic on both surfaces; the handler reads
+        // event.rawX/rawY (screen-absolute), so one closure serves both.
+        val logGestureHandler = android.view.View.OnTouchListener { _, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     springAnim?.cancel()
@@ -1705,6 +1712,8 @@ class MainActivity : AppCompatActivity() {
                 else -> false
             }
         }
+        logHeader?.setOnTouchListener(logGestureHandler)
+        toggleBtn?.setOnTouchListener(logGestureHandler)
 
         // Keyboard/accessibility path: activation via performClick()
         // (TalkBack double-tap, keyboard focus + Enter) routes here even
@@ -1713,10 +1722,16 @@ class MainActivity : AppCompatActivity() {
             springTo(if (morphProgress > 0.5f) 0f else 1f)
         }
 
-        // The 48dp arrow is part of the drag/tap surface now — make it
-        // non-clickable so drags starting on the icon reach the header
-        // handler (previously drags starting on the icon were swallowed).
-        toggleBtn?.isClickable = false
+        // T18 — arrow as full gesture + a11y surface: the shared handler
+        // above covers physical taps and drags on the icon (both toggle
+        // states); clickable stays TRUE so TalkBack/keyboard can focus
+        // and activate it. performClick routes to the listener below —
+        // physical taps never double-fire because the touch handler
+        // consumes them first.
+        toggleBtn?.isClickable = true
+        toggleBtn?.setOnClickListener {
+            springTo(if (morphProgress > 0.5f) 0f else 1f)
+        }
 
         // ── Init (no animation) — survives Activity recreation ──
         measurePillGeometry()
@@ -3177,19 +3192,40 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * T17 — floating Build FAB visibility. The FAB sits at bottom-end,
-     * across the collapsed log pill (bottom-start). It appears only when
-     * the build inputs are ready: at least one partition image loaded
-     * (none still in the "loading:" placeholder state), a device codename
-     * present, and no native operation executing. ExtendedFAB.show()/
-     * hide() animate the transition; XML default is visibility=gone.
+     * T18 — floating Build FAB visibility (deterministic). The FAB sits at
+     * bottom-end, across the collapsed log pill (bottom-start). It appears
+     * only when the build inputs are ready: at least one partition image
+     * loaded (none still in the "loading:" placeholder state), a device
+     * codename present, and no native operation executing.
+     *
+     * FATAL-BUG FIX (reported: FAB stayed invisible until a theme-switch
+     * recreate() refreshed the view): ExtendedFAB.show()/hide() run an
+     * internal animation state machine that can strand the view — a hide()
+     * re-armed on an already-hidden FAB, or a show() whose scale/alpha
+     * animation never ran, leaves visibility=VISIBLE with alpha/scale 0.
+     * A fresh post-recreate view starts with a clean machine, which is
+     * why the theme toggle appeared to "fix" it. Visibility is now
+     * hard-set against an identity alpha/scale baseline: idempotent,
+     * self-healing (any stranded state is corrected on the next call),
+     * and no library animation state is ever armed. Transitions are
+     * instant — this screen's M3 motion identity lives in the log-card
+     * morph, not in the FAB.
      */
     private fun updateBuildFab() {
         val fab = cachedFabBuild ?: return
         val device = (cachedEditDevice as? android.widget.EditText)?.text?.toString()?.trim() ?: ""
         val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
         val canBuild = imageFiles.isNotEmpty() && !anyLoading && device.isNotEmpty() && !isExecuting
-        if (canBuild) fab.show() else fab.hide()
+        if (canBuild) {
+            if (fab.visibility != View.VISIBLE || fab.alpha < 1f || fab.scaleX < 1f || fab.scaleY < 1f) {
+                fab.alpha = 1f
+                fab.scaleX = 1f
+                fab.scaleY = 1f
+                fab.visibility = View.VISIBLE
+            }
+        } else if (fab.visibility != View.GONE) {
+            fab.visibility = View.GONE
+        }
     }
 
     private fun updateImageListUI() {
