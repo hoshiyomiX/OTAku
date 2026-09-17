@@ -23,10 +23,11 @@ A **non-root** Android app for building flashable OTA ZIP packages from partitio
 | Algorithm | Ratio | Speed | Notes |
 |-----------|-------|-------|-------|
 | `none`    | 100%  | Fastest | No compression |
+| `lz4`     | ~70%  | Very fast | Speed-first, uses `lz4_flex` (frame format) |
 | `gzip`    | ~60%  | Fast    | Best balance, uses `flate2`/`miniz_oxide` |
-| `bzip2`   | ~50%  | Medium  | Uses `bzip2` crate |
-| `xz`      | ~45%  | Slow    | Smallest output, uses `xz2`/`liblzma` |
-| `brotli`  | ~40%  | Slow    | Best ratio, pure-Rust `brotli` crate |
+| `bzip2`   | ~50%  | Medium  | Uses `bzip2` crate (pure-Rust `libbz2-rs-sys`) |
+| `xz`      | ~45%  | Slow    | Uses `xz2`/`liblzma` |
+| `zstd`    | ~35%  | Fast    | Best ratio, fast decompression, uses `zstd`/`libzstd` |
 
 All five algorithms are **always available** — they are statically compiled into `libotaku_native.so`. There are no runtime dependency checks.
 
@@ -62,14 +63,14 @@ All five algorithms are **always available** — they are statically compiled in
 │  ┌───────────────────────▼───────────────────────────┐  │
 │  │     libotaku_native.so (Rust cdylib)               │  │
 │  │  cargo-ndk compiled for arm64-v8a + armeabi-v7a    │  │
-│  │  Statically links: flate2, bzip2, xz2, brotli,     │  │
+│  │  Statically links: flate2, bzip2, xz2, lz4, zstd,  │  │
 │  │                    sha2, prost, zip, chrono         │  │
 │  │  Modules:                                          │  │
-│  │  ├─ lib.rs     JNI entry points (8 external fns)   │  │
+│  │  ├─ lib.rs     JNI entry points (5 external fns)   │  │
 │  │  ├─ dd.rs      DD-mode flashable ZIP generator     │  │
 │  │  ├─ payload.rs AOSP payload.bin read/write         │  │
 │  │  ├─ proto.rs   Hand-written prost structs          │  │
-│  │  └─ compression.rs  gzip/bz2/xz/brotli + SHA-256   │  │
+│  │  └─ compression.rs  gzip/bz2/xz/lz4/zstd + SHA-256 │  │
 │  └───────────────────────────────────────────────────┘  │
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
@@ -94,11 +95,13 @@ All five algorithms are **always available** — they are statically compiled in
 |--------|------|-------|-------------|
 | 0      | 4 B  | magic | `DDBU` (0x44 0x44 0x42 0x55) |
 | 4      | 2 B  | version | u16 LE, currently `1` |
-| 6      | 2 B  | compress_id | u16 LE: 0=none, 1=gzip, 2=bzip2, 3=xz, 4=brotli |
+| 6      | 2 B  | compress_id | u16 LE: 0=none, 1=gzip, 2=bzip2, 3=xz, 5=lz4, 6=zstd |
 | 8      | 2 B  | num_parts | u16 LE |
 | 10     | 2 B  | header_size | u16 LE, always `4096` |
 | 12     | 4084 B | padding | zero-pad to 4096 |
 | 4096   | …    | data | each partition compressed, 4096-aligned |
+
+> Compress ID 4 is reserved — a legacy algorithm removed from the build. The flasher script treats it as uncompressed passthrough.
 
 ### Progress Reporting Mechanism
 
@@ -211,11 +214,11 @@ OTAku/
 │   ├── proto/
 │   │   └── update_metadata.proto     # AOSP payload.bin protobuf schema
 │   └── src/
-│       ├── lib.rs                    # JNI entry points (8 external fns)
+│       ├── lib.rs                    # JNI entry points (5 external fns)
 │       ├── dd.rs                     # DD-mode flashable ZIP generator
 │       ├── payload.rs                # AOSP payload.bin read/write
 │       ├── proto.rs                  # Hand-written prost structs
-│       └── compression.rs            # gzip/bz2/xz/brotli + SHA-256
+│       └── compression.rs            # gzip/bz2/xz/lz4/zstd + SHA-256
 ├── android/                          # Android project
 │   ├── settings.gradle.kts           # Plugin management + project includes
 │   ├── build.gradle.kts              # Root build file
