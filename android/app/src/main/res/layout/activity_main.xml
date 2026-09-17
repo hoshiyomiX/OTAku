@@ -20,6 +20,8 @@
     │   gravity=bottom — morphable        │
     │   pill ↔ card, floats ABOVE the     │
     │   settings scroll (never in flow)   │
+    │ + FAB "Build OTA Now" (bottom-end,  │
+    │   shows when inputs are filled)     │
     └────────────────────────────────────────┘
 -->
 <androidx.coordinatorlayout.widget.CoordinatorLayout
@@ -722,5 +724,26 @@
             </LinearLayout>
 
         </com.google.android.material.card.MaterialCardView>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- Floating Build FAB — bottom-END, across the log pill  -->
+        <!-- (bottom-START). Persistent overlay (no scroll-away    -->
+        <!-- behavior — parity with the log pill): shows ONLY when  -->
+        <!-- build inputs are ready: images loaded + codename set,  -->
+        <!-- none still loading, nothing executing. Visibility is   -->
+        <!-- driven by updateBuildFab() in MainActivity (T17).      -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+            android:id="@+id/fabBuild"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="16dp"
+            android:visibility="gone"
+            android:text="@string/button_build_now"
+            android:contentDescription="@string/button_build_now"
+            app:icon="@android:drawable/ic_media_play"
+            app:cornerRadius="16dp" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

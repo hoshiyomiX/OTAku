@@ -684,6 +684,8 @@ class MainActivity : AppCompatActivity() {
         updateOutputPreview()  // Show default filename preview immediately
 
         requestStoragePermissions()
+        // T17: initial floating Build FAB state (hidden until inputs ready)
+        updateBuildFab()
         handleIncomingIntent(intent)
     }
 
@@ -1098,6 +1100,7 @@ class MainActivity : AppCompatActivity() {
                         editDevice?.setText(result.codename)
                         prefs.edit { putString("device", result.codename) }
                         updateOutputPreview()
+                        updateBuildFab()
                         showLog("Auto-detected device: ${result.codename}")
                         if (result.vendorDevice.isNotEmpty() && result.board.isNotEmpty()
                             && result.vendorDevice != result.board) {
@@ -1120,6 +1123,7 @@ class MainActivity : AppCompatActivity() {
                 val text = s?.toString()?.trim() ?: ""
                 prefs.edit { putString("device", text) }
                 updateOutputPreview()
+                updateBuildFab()
             }
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -1502,8 +1506,11 @@ class MainActivity : AppCompatActivity() {
         fun updateSettingsBottomPadding(cardHeightPx: Int) {
             val sv = scrollViewSettings ?: return
             val lp = logCard?.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
+            // Floor at the floating Build FAB zone (56dp FAB + 16dp
+            // margin): whichever overlay is taller wins (expanded card
+            // vs the FAB row at bottom-end).
             sv.setPadding(sv.paddingLeft, sv.paddingTop, sv.paddingRight,
-                cardHeightPx + (lp?.bottomMargin ?: 0))
+                (cardHeightPx + (lp?.bottomMargin ?: 0)).coerceAtLeast((72 * density).toInt()))
         }
 
         /** Snap to the canonical EXPANDED params (no animation). */
@@ -1928,6 +1935,7 @@ class MainActivity : AppCompatActivity() {
     private var cachedBtnAutoDetect: View? = null
     private var cachedEditFilename: View? = null
     private var cachedProgressContainer: android.widget.LinearLayout? = null
+    private var cachedFabBuild: com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton? = null
     // IMPL-012: Cached bar_row reference — avoids findViewWithTag() on every
     // onProgress callback (500ms poll interval × multi-minute build = thousands
     // of calls). Resolved lazily in the onProgress UI update block.
@@ -1953,6 +1961,9 @@ class MainActivity : AppCompatActivity() {
         // Also cache log views (previously done in a separate cacheLogViews())
         cachedLogView = findViewById(R.id.textViewLog)
         cachedScrollView = findViewById(R.id.scrollViewLog)
+        // T17 — floating Build FAB (bottom-end, across the log pill)
+        cachedFabBuild = findViewById(R.id.fabBuild)
+        cachedFabBuild?.setOnClickListener { onBuildClicked() }
     }
 
     private fun handleImageFilesSelected(uris: List<Uri>) {
@@ -3165,9 +3176,28 @@ class MainActivity : AppCompatActivity() {
     //  UI Updates
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * T17 — floating Build FAB visibility. The FAB sits at bottom-end,
+     * across the collapsed log pill (bottom-start). It appears only when
+     * the build inputs are ready: at least one partition image loaded
+     * (none still in the "loading:" placeholder state), a device codename
+     * present, and no native operation executing. ExtendedFAB.show()/
+     * hide() animate the transition; XML default is visibility=gone.
+     */
+    private fun updateBuildFab() {
+        val fab = cachedFabBuild ?: return
+        val device = (cachedEditDevice as? android.widget.EditText)?.text?.toString()?.trim() ?: ""
+        val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
+        val canBuild = imageFiles.isNotEmpty() && !anyLoading && device.isNotEmpty() && !isExecuting
+        if (canBuild) fab.show() else fab.hide()
+    }
+
     private fun updateImageListUI() {
         val container = findViewById<android.widget.LinearLayout>(R.id.containerImageList)
         val removeButton = findViewById<View>(R.id.buttonRemoveAll)
+        // T17: every imageFiles mutation funnels through here — refresh
+        // the floating Build FAB alongside the list UI.
+        updateBuildFab()
 
         container?.removeAllViews()
 
@@ -3703,6 +3733,8 @@ class MainActivity : AppCompatActivity() {
             cachedEditDevice?.isEnabled = !executing
             cachedBtnAutoDetect?.isEnabled = !executing
             cachedEditFilename?.isEnabled = !executing
+            // T17: FAB hides while executing, returns when inputs still valid
+            updateBuildFab()
         }
     }
 
