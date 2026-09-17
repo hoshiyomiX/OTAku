@@ -80,7 +80,6 @@
 
         <!-- Material components -->
         <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
-        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
         <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
         <!-- Toolbar icon tinting -->
@@ -134,7 +133,6 @@
         <item name="android:textColorSecondary">@color/suisei_light_onSurfaceVariant</item>
 
         <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
-        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
         <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
         <item name="colorControlNormal">@color/suisei_light_onSurface</item>
@@ -199,7 +197,6 @@
 
         <!-- Material components — was MISSING, caused wrong toolbar/chip/button styles -->
         <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
-        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
         <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
         <!-- Toolbar icon tinting -->
@@ -216,20 +213,6 @@
         <item name="subtitleTextColor">?attr/colorOnSurfaceVariant</item>
         <item name="android:background">?attr/colorSurface</item>
         <item name="elevation">2dp</item>
-    </style>
-
-    <!-- Chip style -->
-    <!-- IMPL-007 (theme toggle fix): Chip style uses theme attributes for
-         background color so chips adapt to both teal and Suisei Blue themes.
-         Previous: hardcoded @color/chip_default_bg (always gray, didn't
-         match Suisei Blue palette). Now: @color/chip_background which is
-         a ColorStateList resolving colorSurfaceVariant (default) and
-         colorPrimaryContainer (checked) per active theme. -->
-    <style name="Widget.OTAku.Chip" parent="Widget.Material3.Chip.Filter">
-        <item name="chipBackgroundColor">@color/chip_background</item>
-        <item name="chipStrokeColor">?attr/colorOutlineVariant</item>
-        <item name="chipStrokeWidth">1dp</item>
-        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
     </style>
 
     <!-- Primary button style -->

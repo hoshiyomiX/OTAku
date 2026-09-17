@@ -10,10 +10,10 @@
         app:showAsAction="always"
         app:tint="?attr/colorOnSurface" />
 
-    <!-- Build OTA ZIP — moved here from the removed ExtendedFAB (the
-         floating button covered a strip of the main settings UI and
-         forced 88dp of dead FAB-clearance space at the bottom).
-         Validation lives in onBuildClicked(): in-progress guard, native
+    <!-- Build OTA ZIP — full-fat entry point (overflow). The contextual
+         shortcut is the floating Build FAB (T17: bottom-end, visible only
+         when inputs are ready); this menu item is always available and
+         validates in onBuildClicked(): in-progress guard, native
          availability, device codename, compression availability. -->
     <item
         android:id="@+id/action_build_ota"

@@ -54,7 +54,6 @@
 
         <!-- Material components -->
         <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
-        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
         <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
         <!-- Toolbar icon tinting -->
@@ -102,7 +101,6 @@
         <item name="android:textColorSecondary">@color/suisei_dark_onSurfaceVariant</item>
 
         <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
-        <item name="chipStyle">@style/Widget.OTAku.Chip</item>
         <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
         <item name="colorControlNormal">@color/suisei_dark_onSurface</item>
