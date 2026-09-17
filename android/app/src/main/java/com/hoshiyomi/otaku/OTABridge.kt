@@ -48,8 +48,13 @@ data class ProgressUpdate(
 /**
  * OTABridge — Kotlin singleton that bridges the Android UI to the Rust native backend.
  *
- * This app is DD-mode only: generates otaku-format flashable ZIPs
- * from partition images (.img) for TWRP/OrangeFox recovery flashing.
+ * Primary mode: DD-mode — generates otaku-format flashable ZIPs from partition
+ * images (.img) for TWRP/OrangeFox recovery flashing.
+ *
+ * Prototype: payload.bin inspect + extract — reads an AOSP OTA payload.bin
+ * (e.g. from a full OTA ZIP) and extracts partition images from it. Extraction
+ * targets the images at the DD-mode input stage: extract → verify → (optionally)
+ * re-pack into a flashable ZIP.
  *
  * Supported compression: zstd, xz, bzip2, gzip, lz4  ("none" and "brotli" excluded from user-facing options)
  *
@@ -330,6 +335,87 @@ object OTABridge {
     fun buildOutputFileName(device: String = "generic"): String {
         val safeDevice = device.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").lowercase()
         return "flashable_${safeDevice}.zip"
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Payload.bin inspect + extract (prototype)
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Inspect an AOSP payload.bin — parse header + manifest, list partitions.
+     *
+     * Read-only: parses the CrAU header and protobuf manifest on
+     * Dispatchers.IO and returns the partition list. Output lines are
+     * streamed to onOutputLine for the UI log (same pattern as dd()).
+     *
+     * @param path Absolute path to the payload.bin file
+     * @param onOutputLine Optional log-line callback
+     * @return PayloadInspectResult (null only when the native backend
+     *         is not loaded — the error is already logged)
+     */
+    suspend fun inspectPayload(
+        path: String,
+        onOutputLine: ((String) -> Unit)? = null
+    ): NativeBridge.PayloadInspectResult? {
+        if (!NativeBridge.isLoaded) {
+            val msg = "Native backend not loaded: ${NativeBridge.loadError}"
+            Log.e(TAG, msg)
+            onOutputLine?.invoke("[!] $msg")
+            return null
+        }
+        return withContext(Dispatchers.IO) {
+            onOutputLine?.invoke("[*] Inspecting payload: $path")
+            val result = NativeBridge.readPayload(path)
+            if (result.success) {
+                onOutputLine?.invoke(
+                    "[+] Payload OK — v${result.payloadVersion}, " +
+                        "${result.partitions.size} partitions, " +
+                        "block=${result.blockSize}, file=${formatSize(result.fileSize)}"
+                )
+            } else {
+                onOutputLine?.invoke("[!] Inspect failed: ${result.error}")
+            }
+            result
+        }
+    }
+
+    /**
+     * Extract one partition image from a payload.bin.
+     *
+     * Streams the decompressed image to outputPath on Dispatchers.IO
+     * (~8 MB RAM regardless of partition size). Callers drive the loop
+     * over partitions and aggregate results — this function handles
+     * exactly one partition per call.
+     *
+     * PROTOTYPE NOTE: unlike dd(), there is no .progress sidecar and no
+     * OTAService WakeLock yet — for large payloads keep the app in the
+     * foreground while extracting.
+     *
+     * @param payloadPath Absolute path to the payload.bin file
+     * @param partitionName Partition to extract (from inspectPayload)
+     * @param outputPath Destination .img file path
+     * @param onOutputLine Optional log-line callback
+     * @return PayloadExtractResult with size + duration, or error
+     */
+    suspend fun extractPayloadPartition(
+        payloadPath: String,
+        partitionName: String,
+        outputPath: String,
+        onOutputLine: ((String) -> Unit)? = null
+    ): NativeBridge.PayloadExtractResult {
+        return withContext(Dispatchers.IO) {
+            onOutputLine?.invoke("[*] Extracting '$partitionName' …")
+            val result = NativeBridge.extractPartition(payloadPath, partitionName, outputPath)
+            if (result.success) {
+                onOutputLine?.invoke(
+                    "[+] '$partitionName' → ${result.outputPath} " +
+                        "(${result.humanSize}, ${result.durationMs} ms)"
+                )
+            } else {
+                onOutputLine?.invoke("[!] Extract '$partitionName' failed: ${result.error}")
+            }
+            result
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════

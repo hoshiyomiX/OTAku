@@ -226,6 +226,109 @@ object NativeBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  Payload.bin inspect + extract (prototype)
+    //  AOSP OTA payload.bin — Rust implementation in rust/src/payload.rs
+    //  (CrAU magic + protobuf manifest), JSON in/out like the other bridges.
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Read and parse an AOSP payload.bin file.
+     *
+     * Parses the CrAU header + DeltaArchiveManifest protobuf and returns
+     * the partition list (name, size, operation count) plus file metadata.
+     * Read-only — never writes anything.
+     *
+     * @param path Absolute path to the payload.bin file
+     * @return PayloadInspectResult with partitions and header info, or error
+     */
+    fun readPayload(path: String): PayloadInspectResult {
+        if (!isLoaded) {
+            return PayloadInspectResult.error("Native library not loaded: $loadError")
+        }
+        return try {
+            parsePayloadInspectResult(nativeReadPayload(path))
+        } catch (e: Exception) {
+            Log.e(TAG, "readPayload failed: ${e.message}")
+            PayloadInspectResult.error("Native read failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Extract and decompress one partition from a payload.bin file.
+     *
+     * Streams the decompressed image to outputPath (~8 MB RAM regardless
+     * of partition size — never holds the full image in memory). On error
+     * the partial output file is removed by the native layer.
+     *
+     * @param payloadPath Absolute path to the payload.bin file
+     * @param partitionName Partition to extract (from readPayload list)
+     * @param outputPath Destination .img file path
+     * @return PayloadExtractResult with size + duration, or error
+     */
+    fun extractPartition(
+        payloadPath: String,
+        partitionName: String,
+        outputPath: String
+    ): PayloadExtractResult {
+        if (!isLoaded) {
+            return PayloadExtractResult.error("Native library not loaded: $loadError")
+        }
+        return try {
+            parsePayloadExtractResult(
+                nativeExtractPartition(payloadPath, partitionName, outputPath)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "extractPartition failed: ${e.message}")
+            PayloadExtractResult.error("Native extract failed: ${e.message}")
+        }
+    }
+
+    /** One partition entry from a payload.bin manifest. */
+    data class PayloadPartitionInfo(
+        val name: String,
+        /** Decompressed image size in bytes (0 if manifest lacks new_partition_info). */
+        val sizeBytes: Long,
+        /** Number of install operations for this partition. */
+        val opCount: Int
+    )
+
+    /** Result of parsing a payload.bin (readPayload). */
+    data class PayloadInspectResult(
+        val success: Boolean,
+        /** payload.bin format version (2 for modern AOSP). */
+        val payloadVersion: Long = 0L,
+        val manifestLen: Long = 0L,
+        val minorVersion: Int = 0,
+        /** Manifest block size in bytes (typically 4096). */
+        val blockSize: Long = 0L,
+        /** Absolute offset where partition data blobs start. */
+        val dataOffset: Long = 0L,
+        val fileSize: Long = 0L,
+        val partitions: List<PayloadPartitionInfo> = emptyList(),
+        val nativeVersion: String = "unknown",
+        val error: String? = null
+    ) {
+        companion object {
+            fun error(msg: String) = PayloadInspectResult(success = false, error = msg)
+        }
+    }
+
+    /** Result of extracting one partition (extractPartition). */
+    data class PayloadExtractResult(
+        val success: Boolean,
+        val partition: String = "",
+        val outputPath: String? = null,
+        val fileSize: Long = 0L,
+        val humanSize: String = "",
+        val durationMs: Long = 0L,
+        val error: String? = null
+    ) {
+        companion object {
+            fun error(msg: String) = PayloadExtractResult(success = false, error = msg)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  Result data classes
     // ═══════════════════════════════════════════════════════════════
 
@@ -355,6 +458,68 @@ object NativeBridge {
         )
     }
 
+    private fun parsePayloadInspectResult(jsonStr: String): PayloadInspectResult {
+        val json = JSONObject(jsonStr)
+        if (!json.optBoolean("success", false)) {
+            return PayloadInspectResult(
+                success = false,
+                error = if (json.has("error") && !json.isNull("error")) {
+                    json.optString("error")
+                } else "Unknown error"
+            )
+        }
+        val header = json.optJSONObject("header")
+        val manifest = json.optJSONObject("manifest")
+        val partitions = mutableListOf<PayloadPartitionInfo>()
+        manifest?.optJSONArray("partitions")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val p = arr.optJSONObject(i) ?: continue
+                val name = p.optString("partition_name", "")
+                if (name.isEmpty()) continue
+                val size = p.optJSONObject("new_partition_info")
+                    ?.optLong("partition_size", 0L) ?: 0L
+                val ops = p.optJSONArray("install_operations")?.length() ?: 0
+                partitions.add(PayloadPartitionInfo(name, size, ops))
+            }
+        }
+        return PayloadInspectResult(
+            success = true,
+            payloadVersion = header?.optLong("version", 0L) ?: 0L,
+            manifestLen = header?.optLong("manifest_len", 0L) ?: 0L,
+            minorVersion = header?.optInt("minor_version", 0) ?: 0,
+            blockSize = manifest?.optLong("block_size", 0L) ?: 0L,
+            dataOffset = json.optLong("data_offset", 0L),
+            fileSize = json.optLong("file_size", 0L),
+            partitions = partitions,
+            nativeVersion = json.optString("native_version", "unknown")
+        )
+    }
+
+    private fun parsePayloadExtractResult(jsonStr: String): PayloadExtractResult {
+        val json = JSONObject(jsonStr)
+        return if (json.optBoolean("success", false)) {
+            PayloadExtractResult(
+                success = true,
+                partition = json.optString("partition", ""),
+                outputPath = if (json.has("output_path") && !json.isNull("output_path")) {
+                    json.optString("output_path")
+                } else null,
+                fileSize = json.optLong("file_size", 0L),
+                humanSize = json.optString("human_size", ""),
+                durationMs = json.optLong("duration_ms", 0L)
+            )
+        } else {
+            PayloadExtractResult(
+                success = false,
+                partition = json.optString("partition", ""),
+                error = if (json.has("error") && !json.isNull("error")) {
+                    json.optString("error")
+                } else "Unknown error",
+                durationMs = json.optLong("duration_ms", 0L)
+            )
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  JNI external declarations
     // ═══════════════════════════════════════════════════════════════
@@ -384,4 +549,17 @@ object NativeBridge {
     // Device partition scanner (no root — getprop based)
     // Rust signature: nativeScanDevicePartitions() -> jstring (JSON)
     private external fun nativeScanDevicePartitions(): String
+
+    // Payload.bin inspect (prototype)
+    // Rust signature: nativeReadPayload(path) -> jstring (JSON)
+    private external fun nativeReadPayload(path: String): String
+
+    // Payload.bin partition extraction (prototype)
+    // Rust signature: nativeExtractPartition(payload_path, partition_name,
+    //                                        output_path) -> jstring (JSON)
+    private external fun nativeExtractPartition(
+        payloadPath: String,
+        partitionName: String,
+        outputPath: String
+    ): String
 }

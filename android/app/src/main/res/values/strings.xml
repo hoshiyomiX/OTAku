@@ -82,4 +82,11 @@
     <!-- Dynamic color (Material You / Suisei Blue fallback) -->
     <string name="color_source_material_you">Material You (system accent)</string>
     <string name="color_source_suisei">Suisei Blue (default)</string>
+
+    <!-- Payload.bin inspector + extractor (prototype) -->
+    <string name="menu_inspect_payload">Inspect payload.bin…</string>
+    <string name="payload_busy">Wait for the current operation to finish</string>
+    <string name="payload_extract_title">Extract partitions</string>
+    <string name="payload_extract_message">payload.bin contains %1$d partitions (%2$s image data).\n\nExtract all to:\n%3$s</string>
+    <string name="payload_extract_all">Extract all</string>
 </resources>

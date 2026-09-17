@@ -536,6 +536,166 @@ fn scan_device_partitions() -> String {
 
 
 // ---------------------------------------------------------------------------
+//  JNI: nativeReadPayload
+// ---------------------------------------------------------------------------
+
+/// Read and parse an AOSP payload.bin file (OTA package format).
+///
+/// Kotlin: `external fun nativeReadPayload(path: String): String`
+///
+/// Returns JSON:
+///   { "success": true, "header": {...}, "manifest": {...},
+///     "data_offset": N, "file_size": N, "native_version": "..." }
+/// Or on error:
+///   { "success": false, "error": "...", "native_version": "..." }
+#[no_mangle]
+pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeReadPayload(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: JString,
+) -> jstring {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let path_str: String = match env.get_string(&path) {
+            Ok(s) => s.into(),
+            Err(_) => {
+                return make_error_json(&env, "Invalid path string");
+            }
+        };
+
+        let result = match payload::read_payload(&path_str) {
+            Ok(info) => {
+                let json = payload::payload_info_to_json(&info);
+                serde_json::json!({
+                    "success": true,
+                    "header": json.header,
+                    "manifest": json.manifest,
+                    "data_offset": json.data_offset,
+                    "file_size": json.file_size,
+                    "native_version": env!("CARGO_PKG_VERSION"),
+                })
+            }
+            Err(e) => {
+                serde_json::json!({
+                    "success": false,
+                    "error": e,
+                    "native_version": env!("CARGO_PKG_VERSION"),
+                })
+            }
+        };
+
+        match env.new_string(result.to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeReadPayload", &format!("{:?}", panic_info));
+        null_jstring()
+    })
+}
+
+// ---------------------------------------------------------------------------
+//  JNI: nativeExtractPartition
+// ---------------------------------------------------------------------------
+
+/// Extract and decompress a partition from a payload.bin file.
+///
+/// Kotlin: `external fun nativeExtractPartition(
+///     payloadPath: String, partitionName: String, outputPath: String
+/// ): String`
+///
+/// Extracts the partition image and saves it to outputPath.
+/// Returns JSON with success/error and file info.
+#[no_mangle]
+pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartition(
+    mut env: JNIEnv,
+    _class: JClass,
+    payload_path: JString,
+    partition_name: JString,
+    output_path: JString,
+) -> jstring {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let payload_str: String = match env.get_string(&payload_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid payload path"),
+        };
+        let partition_str: String = match env.get_string(&partition_name) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid partition name"),
+        };
+        let output_str: String = match env.get_string(&output_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid output path"),
+        };
+
+        let start = std::time::Instant::now();
+
+        // Read payload info
+        let info = match payload::read_payload(&payload_str) {
+            Ok(i) => i,
+            Err(e) => {
+                return make_error_json(&env, &format!("Read payload failed: {}", e));
+            }
+        };
+
+        // Streaming extraction instead of in-memory: the decompressed
+        // partition (up to ~5 GB for system.img) must NEVER be held in RAM
+        // — Android's per-app heap is 256-512 MB. Streams decompressed
+        // chunks to the output file using only ~8 MB RAM.
+        //
+        // Ensure output directory exists (propagate error instead of .ok())
+        if let Some(parent) = std::path::Path::new(&output_str).parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return make_error_json(&env, &format!("Cannot create output directory: {}", e));
+            }
+        }
+
+        let mut output_file = match std::fs::File::create(&output_str) {
+            Ok(f) => f,
+            Err(e) => {
+                return make_error_json(&env, &format!("Cannot create output file: {}", e));
+            }
+        };
+
+        let decompressed_size = match payload::extract_and_decompress_partition_to_writer(
+            &info, &partition_str, &mut output_file,
+        ) {
+            Ok(size) => size,
+            Err(e) => {
+                // Clean up the partial output file — don't leave corrupt
+                // .img files that the user might later flash by mistake.
+                let _ = std::fs::remove_file(&output_str);
+                return make_error_json(
+                    &env,
+                    &format!("Extract partition '{}' failed: {}", partition_str, e),
+                );
+            }
+        };
+
+        let elapsed = start.elapsed();
+        let file_size = decompressed_size;
+        let result = serde_json::json!({
+            "success": true,
+            "partition": partition_str,
+            "output_path": output_str,
+            "file_size": file_size,
+            "human_size": payload::human_size(file_size),
+            "duration_ms": elapsed.as_millis() as u64,
+            "native_version": env!("CARGO_PKG_VERSION"),
+        });
+
+        match env.new_string(result.to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null_jstring(),
+        }
+    }));
+    result.unwrap_or_else(|panic_info| {
+        log_panic("nativeExtractPartition", &format!("{:?}", panic_info));
+        null_jstring()
+    })
+}
+
+// ---------------------------------------------------------------------------
 //  Helper: create a JSON error string for JNI return
 // ---------------------------------------------------------------------------
 

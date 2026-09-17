@@ -441,6 +441,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Payload.bin picker (prototype) — single document, octet-stream + any
+    // (payload.bin has no dedicated MIME type; OTA ZIPs are handled by the
+    // user extracting payload.bin out first)
+    private val payloadFileChooser = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) handlePayloadSelected(uri)
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -962,6 +971,10 @@ class MainActivity : AppCompatActivity() {
         return when (item.itemId) {
             R.id.action_toggle_theme -> {
                 cycleTheme()
+                true
+            }
+            R.id.action_inspect_payload -> {
+                launchPayloadPicker()
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -2171,6 +2184,160 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return fileName ?: uri.lastPathSegment
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Payload.bin inspect + extract (prototype)
+    //  Reads an AOSP OTA payload.bin and extracts partition images.
+    // ═══════════════════════════════════════════════════════════════
+
+    /** Open the SAF picker for a payload.bin file. */
+    private fun launchPayloadPicker() {
+        if (isExecuting) {
+            Toast.makeText(this, R.string.payload_busy, Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            payloadFileChooser.launch(arrayOf("application/octet-stream", "*/*"))
+        } catch (e: Exception) {
+            showLog("[!] Cannot open file picker: ${e.message}", LogLevel.ERROR)
+        }
+    }
+
+    /**
+     * Handle a user-picked payload.bin: resolve its path (in-place fast
+     * path, cache-copy slow path — same strategy as image files), inspect
+     * it via the native backend, print the partition table, then offer
+     * extraction of all partitions.
+     */
+    private fun handlePayloadSelected(uri: Uri) {
+        if (isExecuting) return
+        val fileName = getFileName(uri) ?: "payload.bin"
+        showLog("[*] Payload selected: $fileName", LogLevel.INFO)
+
+        buildScope.launch {
+            // ── Fast path: real filesystem path (NO COPY) ──
+            var path = resolveUriToFilePath(uri)
+
+            // ── Slow path: virtual/cloud document — copy to cache first ──
+            if (path == null) {
+                showLog("[*] Source not directly accessible — copying to cache …", LogLevel.INFO)
+                val dest = File(inputDir, fileName)
+                val temp = File(inputDir, "$fileName.part")
+                temp.delete()
+                try {
+                    copyUriToFile(uri, temp)
+                    if (!temp.renameTo(dest)) {
+                        temp.delete()
+                        dest.delete()
+                        showLog("[!] Cache copy failed — cannot inspect this document", LogLevel.ERROR)
+                        return@launch
+                    }
+                    path = dest.absolutePath
+                } catch (e: Exception) {
+                    temp.delete()
+                    showLog("[!] Cache copy failed: ${e.message}", LogLevel.ERROR)
+                    return@launch
+                }
+            }
+
+            val payloadPath = path
+            val result = OTABridge.inspectPayload(payloadPath) { line ->
+                showLog(line, LogLevel.PLAIN)
+            }
+            if (result == null || !result.success) return@launch
+
+            // ── Partition table ──
+            showLog("    ── ${result.partitions.size} partitions ──", LogLevel.PLAIN)
+            result.partitions.forEach { p ->
+                val sizeStr = if (p.sizeBytes > 0) formatFileSize(p.sizeBytes) else "size ?"
+                showLog("    • ${p.name}  ($sizeStr, ${p.opCount} ops)", LogLevel.PLAIN)
+            }
+
+            runOnUiThread { showExtractDialog(payloadPath, result) }
+        }
+    }
+
+    /** Base directory for extracted partition images (reuses output dir). */
+    private fun payloadExtractDir(): String {
+        val base = outputDirPath ?: outputDir.absolutePath
+        return "$base/payload_extracted"
+    }
+
+    /** Ask the user whether to extract every partition from the payload. */
+    private fun showExtractDialog(payloadPath: String, result: NativeBridge.PayloadInspectResult) {
+        val totalBytes = result.partitions.sumOf { it.sizeBytes }
+        val totalStr = if (totalBytes > 0) formatFileSize(totalBytes) else "?"
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.payload_extract_title))
+            .setMessage(
+                getString(
+                    R.string.payload_extract_message,
+                    result.partitions.size,
+                    totalStr,
+                    payloadExtractDir()
+                )
+            )
+            .setPositiveButton(getString(R.string.payload_extract_all)) { _, _ ->
+                extractAllPayloadPartitions(payloadPath, result)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Extract every partition sequentially on buildScope. Partition names
+     * from the manifest are sanitized before being used as filenames —
+     * a malicious payload must not be able to write outside the extract
+     * directory via crafted partition_name values (path traversal).
+     */
+    private fun extractAllPayloadPartitions(
+        payloadPath: String,
+        result: NativeBridge.PayloadInspectResult
+    ) {
+        setUIExecuting(true)
+        buildScope.launch {
+            val dir = File(payloadExtractDir())
+            dir.mkdirs()
+            val startMs = System.currentTimeMillis()
+            var ok = 0
+            var failed = 0
+            var totalExtracted = 0L
+
+            result.partitions.forEach { p ->
+                // Sanitize: manifest-controlled name → safe filename component
+                val safeName = p.name.replace(Regex("[^a-zA-Z0-9_.\\-]"), "_")
+                if (safeName != p.name) {
+                    showLog("[!] Partition name '${p.name}' sanitized → '$safeName'", LogLevel.WARN)
+                }
+                val outFile = File(dir, "$safeName.img")
+                val r = OTABridge.extractPayloadPartition(
+                    payloadPath, safeName, outFile.absolutePath
+                ) { line -> showLog(line, LogLevel.PLAIN) }
+                if (r.success) {
+                    ok++
+                    totalExtracted += r.fileSize
+                } else {
+                    failed++
+                }
+            }
+
+            val durMs = System.currentTimeMillis() - startMs
+            if (failed == 0) {
+                showLog(
+                    "═══ Payload extraction done — $ok partitions, " +
+                        "${formatFileSize(totalExtracted)}, ${durMs} ms ═══",
+                    LogLevel.SUCCESS
+                )
+            } else {
+                showLog(
+                    "═══ Payload extraction finished with errors — $ok ok / $failed failed " +
+                        "(${formatFileSize(totalExtracted)}, ${durMs} ms) ═══",
+                    LogLevel.WARN
+                )
+            }
+            setUIExecuting(false)
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════

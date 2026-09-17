@@ -10,4 +10,11 @@
         app:showAsAction="always"
         app:tint="?attr/colorOnSurface" />
 
+    <!-- Payload.bin inspector (prototype) — overflow item keeps the MD3
+         toolbar surface minimal: one always-shown action (theme) only. -->
+    <item
+        android:id="@+id/action_inspect_payload"
+        android:title="@string/menu_inspect_payload"
+        app:showAsAction="never" />
+
 </menu>

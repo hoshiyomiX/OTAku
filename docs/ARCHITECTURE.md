@@ -41,7 +41,9 @@
 │  │  ├── checkDeps() → DepCheckResult                              │  │
 │  │  ├── buildDd(images, compress, level, output, device, skip) → DdBuildResult │  │
 │  │  ├── detectDeviceCodename() → DeviceCodenameResult             │  │
-│  │  └── scanDevicePartitions() → DevicePartitionsResult           │  │
+│  │  ├── scanDevicePartitions() → DevicePartitionsResult           │  │
+│  │  ├── readPayload(path) → PayloadInspectResult [prototype]      │  │
+│  │  └── extractPartition(payload, name, out) → PayloadExtractResult │  │
 │  └────────────────────────┬───────────────────────────────────────┘  │
 │                           │ JNI (System.loadLibrary("otaku_native")) │
 │  ┌────────────────────────▼───────────────────────────────────────┐  │
@@ -52,7 +54,7 @@
 │  │  Statically links: flate2, bzip2, xz2, zstd, lz4, sha2, prost, │  │
 │  │                    serde, serde_json, zip, chrono, log          │  │
 │  │                                                                │  │
-│  │  src/lib.rs        — 5 JNI entry points (JSON in/out)          │  │
+│  │  src/lib.rs        — 7 JNI entry points (JSON in/out)          │  │
 │  │  src/dd.rs         — DD-mode flashable ZIP generator           │  │
 │  │  src/payload.rs    — AOSP payload.bin read/write               │  │
 │  │  src/proto.rs      — Hand-written prost structs                │  │
