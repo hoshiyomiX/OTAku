@@ -1324,12 +1324,19 @@ class MainActivity : AppCompatActivity() {
         //  MaterialCardView now morphs continuously between:
         //    COLLAPSED pill : width=pillW, height=pillH, radius=pillH/2,
         //                    content = arrow + "LOGS" label only
-        //    EXPANDED card  : width=MATCH_PARENT, height=weight share,
+        //    EXPANDED card  : width=MATCH_PARENT, height=overlay share
         //                    radius=16dp, full log content
         //  Spatial continuity is preserved (M3 container-transform
         //  intent): the pill IS the collapsed card — same fill
         //  (colorPrimaryContainer), same stroke, same elevation; only
         //  geometry + content alpha animate.
+        //
+        //  OVERLAY (T16): the card is a TRUE floating surface now — a
+        //  direct child of the root CoordinatorLayout with
+        //  gravity=bottom, not in the LinearLayout flow. It floats
+        //  above the full-height settings scroll; the scroll's bottom
+        //  padding mirrors the card height so the last row stays
+        //  reachable (updateSettingsBottomPadding).
         //
         //  Gesture semantics (vertical, unchanged):
         //    Drag UP   → expand   (1:1 finger tracking)
@@ -1346,7 +1353,8 @@ class MainActivity : AppCompatActivity() {
         val logScrollView = findViewById<androidx.core.widget.NestedScrollView>(R.id.scrollViewLog)
         val buttonCopyLog = findViewById<View>(R.id.buttonCopyLog)
         val buttonClearLog = findViewById<View>(R.id.buttonClearLog)
-        val parentLayout = logCard?.parent as? android.widget.LinearLayout
+        val scrollViewSettings = findViewById<androidx.core.widget.NestedScrollView>(R.id.scrollViewSettings)
+        val parentLayout = logCard?.parent as? androidx.coordinatorlayout.widget.CoordinatorLayout
         val density = resources.displayMetrics.density
         val CARD_RADIUS_PX = 16f * density
 
@@ -1382,14 +1390,12 @@ class MainActivity : AppCompatActivity() {
                 logDivider?.visibility = View.GONE
                 buttonCopyLog?.visibility = View.GONE
                 buttonClearLog?.visibility = View.GONE
-                val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams
+                val lp = card.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
                 val prevW = lp?.width
                 val prevH = lp?.height
-                val prevWt = lp?.weight
                 if (lp != null) {
-                    lp.width = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                    lp.height = android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                    lp.weight = 0f
+                    lp.width = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                    lp.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
                 }
                 card.measure(
                     android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
@@ -1400,7 +1406,6 @@ class MainActivity : AppCompatActivity() {
                 if (lp != null) {
                     if (prevW != null) lp.width = prevW
                     if (prevH != null) lp.height = prevH
-                    lp.weight = prevWt ?: 0f
                 }
                 logScrollView?.visibility = svWas
                 logDivider?.visibility = dvWas
@@ -1425,21 +1430,16 @@ class MainActivity : AppCompatActivity() {
             val parent = parentLayout ?: return
             val card = logCard ?: return
             if (parent.height <= 0 || parent.width <= 0) return
-            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+            val lp = card.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams ?: return
             fullCardWidth = parent.width - parent.paddingLeft - parent.paddingRight - lp.leftMargin - lp.rightMargin
-            var weightSum = 1f  // the card itself, assumed at expanded weight=1
-            var allMargins = lp.topMargin + lp.bottomMargin
-            for (i in 0 until parent.childCount) {
-                val child = parent.getChildAt(i)
-                if (child === card || child.visibility == View.GONE) continue
-                val clp = child.layoutParams as? android.widget.LinearLayout.LayoutParams ?: continue
-                weightSum += clp.weight
-                allMargins += clp.topMargin + clp.bottomMargin
-            }
-            val available = parent.height - parent.paddingTop - parent.paddingBottom
-            val remaining = (available - allMargins).coerceAtLeast(0)
-            val share = (remaining * (1f / weightSum)).toInt()
-            fullCardHeight = if (share > pillHeight) share else (available * 0.5f).toInt().coerceAtLeast(pillHeight)
+            // Overlay share: parity with the old 50/50 LinearLayout weight
+            // split — the scroll area (settings view = coordinator minus
+            // appbar) is the reference; the card covers its lower half.
+            val scrollArea = scrollViewSettings?.height?.takeIf { it > 0 }
+                ?: (parent.height - parent.paddingTop - parent.paddingBottom)
+            val available = scrollArea - lp.topMargin - lp.bottomMargin
+            val share = (available * 0.5f).toInt()
+            fullCardHeight = share.coerceAtLeast(pillHeight)
         }
 
         /**
@@ -1450,16 +1450,15 @@ class MainActivity : AppCompatActivity() {
          */
         fun applyMorph(progress: Float) {
             val card = logCard ?: return
-            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+            val lp = card.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams ?: return
             val cp = progress.coerceIn(0f, 1.06f)  // small spring overshoot allowed (height only)
             val vis = progress.coerceIn(0f, 1f)    // clamped for fades + radius
-            // Geometry — explicit size, weight=0 (weight is restored only
-            // by applyExpandedCanonical at settle)
+            // Geometry — explicit size; gravity keeps the card pinned
+            // to the bottom through every intermediate frame
             val h = (pillHeight + (fullCardHeight - pillHeight) * cp).toInt()
             val w = (pillWidth + (fullCardWidth - pillWidth) * cp).toInt()
             lp.width = w
             lp.height = h
-            lp.weight = 0f
             card.layoutParams = lp
             // Corner radius: fully-round pill → 16dp card
             card.radius = (pillHeight / 2f) + (CARD_RADIUS_PX - pillHeight / 2f) * vis
@@ -1491,13 +1490,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        /**
+         * Overlay-aware reachability (T16): the log card is a true
+         * floating overlay (CoordinatorLayout gravity-bottom), so its
+         * current height must be mirrored into the settings scroll's
+         * bottom padding (+ card bottom margin) — otherwise the last
+         * settings row would scroll into dead space hidden under the
+         * card. clipToPadding=false on scrollViewSettings lets content
+         * glide under the floating card instead of hard-clipping.
+         */
+        fun updateSettingsBottomPadding(cardHeightPx: Int) {
+            val sv = scrollViewSettings ?: return
+            val lp = logCard?.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
+            sv.setPadding(sv.paddingLeft, sv.paddingTop, sv.paddingRight,
+                cardHeightPx + (lp?.bottomMargin ?: 0))
+        }
+
         /** Snap to the canonical EXPANDED params (no animation). */
         fun applyExpandedCanonical() {
             val card = logCard ?: return
-            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
-            lp.width = android.widget.LinearLayout.LayoutParams.MATCH_PARENT
-            lp.height = 0
-            lp.weight = 1f
+            val lp = card.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams ?: return
+            lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            lp.height = fullCardHeight.coerceAtLeast(pillHeight)
+            lp.gravity = android.view.Gravity.BOTTOM
             card.layoutParams = lp
             card.radius = CARD_RADIUS_PX
             toggleBtn?.rotation = 180f
@@ -1510,15 +1525,16 @@ class MainActivity : AppCompatActivity() {
             buttonClearLog?.visibility = View.VISIBLE
             buttonClearLog?.alpha = 1f
             morphProgress = 1f
+            updateSettingsBottomPadding(fullCardHeight)
         }
 
         /** Snap to the canonical COLLAPSED (pill) params (no animation). */
         fun applyPillCanonical() {
             val card = logCard ?: return
-            val lp = card.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+            val lp = card.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams ?: return
             lp.width = pillWidth
             lp.height = pillHeight
-            lp.weight = 0f
+            lp.gravity = android.view.Gravity.BOTTOM
             card.layoutParams = lp
             card.radius = pillHeight / 2f
             toggleBtn?.rotation = 0f
@@ -1531,6 +1547,7 @@ class MainActivity : AppCompatActivity() {
             buttonClearLog?.visibility = View.GONE
             buttonClearLog?.alpha = 0f
             morphProgress = 0f
+            updateSettingsBottomPadding(pillHeight)
         }
 
         fun finalizeState(expanded: Boolean) {
@@ -1595,14 +1612,14 @@ class MainActivity : AppCompatActivity() {
                     measureFullGeometry()
                     // Pin the CURRENT geometry to explicit sizes so the
                     // morph math is stable during drag. If we were in the
-                    // canonical expanded state (weight=1, MATCH_PARENT),
-                    // pinning to the actual laid-out size = zero jump.
+                    // canonical expanded state (MATCH_PARENT + explicit
+                    // overlay height), pinning to the actual laid-out
+                    // size = zero jump.
                     logCard?.let { card ->
-                        val clp = card.layoutParams as? android.widget.LinearLayout.LayoutParams
+                        val clp = card.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
                         if (clp != null) {
                             clp.width = card.width
                             clp.height = card.height
-                            clp.weight = 0f
                             card.layoutParams = clp
                         }
                     }
@@ -1696,13 +1713,21 @@ class MainActivity : AppCompatActivity() {
 
         // ── Init (no animation) — survives Activity recreation ──
         measurePillGeometry()
+        // Provisional expanded height until first layout measures the
+        // real overlay share (post{} refines via measureFullGeometry) —
+        // the expanded height is explicit in overlay mode, unlike the
+        // old weight-based split which resolved at layout time.
+        if (fullCardHeight <= 0) fullCardHeight = (resources.displayMetrics.heightPixels * 0.45f).toInt()
         if (isLogExpanded) applyExpandedCanonical() else applyPillCanonical()
         logCard?.post {
             // After first layout: refine geometry with real parent sizes
             // (re-measuring the pill also picks up final font metrics).
             measurePillGeometry()
             measureFullGeometry()
-            if (morphProgress <= 0f) applyPillCanonical()  // absorb refined pill size
+            // Absorb refined geometry in BOTH states — the expanded
+            // height is explicit now (overlay share), so it must be
+            // re-derived once the parent is actually laid out.
+            if (morphProgress <= 0f) applyPillCanonical() else applyExpandedCanonical()
         }
         // Prevent parent NestedScrollView from stealing scroll events inside the log panel
         logScrollView?.setOnTouchListener { v, _ ->

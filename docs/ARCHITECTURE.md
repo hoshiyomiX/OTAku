@@ -18,11 +18,12 @@
 │  │  │   ├── Compression algorithm + level                        │  │
 │  │  │   └── Output directory + Browse (SAF directory picker)     │  │
 │  │  ├── ActionSection                                             │  │
-│  │  │   ├── BuildButton (BUILD OTA NOW)                          │  │
-│  │  │   ├── Per-partition progress bars                          │  │
-│  │  │   └── CancelButton                                         │  │
-│  │  └── LogSection                                                │  │
-│  │      └── ScrollView > TextView (append-only log output)       │  │
+│  │  │   └── Per-partition progress bars (build actions live   │  │
+│  │  │       in the TopAppBar overflow menu since T14: Build   │  │
+│  │  │       OTA ZIP / Inspect / Build payload.bin)            │  │
+│  │  └── LogSection (FLOATING overlay, T16)                    │  │
+│  │      └── MaterialCardView gravity=bottom — morphable       │  │
+│  │          pill ↔ card > ScrollView > TextView (log output)  │  │
 │  └────────────────────────┬───────────────────────────────────────┘  │
 │                           │                                          │
 │  ┌────────────────────────▼───────────────────────────────────────┐  │

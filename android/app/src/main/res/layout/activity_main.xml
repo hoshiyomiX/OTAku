@@ -4,20 +4,22 @@
 
     Single-purpose: Build partition images (.img) into flashable OTA ZIP.
 
-    Layout (single scroll architecture):
+    Layout (floating overlay architecture — T16):
     ┌────────────────────────────────────────┐
     │ TopAppBar (title + version + theme  │
     │   btn + overflow: Build OTA ZIP /   │
     │   Inspect / Build payload.bin)      │
     ├────────────────────────────────────────┤
-    │ NestedScrollView (full height)      │
+    │ NestedScrollView (FULL height)      │
     │   Settings Card                     │
     │     Device / Partitions /           │
     │     Compression / Level / Output    │
     │   ProgressBar (per-partition bars)  │
-    │   Log Card (morphable pill ↔ card)  │
-    │     Header + Copy/Clear +           │
-    │     NestedScrollView                │
+    ├──────────────────────────────────────┤
+    │ ~~ FLOATING Log Card (overlay) ~~   │
+    │   gravity=bottom — morphable        │
+    │   pill ↔ card, floats ABOVE the     │
+    │   settings scroll (never in flow)   │
     └────────────────────────────────────────┘
 -->
 <androidx.coordinatorlayout.widget.CoordinatorLayout
@@ -46,23 +48,22 @@
 
     </com.google.android.material.appbar.AppBarLayout>
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior">
-
-        <!-- ═══════════════════════════════════════════════════ -->
-        <!-- Scrollable Settings + Build Button + Log Panel      -->
-        <!-- Full height scroll — logs placed below Build button -->
-        <!-- ═══════════════════════════════════════════════════ -->
+    <!-- ═══════════════════════════════════════════════════ -->
+    <!-- Scrollable Settings — DIRECT child of the root        -->
+    <!-- CoordinatorLayout (carries the appbar scrolling        -->
+    <!-- behavior itself). The log card below is NOT in this    -->
+    <!-- scroll flow: it is a true floating overlay             -->
+    <!-- (gravity=bottom) stacked above this scroll view.       -->
+    <!-- ═══════════════════════════════════════════════════ -->
 
         <androidx.core.widget.NestedScrollView
             android:id="@+id/scrollViewSettings"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
+            android:layout_height="match_parent"
             android:fillViewport="true"
+            android:clipToPadding="false"
+            android:paddingBottom="72dp"
+            app:layout_behavior="@string/appbar_scrolling_view_behavior"
             android:scrollbars="vertical"
             android:fadeScrollbars="false"
             
@@ -568,7 +569,7 @@
                 </com.google.android.material.card.MaterialCardView>
 
                 <!-- ═══════════════════════════════════════════════════ -->
-                <!-- Progress Bar (build button moved to FAB)               -->
+                <!-- Progress Bar (per-partition bars while building)        -->
                 <!-- ═══════════════════════════════════════════════════ -->
 
                 <!-- Per-partition progress bars + labels (built programmatically) -->
@@ -585,21 +586,22 @@
         </androidx.core.widget.NestedScrollView>
 
         <!-- ═══════════════════════════════════════════════════ -->
-        <!-- Standalone Log Panel — outside NestedScrollView       -->
+        <!-- Floating Log Panel — TRUE overlay (T16)                -->
         <!--                                                       -->
-        <!-- Sits below the settings scroll area as a sibling,      -->
-        <!-- NOT inside it. This means the log panel is always      -->
-        <!-- visible at the bottom of the screen and scrolls        -->
-        <!-- independently from the settings above. The settings    -->
-        <!-- NestedScrollView has weight=1 (flexible), this log     -->
-        <!-- card has weight=1 (takes ~50% of screen height).       -->
+        <!-- Direct child of the root CoordinatorLayout with        -->
+        <!-- gravity=bottom — NOT part of the settings scroll       -->
+        <!-- flow; it floats ABOVE the full-height NestedScroll.    -->
+        <!-- Expanded height = overlay share (~50% of the scroll    -->
+        <!-- area), set programmatically by the container-morph     -->
+        <!-- code. The scroll's bottom padding mirrors the card     -->
+        <!-- height so its last row stays reachable.                -->
         <!-- ═══════════════════════════════════════════════════ -->
 
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/logCard"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
             android:layout_marginHorizontal="16dp"
             android:layout_marginBottom="16dp"
             app:cardCornerRadius="16dp"
@@ -720,7 +722,5 @@
             </LinearLayout>
 
         </com.google.android.material.card.MaterialCardView>
-
-    </LinearLayout>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
