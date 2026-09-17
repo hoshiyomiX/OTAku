@@ -476,13 +476,12 @@ const PROGRESS_CHUNK: usize = 4 * 1024 * 1024;
 fn write_extract_progress(sidecar_path: &str, name: &str, bytes_written: u64, total_estimated: u64) {
     // total_estimated = 0 (unknowable manifest) → percent stays 0; Kotlin
     // renders the byte counter instead of a percentage in that case.
-    let partition_percent: i32 = if total_estimated > 0 {
-        // Clamp bytes at total so a corrupt payload (decompressed output
-        // larger than the manifest estimate) can't push percent past 100.
-        ((bytes_written.min(total_estimated) * 100) / total_estimated).min(100) as i32
-    } else {
-        0
-    };
+    // checked_div mirrors dd.rs's overall_percent math — division by an
+    // estimate-less 0 maps to None → 0 (clippy::manual_checked_ops).
+    let partition_percent: i32 = (bytes_written.min(total_estimated) * 100)
+        .checked_div(total_estimated)
+        .map(|v| v.min(100) as i32)
+        .unwrap_or(0);
     let content = serde_json::json!({
         "current": 1,
         "total": 1,
