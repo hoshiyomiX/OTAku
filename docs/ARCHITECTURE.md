@@ -84,13 +84,18 @@
 
 
 UI lifecycle invariant (T22): `onPause` invalidates the cached view
-references (IMPL-008) and the end of `onResume` re-resolves them via
+references (IMPL-008) and the top of `onResume` re-resolves them via
 `cacheViews()` before re-syncing the Build FAB gate (`updateBuildFab()`).
 Any code that gates UI state on cached views must tolerate a null cache
 between onPause and onResume — the FAB gate self-heals by re-resolving
 on demand. Until T22 the re-resolve half of IMPL-008 was missing, which
 froze the Build FAB grayed-out after every SAF picker trip until a
 theme-switch `recreate()` rebuilt the caches.
+
+Since T23 all three long-running operations (DD build, payload build,
+payload extract) set the companion `isBuilding` flag plus a progress
+heartbeat, so a mid-operation recreate reconnects correctly and no
+second operation can start concurrently.
 
 ## Data Flow — DD Mode (only mode)
 

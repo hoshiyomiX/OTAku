@@ -2364,8 +2364,24 @@ class MainActivity : AppCompatActivity() {
         payloadPath: String,
         result: NativeBridge.PayloadInspectResult
     ) {
+        // T23: mutual exclusion across all three long-running operations
+        // (DD build / payload build / payload extract) — guarded here, at
+        // the operation entry, so the inspect→dialog→extract path is covered
+        // even though the toolbar menu itself is never disabled.
+        if (isBuilding) {
+            showLog("Operation already in progress. Please wait.", LogLevel.WARN)
+            return
+        }
         setUIExecuting(true)
         isExecuting = true
+        // T23: extract used to set ONLY the instance flag — a mid-extract
+        // recreate left the companion isBuilding=false, so onResume took the
+        // "build finished" branch: live notification canceled, controls
+        // re-enabled mid-run, FAB clickable → a concurrent second build could
+        // corrupt shared companion state. Mirror startBuild's full pattern.
+        isBuilding = true
+        lastProgressTime = System.currentTimeMillis()  // heartbeat for dead-process detection
+        resumedWhileBuildingLogged = false
         appContext = applicationContext
         val names = result.partitions.map { it.name }
         partitionNames = names
@@ -2509,12 +2525,19 @@ class MainActivity : AppCompatActivity() {
                 try { wakeLock?.release() } catch (_: Exception) {}
                 wakeLock = null
                 try { OTAService.stop(appContext ?: applicationContext) } catch (_: Exception) {}
-                isExecuting = false
+                // T23: isBuilding is companion state — clear it HERE so a
+                // mid-extract recreate reconnects (or finishes cleanly) after
+                // the operation ends, whatever instance is alive.
+                isBuilding = false
                 lastProgressMessage = ""
                 lastNotifPercent = -1
                 lastProgressPercent = -1
                 val current = activityRef?.get()
                 if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    // T23: reset the CURRENT instance's flag (the bare
+                    // assignment used to write the launching instance's field,
+                    // leaving a post-recreate instance stuck isExecuting=true).
+                    current.isExecuting = false
                     current.setUIExecuting(false)
                 }
             }
@@ -2536,7 +2559,10 @@ class MainActivity : AppCompatActivity() {
      * advanced users can match a target updater's expectations.
      */
     private fun onBuildPayloadClicked() {
-        if (isExecuting) {
+        // T23: guard on the COMPANION flag — isExecuting is instance state
+        // reset by recreate(), so a mid-build theme switch would briefly
+        // leave this entry unguarded.
+        if (isBuilding) {
             Toast.makeText(this, R.string.payload_busy, Toast.LENGTH_SHORT).show()
             return
         }
@@ -2644,8 +2670,19 @@ class MainActivity : AppCompatActivity() {
         val sortedNames = images.keys.sorted()
         partitionNames = sortedNames
 
+        // T23: the dialog positive-click can race a build started while the
+        // dialog was open — guard at the operation entry, not just the menu.
+        if (isBuilding) {
+            showLog("Operation already in progress. Please wait.", LogLevel.WARN)
+            return
+        }
         setUIExecuting(true)
         isExecuting = true
+        // T23: payload build set only the instance flag (same desync as the
+        // extract path — see the extract-entry comment). Mirror startBuild.
+        isBuilding = true
+        lastProgressTime = System.currentTimeMillis()  // heartbeat for dead-process detection
+        resumedWhileBuildingLogged = false
         appContext = applicationContext
         lastProgressMessage = ""
         lastNotifPercent = -1
@@ -2789,12 +2826,17 @@ class MainActivity : AppCompatActivity() {
                 try { wakeLock?.release() } catch (_: Exception) {}
                 wakeLock = null
                 try { OTAService.stop(appContext ?: applicationContext) } catch (_: Exception) {}
-                isExecuting = false
+                // T23: companion flag cleared at operation end (same as the
+                // extract path) — keeps onResume reconnect honest.
+                isBuilding = false
                 lastProgressMessage = ""
                 lastNotifPercent = -1
                 lastProgressPercent = -1
                 val current = activityRef?.get()
                 if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    // T23: reset the CURRENT instance's flag (was a bare
+                    // assignment to the launching instance's field).
+                    current.isExecuting = false
                     current.setUIExecuting(false)
                 }
             }
@@ -3438,6 +3480,15 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         cacheLogViews()  // Cache log views for efficient appendLogLineUI
         activityRef = WeakReference(this)
+        // T23 — moved cacheViews() to the TOP of onResume (T22 placed it at
+        // the tail): the isBuilding branches below call setUIExecuting(),
+        // which toggles ten controls through these caches — with them still
+        // null every toggle no-op'ed, so after a "build finished while
+        // backgrounded" resume the controls stayed disabled (only the FAB
+        // self-healed). Populated first, every branch now applies its state
+        // for real. cacheViews() is idempotent (findViewById re-assignment +
+        // FAB listener re-set, no TextWatchers).
+        cacheViews()
         // Restore persisted log text on Activity recreation
         // Always restore from the companion buffer to ensure logs survive
         // minimize/reopen and Activity recreation (fix: logs clearing on warm resume)
@@ -3550,18 +3601,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // T22 — IMPL-008 debt paid: onPause nulls the control caches and its
-        // comment promised "re-resolve on next onResume" — this is that promise,
-        // three FAB-bug generations late. Without it, any trip to the SAF image
-        // picker left cachedEditDevice null, so updateBuildFab() read device=""
-        // and the Build FAB stayed grayed-out no matter what the user typed;
-        // only a theme-switch recreate() repopulated the caches. Re-resolution
-        // must run AFTER the isBuilding branches above (they call
-        // setUIExecuting → updateBuildFab with the caches still stale).
-        // cacheViews() is idempotent: plain findViewById re-assignment + FAB
-        // click-listener re-set; it attaches no TextWatchers, so re-running it
-        // never doubles anything up.
-        cacheViews()
+        // T23: final Build FAB re-sync — the isBuilding branches above may
+        // have corrected isExecuting/isBuilding, and updateBuildFab is the
+        // single gate that must reflect the corrected state.
         updateBuildFab()
     }
 
