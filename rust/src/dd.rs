@@ -43,7 +43,7 @@ use crate::compression::{
 // JNI-side progress polling is performance-sensitive (called per-chunk), so
 // passing values directly avoids a struct allocation.
 #[allow(clippy::too_many_arguments)]
-fn write_progress_with_percent(
+pub(crate) fn write_progress_with_percent(
     output_path: &str,
     current: usize,
     total: usize,
@@ -82,7 +82,9 @@ fn write_progress_with_percent(
 }
 
 /// Delete the progress sidecar file (called on build completion or error).
-fn delete_progress_file(output_path: &str) {
+/// Shared by the DD build (run_dd_build) and the payload.bin build
+/// (write_payload) — both write `<output_path>.progress`.
+pub(crate) fn delete_progress_file(output_path: &str) {
     let progress_path = format!("{}.progress", output_path);
     let _ = std::fs::remove_file(&progress_path);
 }

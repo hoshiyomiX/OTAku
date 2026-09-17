@@ -728,8 +728,11 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
 /// Returns the serialized WritePayloadResult (success, output log lines,
 /// output_path, file_size, per-partition summaries, duration_ms, error).
 ///
-/// PROTOTYPE NOTE: unlike nativeBuildDd there is no .progress sidecar yet —
-/// the output log lines arrive when the JNI call returns.
+/// Progress: write_payload writes a `<output_path>.progress` sidecar
+/// during the build (phases: compressing → compressed → assembling) —
+/// same JSON schema and atomic-write discipline as nativeBuildDd.
+/// Kotlin polls it every 500ms; the sidecar is deleted before this
+/// call returns, on both the success and the error path.
 #[no_mangle]
 pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
     mut env: JNIEnv,

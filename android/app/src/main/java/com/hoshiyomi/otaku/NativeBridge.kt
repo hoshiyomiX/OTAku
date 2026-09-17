@@ -294,8 +294,11 @@ object NativeBridge {
      * compressed output in memory), then assembles header + manifest +
      * data blobs into the output payload.bin.
      *
-     * No .progress sidecar yet (prototype): the per-partition log lines
-     * arrive when the call returns.
+     * Progress: the native build writes a `<outputPath>.progress` sidecar
+     * (phases: compressing → compressed → assembling) with the same JSON
+     * schema as buildDd — poll it for real-time per-partition progress.
+     * The native code deletes the sidecar before the call returns, on
+     * both the success and the error path.
      *
      * @param images Map of partition name -> absolute path to .img file
      * @param compression Algorithm shared by ALL partitions

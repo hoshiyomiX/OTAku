@@ -54,8 +54,8 @@ data class ProgressUpdate(
  * Payload.bin toolchain (prototype): inspect → extract → verify → write —
  * reads an AOSP OTA payload.bin (e.g. from a full OTA ZIP), extracts
  * partition images from it (sidecar progress + WakeLock for long runs),
- * self-verifies generated payloads, and can build a payload.bin from the
- * loaded partition images.
+ * self-verifies generated payloads, and builds a payload.bin from the
+ * loaded partition images (sidecar progress, same as extraction).
  *
  * Supported compression: zstd, xz, bzip2, gzip, lz4  ("none" and "brotli" excluded from user-facing options)
  *
@@ -537,9 +537,16 @@ object OTABridge {
      *
      * Streams each partition's compressed data to a temp file in the output
      * directory (~8 MB RAM per partition — same OOM discipline as dd()),
-     * then assembles header + manifest + data blobs. The per-partition log
-     * lines arrive when the call returns — no .progress sidecar yet
-     * (prototype parity with the pre-sidecar DD build).
+     * then assembles header + manifest + data blobs.
+     *
+     * Progress: Rust writes a `.progress` sidecar next to the output
+     * payload.bin (same convention as dd()); this function polls it every
+     * 500ms and emits ProgressUpdate — current/total/partition_percent are
+     * Rust-authoritative (partitions are processed alphabetically).
+     * Phases: compressing → compressed → assembling, mapped to 0-94% /
+     * ≤94% / 97% (same ladder as the DD build). The poller is cancelled
+     * and the sidecar deleted on every exit path (AUDIT-F1 discipline);
+     * the native code also deletes the sidecar before returning.
      *
      * CPU-alive for long builds is the CALLER's job (OTAService foreground
      * + WakeLock — see MainActivity.buildPayloadBin).
@@ -548,6 +555,7 @@ object OTABridge {
      * @param compression Algorithm shared by ALL partitions
      * @param level Compression level (0 = algorithm default)
      * @param outputPath Destination payload.bin path
+     * @param onProgress Optional progress callback (sidecar-driven)
      * @param onOutputLine Optional log-line callback
      * @return WritePayloadResult with per-partition summaries, or error
      */
@@ -556,6 +564,7 @@ object OTABridge {
         compression: String,
         level: Int,
         outputPath: String,
+        onProgress: ((ProgressUpdate) -> Unit)? = null,
         onOutputLine: ((String) -> Unit)? = null
     ): NativeBridge.WritePayloadResult {
         if (images.isEmpty()) {
@@ -570,17 +579,97 @@ object OTABridge {
             onOutputLine?.invoke("[!] $msg")
             return NativeBridge.WritePayloadResult.error(msg)
         }
-        return withContext(Dispatchers.IO) {
-            val result = NativeBridge.writePayload(
-                images = images,
-                compression = compression,
-                level = level,
-                outputPath = outputPath
-            )
-            result.output.split("\n").forEach { line ->
-                if (line.isNotBlank()) onOutputLine?.invoke(line)
+
+        // Delete stale progress sidecar from a previous run (same as dd()).
+        val progressFile = java.io.File("${outputPath}.progress")
+        progressFile.delete()
+
+        // Sidecar poller — same pattern as dd()/extractPayloadPartition():
+        // Rust rewrites the JSON atomically per 4MB chunk; we poll at
+        // 500ms. The phase ladder mirrors the DD build (assembling → 97,
+        // compressed → ≤94, else Rust overall coerced to 0-94).
+        val progressScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val progressJob = progressScope.launch {
+            var lastOverallPercent = -1
+            var lastPhase = ""
+            var lastName = ""
+            while (isActive) {
+                delay(500)
+                if (!isActive) break
+                try {
+                    if (!progressFile.exists()) continue
+                    val content = progressFile.readText().trim()
+                    if (content.isEmpty()) continue
+                    try {
+                        val json = org.json.JSONObject(content)
+                        val current = json.optInt("current", 0)
+                        val total = json.optInt("total", 0)
+                        val name = json.optString("name", "")
+                        val phase = json.optString("phase", "")
+                        val partitionPercent = json.optInt("partition_percent", 0)
+                        val overallPercent = json.optInt("overall_percent", 0)
+
+                        val displayPercent = when (phase) {
+                            "assembling" -> 97
+                            "compressed" -> (current * 100 / total.coerceAtLeast(1)).coerceAtMost(94)
+                            else -> overallPercent.coerceIn(0, 94)
+                        }
+
+                        // Emit only when something visibly changed (same
+                        // dedup discipline as dd()'s poller).
+                        if (displayPercent != lastOverallPercent || name != lastName || phase != lastPhase) {
+                            lastOverallPercent = displayPercent
+                            lastName = name
+                            lastPhase = phase
+                            val message = when (phase) {
+                                "compressing" -> if (name.isNotEmpty()) "Compressing $name" else "Compressing…"
+                                "compressed" -> if (name.isNotEmpty()) "Compressed $name" else "Compressing…"
+                                "assembling" -> "Assembling payload.bin"
+                                else -> if (name.isNotEmpty()) "Processing $name" else "Building…"
+                            }
+                            // During assembling / partition-complete the
+                            // per-partition bar is saturated at 100.
+                            val pPct = when (phase) {
+                                "assembling", "compressed" -> 100
+                                else -> partitionPercent
+                            }
+                            onProgress?.invoke(ProgressUpdate(
+                                current = current,
+                                total = total,
+                                message = message,
+                                percent = displayPercent,
+                                partitionPercent = pPct
+                            ))
+                        }
+                    } catch (_: Exception) {
+                        // JSON parse error — mid-write read; retry next poll
+                    }
+                } catch (_: Exception) {
+                    // Progress polling is non-critical — ignore all errors
+                }
             }
-            result
+        }
+
+        // AUDIT-F1: cleanup OUTSIDE withContext — every exit path
+        // (including caller cancellation before the JNI call starts)
+        // cancels the poller and deletes the sidecar.
+        try {
+            return withContext(Dispatchers.IO) {
+                val result = NativeBridge.writePayload(
+                    images = images,
+                    compression = compression,
+                    level = level,
+                    outputPath = outputPath
+                )
+                result.output.split("\n").forEach { line ->
+                    if (line.isNotBlank()) onOutputLine?.invoke(line)
+                }
+                result
+            }
+        } finally {
+            progressScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            progressJob.cancel()
+            progressFile.delete()
         }
     }
 

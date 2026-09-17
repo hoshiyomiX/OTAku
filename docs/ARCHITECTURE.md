@@ -153,7 +153,9 @@ Extract:  extractAllPayloadPartitions → OTAService("Extracting payload…")
           → split bars + notification "Extracting system (2/7) — 43%"
 Write:    menu "Build payload.bin…" → compression dialog → writePayload
           (images, compression, level) → OTAService("Building payload…")
-          + WakeLock → per-partition summaries in the log
+          + WakeLock → <output>.progress sidecar → 500ms poller
+          → split bars + notification "Compressing system (2/7) — 43%"
+          → per-partition summaries in the log
 Verify:   verifyPayload(output) — CrAU magic + header + manifest re-read
           (fast: no data-blob re-hash) → check log in the UI
 ```
@@ -243,7 +245,7 @@ The progress sidecar file is the **only** mechanism for Rust → Kotlin progress
 
 ### Write side (Rust)
 
-`write_progress_with_percent()` in `dd.rs` writes the JSON after every 4 MB chunk during compression. For payload extraction, `ProgressSidecarWriter` in `payload.rs` slices every `write_all` into ≤4 MB chunks and rewrites the sidecar atomically (tmp + rename) after each. The write is best-effort — failures are silently ignored (`let _ = std::fs::write(...)`).
+`write_progress_with_percent()` in `dd.rs` writes the JSON after every 4 MB chunk during compression; it is shared (`pub(crate)`) with the payload.bin build — `write_payload` calls it from the `_with_progress` compression callback (`compressing` / `compressed`) and from the data-blob copy loop (`assembling`). For payload extraction, `ProgressSidecarWriter` in `payload.rs` slices every `write_all` into ≤4 MB chunks and rewrites the sidecar atomically (tmp + rename) after each. The write is best-effort — failures are silently ignored (`let _ = std::fs::write(...)`).
 
 ### Read side (Kotlin)
 
@@ -335,7 +337,8 @@ Main Thread (UI)
 buildScope (Application-scoped CoroutineScope)
 ├── OTABridge.dd() → withContext(Dispatchers.IO) → NativeBridge.buildDd()
 ├── extractPayloadPartition() per partition (sidecar poller per call)
-├── writePayload() / verifyPayload() → NativeBridge (single JNI call each)
+├── writePayload() → NativeBridge (single JNI call) + sidecar poller
+├── verifyPayload() → NativeBridge (single fast JNI call)
 ├── WakeLock held during build / extract / payload-write operations (via OTAService foreground service)
 ├── Process.setThreadPriority(-10) for the build thread
 └── Progress polling coroutine (Dispatchers.IO, 500ms interval)

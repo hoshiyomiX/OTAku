@@ -2515,8 +2515,10 @@ class MainActivity : AppCompatActivity() {
     /**
      * Build payload.bin from the loaded images on buildScope, then
      * self-verify the output. Long-run protection mirrors the DD build:
-     * OTAService foreground + WakeLock. No .progress sidecar yet — the
-     * per-partition log lines arrive when the native call returns.
+     * OTAService foreground + WakeLock. Progress mirrors the DD build and
+     * the payload extract path: Rust writes the per-partition .progress
+     * sidecar, OTABridge polls it, and it surfaces in the split progress
+     * bars, the log, and the foreground notification.
      */
     private fun buildPayloadBin(images: Map<String, String>, compression: String) {
         // AUDIT-F5 pattern: capture on the UI thread BEFORE buildScope.
@@ -2535,6 +2537,11 @@ class MainActivity : AppCompatActivity() {
             n++
         }
         val outPath = out.absolutePath
+
+        // Rust processes partitions in alphabetical order (deterministic
+        // manifest) — the split bars must match that order.
+        val sortedNames = images.keys.sorted()
+        partitionNames = sortedNames
 
         setUIExecuting(true)
         isExecuting = true
@@ -2560,6 +2567,11 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+                // Split progress bars — one bar per partition, in Rust's
+                // alphabetical processing order (same setup as the extract
+                // batch loop).
+                runOnUiThread { setupSplitProgressBar(sortedNames) }
+
                 showLog(
                     "[*] Building payload.bin — ${images.size} partitions, " +
                         "compression=$compression, level=$effectiveLevel, output=$outPath",
@@ -2570,8 +2582,76 @@ class MainActivity : AppCompatActivity() {
                     images = images,
                     compression = compression,
                     level = level,
-                    outputPath = outPath
-                ) { line -> showLog(line, LogLevel.PLAIN) }
+                    outputPath = outPath,
+                    onProgress = { progress ->
+                        // Per-partition bar + mark previous bars complete
+                        // (same consumer as the extract batch loop).
+                        if (partitionCount > 0) {
+                            val pIdx = progress.current - 1
+                            if (pIdx in 0 until partitionCount) {
+                                updatePartitionProgress(pIdx, progress.partitionPercent)
+                                synchronized(progressLock) {
+                                    for (j in 0 until pIdx) {
+                                        if (partitionProgress[j] < 100) partitionProgress[j] = 100
+                                    }
+                                }
+                            }
+                        }
+
+                        // Foreground notification — "Compressing system (2/7) — 43%"
+                        val notifMsg = if (progress.partitionPercent in 1..99) {
+                            "${progress.message} (${progress.current}/${progress.total}) — ${progress.partitionPercent}%"
+                        } else {
+                            "${progress.message} (${progress.current}/${progress.total})"
+                        }
+                        if (notifMsg != lastProgressMessage || progress.percent != lastNotifPercent) {
+                            lastProgressMessage = notifMsg
+                            lastNotifPercent = progress.percent
+                            showProgressNotification(notifMsg, progress.percent)
+                        }
+
+                        // Log line on percent change (persist always — K3 pattern)
+                        if (progress.partitionPercent != lastProgressPercent) {
+                            lastProgressPercent = progress.partitionPercent
+                            val logMsg = if (progress.partitionPercent in 1..99) {
+                                "${progress.message} ${progress.partitionPercent}%"
+                            } else {
+                                progress.message
+                            }
+                            val line = if (logMsg.endsWith("\n")) logMsg else "$logMsg\n"
+                            appendToSavedLog(line)
+                            val current = activityRef?.get()
+                            if (current != null && !current.isFinishing && !current.isDestroyed) {
+                                current.runOnUiThread { current.appendLogLineUI(line, LogLevel.PLAIN) }
+                            }
+                        }
+
+                        // Live bar re-render
+                        val current = activityRef?.get()
+                        if (current != null && !current.isFinishing && !current.isDestroyed) {
+                            current.runOnUiThread {
+                                val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
+                                val barRow = container?.findViewWithTag("bar_row") as? android.widget.LinearLayout
+                                if (barRow != null && barRow.childCount == partitionCount) {
+                                    val snapshot = snapshotPartitionProgress()
+                                    for (i in 0 until partitionCount) {
+                                        val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
+                                        bar?.let {
+                                            it.isIndeterminate = false
+                                            it.progress = snapshot[i]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onOutputLine = { line -> showLog(line, LogLevel.PLAIN) }
+                )
+
+                // All partitions processed — saturate the bars (success or
+                // error; the log lines that follow tell the story).
+                markAllProgressComplete()
+                runOnUiThread { renderPartitionProgress(true) }
 
                 if (result.success) {
                     showLog(
@@ -2608,6 +2688,7 @@ class MainActivity : AppCompatActivity() {
                 isExecuting = false
                 lastProgressMessage = ""
                 lastNotifPercent = -1
+                lastProgressPercent = -1
                 val current = activityRef?.get()
                 if (current != null && !current.isFinishing && !current.isDestroyed) {
                     current.setUIExecuting(false)

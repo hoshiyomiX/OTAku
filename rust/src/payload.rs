@@ -16,7 +16,8 @@ use std::path::Path;
 
 use crate::compression::{
     decompress_to_writer, detect_compression, detect_from_data,
-    hash_and_compress_file_to_writer, operation_type_for_algorithm,
+    hash_and_compress_file_to_writer_with_progress,
+    operation_type_for_algorithm,
 };
 #[cfg(test)]
 use crate::compression::decompress;
@@ -651,7 +652,17 @@ pub struct WritePayloadResult {
     pub error: Option<String>,
 }
 
-/// Generate a payload.bin from partition images.
+/// Generate a payload.bin from partition images, with real-time progress.
+///
+/// Progress sidecar (same design as the DD build — see
+/// [`crate::dd::write_progress_with_percent`]): during the build, Rust
+/// writes `<output_path>.progress` atomically with the phases
+/// `compressing` (per 4MB chunk, `partition_percent` authoritative),
+/// `compressed` (partition finished), and `assembling` (header +
+/// manifest + data-blob copy). Kotlin polls it every 500ms. The sidecar
+/// is removed on BOTH the success and the error path before this
+/// returns — Kotlin's finally block also deletes it (belt and
+/// suspenders, same discipline as run_dd_build).
 ///
 /// # Arguments
 /// * `output_path` - Path for the output payload.bin
@@ -660,6 +671,30 @@ pub struct WritePayloadResult {
 /// * `minor_version` - Payload minor version
 /// * `level` - Compression level (None = use algorithm default)
 pub fn write_payload(
+    output_path: &str,
+    partitions_data: &[PartitionData],
+    block_size: u32,
+    minor_version: u32,
+    level: Option<i32>,
+) -> WritePayloadResult {
+    let result = write_payload_inner(
+        output_path,
+        partitions_data,
+        block_size,
+        minor_version,
+        level,
+    );
+    // The .progress sidecar is transient — remove it on the success AND
+    // the error path so a stale file can never leak into the next build
+    // (same discipline as run_dd_build; Kotlin's finally also deletes).
+    crate::dd::delete_progress_file(output_path);
+    result
+}
+
+/// Implementation of [`write_payload`] — see its doc for the sidecar
+/// contract. Every error path below relies on the public wrapper to
+/// remove the sidecar afterwards.
+fn write_payload_inner(
     output_path: &str,
     partitions_data: &[PartitionData],
     block_size: u32,
@@ -685,7 +720,7 @@ pub fn write_payload(
     // per-app heap limit.
     //
     // Fix: Stream each partition's compressed data directly to a temp file
-    // using `hash_and_compress_file_to_writer`, which never holds the
+    // using `hash_and_compress_file_to_writer_with_progress`, which never holds the
     // compressed output in memory. We only track (offset, compressed_size)
     // per partition for building the manifest later.
     //
@@ -723,6 +758,15 @@ pub fn write_payload(
             };
         }
     };
+
+    // Progress estimation total — sum of input image sizes, the same
+    // convention as run_dd_build's total_estimated (the sidecar carries
+    // it so Kotlin can render byte counters alongside percentages).
+    let total_estimated: u64 = partitions_data
+        .iter()
+        .map(|p| std::fs::metadata(&p.image_path).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    let blobs_tmp_path_str = blobs_tmp_path.to_string_lossy().to_string();
 
     for (idx, part) in partitions_data.iter().enumerate() {
         let name = &part.name;
@@ -767,27 +811,74 @@ pub fn write_payload(
             alg
         ));
 
-        // Stream compressed data directly to blobs temp file.
-        // hash_and_compress_file_to_writer writes compressed chunks as they
-        // are produced, never holding the full compressed output in memory.
-        // It returns (compressed_size, sha256_hex_of_raw).
-        let (compressed_size, hash_hex) = match hash_and_compress_file_to_writer(
-            image_path, alg, level, &mut blobs_file,
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                let _ = std::fs::remove_file(&blobs_tmp_path);
-                return WritePayloadResult {
-                    success: false,
-                    output: format!("Compression failed for {}: {}", name, e),
-                    output_path: None,
-                    file_size: None,
-                    partitions: partition_summaries,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    error: Some(format!("Compression failed for {}: {}", name, e)),
-                };
-            }
-        };
+        // Stream compressed data directly to blobs temp file, with
+        // per-chunk progress. hash_and_compress_file_to_writer_with_progress
+        // writes compressed chunks as they are produced (never holding the
+        // full compressed output in memory) and invokes on_progress after
+        // every 4MB chunk read — the callback rewrites the .progress
+        // sidecar so Kotlin's 500ms poller sees smooth percentages.
+        // The writer moves BY VALUE and is handed back on return (borrow
+        // rules — same pattern as run_dd_build).
+        let output_path_owned = output_path.to_string();
+        let blobs_tmp_path_clone = blobs_tmp_path.clone();
+        let name_clone = name.clone();
+        let (comp_result, returned_blobs_file) =
+            match hash_and_compress_file_to_writer_with_progress(
+                image_path, alg, level, blobs_file,
+                Some(&mut |bytes_read: u64, file_size: u64| {
+                    let pct = (bytes_read * 100)
+                        .checked_div(file_size)
+                        .map(|v| v as i32)
+                        .unwrap_or(100);
+                    // Current blobs temp size = compressed bytes so far
+                    // (the file handle itself was moved into the
+                    // compressor, so stat by path — like run_dd_build).
+                    let current_size = std::fs::metadata(&blobs_tmp_path_clone)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    crate::dd::write_progress_with_percent(
+                        &output_path_owned,
+                        idx + 1,
+                        total_images,
+                        &name_clone,
+                        "compressing",
+                        current_size,
+                        Some(&blobs_tmp_path_str),
+                        total_estimated,
+                        pct,
+                    );
+                }),
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&blobs_tmp_path);
+                    return WritePayloadResult {
+                        success: false,
+                        output: format!("Compression failed for {}: {}", name, e),
+                        output_path: None,
+                        file_size: None,
+                        partitions: partition_summaries,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        error: Some(format!("Compression failed for {}: {}", name, e)),
+                    };
+                }
+            };
+        blobs_file = returned_blobs_file;
+        let compressed_size = comp_result.comp_size;
+        let hash_hex = comp_result.unc_hash_hex;
+
+        // Progress: this partition's compression is done (100%).
+        crate::dd::write_progress_with_percent(
+            output_path,
+            idx + 1,
+            total_images,
+            name,
+            "compressed",
+            std::fs::metadata(&blobs_tmp_path).map(|m| m.len()).unwrap_or(0),
+            Some(&blobs_tmp_path_str),
+            total_estimated,
+            100,
+        );
 
         // Decode the hex string back to bytes for protobuf fields.
         // BUG FIX: Previously used unwrap_or_default() which silently produced
@@ -982,12 +1073,41 @@ pub fn write_payload(
         let mut blobs_reader = File::open(&blobs_tmp_path)
             .map_err(|e| format!("Cannot open blobs temp file: {}", e))?;
         let mut copy_buf = [0u8; 4 * 1024 * 1024]; // 4MB buffer
+        // "assembling" phase progress — the final I/O copy is multi-GB
+        // for real ROMs, so the sidecar keeps moving here too (Kotlin
+        // maps this phase to 97%, like the DD build's writing_zip).
+        // Throttled to 1% steps; checked_div per the clippy
+        // manual_checked_ops discipline.
+        let total_to_copy = current_data_offset;
+        let mut bytes_copied: u64 = 0;
+        let mut last_copy_pct: i32 = -1;
         loop {
             let n = blobs_reader.read(&mut copy_buf)
                 .map_err(|e| format!("Read blobs temp error: {}", e))?;
             if n == 0 { break; }
             f.write_all(&copy_buf[..n])
                 .map_err(|e| format!("Write data blob error: {}", e))?;
+            bytes_copied += n as u64;
+            if total_to_copy > 0 {
+                let copy_pct = (bytes_copied * 100)
+                    .checked_div(total_to_copy)
+                    .map(|v| v.min(100) as i32)
+                    .unwrap_or(100);
+                if copy_pct != last_copy_pct {
+                    last_copy_pct = copy_pct;
+                    crate::dd::write_progress_with_percent(
+                        output_path,
+                        total_images,
+                        total_images,
+                        "",
+                        "assembling",
+                        bytes_copied,
+                        Some(&blobs_tmp_path_str),
+                        total_estimated,
+                        100,
+                    );
+                }
+            }
         }
 
         f.flush()
