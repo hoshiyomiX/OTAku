@@ -1,14 +1,21 @@
-//! AOSP OTA payload.bin read / write / extract operations.
+//! OTAku custom payload.bin read / write / extract operations.
 //!
-//! File format (Brillo / update_engine v2):
-//!   Offset 0   :  "CrAU"                        (4 bytes)
+//! FORMAT DECISION (T27, Option B): this is OTAku's OWN custom payload
+//! format — NOT an AOSP/update_engine payload. The framing was originally
+//! modeled on Brillo v2, but the protobuf field numbers and enum values
+//! have always been OTAku-internal (see proto.rs). The magic was therefore
+//! changed from the AOSP lookalike "CrAU" to "OTKU" so that standard
+//! payload tools (update_engine, payload-dumper) reject our files cleanly
+//! instead of mis-parsing them, and our reader rejects real AOSP payloads
+//! cleanly instead of mis-parsing those. Read + write speak OTKU only.
+//!
+//! File format (OTAku custom, v2):
+//!   Offset 0   :  "OTKU"                        (4 bytes)
 //!   Offset 4   :  header protobuf length         (8 bytes BE)
 //!   Offset 12  :  PayloadHeader protobuf         (variable)
 //!   Offset 12+N:  DeltaArchiveManifest protobuf  (variable)
 //!   Offset 12+N+M: data blobs ...               (variable)
 //!   [optional] :  metadata signature block       (variable)
-//!
-//! Ported from Python payload.py to Rust with identical semantics.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -33,10 +40,15 @@ use crate::proto::{
 //  Constants
 // ---------------------------------------------------------------------------
 
-/// Payload magic bytes: "CrAU"
-pub const DELTA_MAGIC: [u8; 4] = *b"CrAU";
+/// Payload magic bytes: "OTKU" — OTAku custom format (T27 Option B).
+/// Deliberately NOT "CrAU": we are not an AOSP payload, and using the
+/// AOSP magic made both sides mis-parse each other (T25 finding F1).
+pub const DELTA_MAGIC: [u8; 4] = *b"OTKU";
+/// Legacy AOSP magic — recognized ONLY to produce an honest rejection
+/// message. Never accepted for parsing.
+pub const AOSP_MAGIC: [u8; 4] = *b"CrAU";
 pub const HEADER_PROTOBUF_SIZE: usize = 8; // uint64 big-endian
-pub const MAJOR_VERSION: u32 = 2; // Brillo v2
+pub const MAJOR_VERSION: u32 = 2; // format family v2 (OTAku custom)
 pub const DEFAULT_BLOCK_SIZE: u32 = 4096;
 pub const METADATA_SIG_ALIGNMENT: u64 = 4096;
 
@@ -96,8 +108,18 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
     file.read_exact(&mut magic)
         .map_err(|e| format!("Cannot read magic: {}", e))?;
     if magic != DELTA_MAGIC {
+        if magic == AOSP_MAGIC {
+            // Option B: we speak OTAku's custom format only. Say so plainly
+            // instead of half-parsing an AOSP payload (the old F1 failure
+            // mode: lenient parse produced garbage partitions=0).
+            return Err(
+                "This is an AOSP OTA payload.bin, which OTAku does not support. \
+                 OTAku reads/writes its own custom payload format (magic 'OTKU')."
+                    .to_string(),
+            );
+        }
         return Err(format!(
-            "Invalid payload magic: expected 'CrAU', got {:?}",
+            "Invalid payload magic: expected 'OTKU', got {:?}",
             magic
         ));
     }
@@ -1072,7 +1094,11 @@ fn write_payload_inner(
         // we built incrementally in Phase 1, using only a 4MB read buffer.
         let mut blobs_reader = File::open(&blobs_tmp_path)
             .map_err(|e| format!("Cannot open blobs temp file: {}", e))?;
-        let mut copy_buf = [0u8; 4 * 1024 * 1024]; // 4MB buffer
+        // F14 fix (T27, found by test_otku_round_trip): this was a 4MB STACK
+        // array — overflowed test threads (~2MB stack) and is a latent crash
+        // on any JNI thread with a small stack (ART default -Xss ≈ 1MB).
+        // Heap-allocate instead; identical streaming semantics.
+        let mut copy_buf = vec![0u8; 4 * 1024 * 1024]; // 4MB buffer
         // "assembling" phase progress — the final I/O copy is multi-GB
         // for real ROMs, so the sidecar keeps moving here too (Kotlin
         // maps this phase to 97%, like the DD build's writing_zip).
@@ -1173,7 +1199,7 @@ pub struct VerifyResult {
 /// Self-verify a generated payload.bin by re-reading it.
 ///
 /// Checks:
-/// - Valid "CrAU" magic
+/// - Valid "OTKU" magic (OTAku custom format)
 /// - Parseable header and manifest
 /// - Partition count
 pub fn verify_payload(path: &str) -> VerifyResult {
@@ -1283,4 +1309,120 @@ fn decode_hex_sha256(hex: &str) -> Option<Vec<u8>> {
         out.push(byte);
     }
     Some(out)
+}
+
+// ---------------------------------------------------------------------------
+//  Tests — payload format (T27 Fase-3a: magic + round-trip coverage)
+//  payload.rs previously had ZERO tests — the exact blind spot that let
+//  the AOSP-lookalike magic survive (T25 finding F1).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("otaku_t27_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn make_image(dir: &std::path::Path, name: &str, size: usize) -> String {
+        let p = dir.join(name);
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&p, data).unwrap();
+        p.to_string_lossy().to_string()
+    }
+
+    /// Option B core invariant: OTAku writes OTKU, reads OTKU back.
+    #[test]
+    fn test_otku_round_trip() {
+        let dir = temp_dir("rt");
+        let img = make_image(&dir, "boot.img", 8192);
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img,
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write_payload gagal: {:?}", res.error);
+
+        // Magic is OTKU on disk.
+        let mut head = [0u8; 4];
+        use std::io::Read as _;
+        std::io::Read::read_exact(
+            &mut std::fs::File::open(&out).unwrap(),
+            &mut head,
+        )
+        .unwrap();
+        assert_eq!(&head, b"OTKU", "magic di-disk bukan OTKU");
+
+        // Read-back parses: 1 partition, block size preserved.
+        let info = read_payload(&out).expect("read_payload OTKU gagal");
+        assert_eq!(info.manifest.partitions.len(), 1);
+        assert_eq!(info.manifest.block_size, 4096);
+        assert_eq!(info.header.version, MAJOR_VERSION as u64);
+
+        // Self-verify passes.
+        let v = verify_payload(&out);
+        assert!(v.success, "verify_payload gagal: {:?}", v.error);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An AOSP payload (CrAU magic) must be rejected with the honest
+    /// "not supported" message — never half-parsed.
+    #[test]
+    fn test_aosp_magic_rejected_honestly() {
+        let dir = temp_dir("crau");
+        let p = dir.join("aosp.bin");
+        // Minimal AOSP-shaped file: magic + BE u64 header len + junk.
+        let mut content = Vec::new();
+        content.extend_from_slice(b"CrAU");
+        content.extend_from_slice(&16u64.to_be_bytes());
+        content.extend_from_slice(&[0u8; 24]);
+        std::fs::write(&p, content).unwrap();
+        let err = read_payload(&p.to_string_lossy()).err().expect("harus ditolak");
+        assert!(
+            err.contains("AOSP") && err.contains("does not support"),
+            "pesan penolakan AOSP tidak jujur: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Garbage magic gets the plain invalid-magic error.
+    #[test]
+    fn test_garbage_magic_rejected() {
+        let dir = temp_dir("junk");
+        let p = dir.join("junk.bin");
+        std::fs::write(&p, b"XXXXjunkjunkjunk").unwrap();
+        let err = read_payload(&p.to_string_lossy()).err().expect("harus ditolak");
+        assert!(
+            err.contains("expected 'OTKU'"),
+            "pesan magic tidak menyebut OTKU: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Legacy OTAku files (built before T27, magic CrAU with OTAku's own
+    /// deviant schema) are ALSO rejected — clean break, no hybrid parsing.
+    #[test]
+    fn test_legacy_otaku_files_rejected() {
+        // Same rejection path as real AOSP files: magic CrAU -> honest error.
+        // (Old OTAku payloads and real AOSP payloads are indistinguishable by
+        // magic alone; both get the same clear message.)
+        let dir = temp_dir("legacy");
+        let p = dir.join("legacy.bin");
+        let mut content = Vec::new();
+        content.extend_from_slice(b"CrAU");
+        content.extend_from_slice(&8u64.to_be_bytes());
+        content.extend_from_slice(&[0u8; 8]);
+        std::fs::write(&p, content).unwrap();
+        assert!(read_payload(&p.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

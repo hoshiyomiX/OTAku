@@ -826,10 +826,11 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
 ///
 /// Kotlin: `external fun nativeVerifyPayload(path: String): String`
 ///
-/// Checks the "CrAU" magic, header + manifest parseability, partition
-/// count, and echoes each partition's manifest hash. Header/manifest only —
-/// it does NOT re-hash the data blobs, so it is fast even for multi-GB
-/// payloads. Returns the serialized VerifyResult (success, output, error).
+/// Checks the "OTKU" magic (OTAku custom payload format), header + manifest
+/// parseability, partition count, and echoes each partition's manifest hash.
+/// Header/manifest only — it does NOT re-hash the data blobs, so it is fast
+/// even for multi-GB payloads. Returns the serialized VerifyResult
+/// (success, output, error).
 #[no_mangle]
 pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeVerifyPayload(
     mut env: JNIEnv,
