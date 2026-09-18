@@ -2326,7 +2326,12 @@ if [ -n "$TARGET_SLOT" ]; then
         # Extract slot letter without underscore (e.g. _b → b)
         SLOT_LETTER=$(echo "$TARGET_SLOT" | sed 's/^_//')
         if [ -n "$SLOT_LETTER" ]; then
-            bootctl set-active-boot-slot $SLOT_LETTER 2>/dev/null || \
+            # F4 fix: bootctl set-active-boot-slot takes a NUMBER (0=a, 1=b).
+            # Passing the letter made strtoul() parse it as 0 = slot A — the
+            # OPPOSITE of the intended slot on every _b device. fastboot
+            # set_active still expects the letter, so keep it as-is there.
+            SLOT_NUM=$(echo "$SLOT_LETTER" | tr 'ab' '01')
+            bootctl set-active-boot-slot $SLOT_NUM 2>/dev/null || \
                 fastboot set_active $SLOT_LETTER 2>/dev/null || true
         fi
     else

@@ -85,6 +85,35 @@ use super::*;
         );
     }
 
+
+    /// F4: bootctl set-active-boot-slot must receive a NUMBER (0=a, 1=b) —
+    /// the letter form was parsed by strtoul() as 0 (slot A), the opposite
+    /// of the intended slot. fastboot set_active keeps the letter.
+    #[test]
+    fn test_f4_bootctl_slot_number() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            s.contains("bootctl set-active-boot-slot $SLOT_NUM"),
+            "F4 REGRESSION: bootctl menerima huruf lagi (strtoul('b')=0 = slot A)"
+        );
+        assert!(
+            s.contains("SLOT_NUM=$(echo \"$SLOT_LETTER\" | tr 'ab' '01')"),
+            "F4: konversi huruf->angka hilang"
+        );
+        assert!(
+            s.contains("fastboot set_active $SLOT_LETTER"),
+            "F4: fastboot harus tetap menerima huruf"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────
     // T27 golden template lock — byte-identical guarantee
     // ──────────────────────────────────────────────────────────────
@@ -126,7 +155,7 @@ use super::*;
         let hexstr: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hexstr,
-            "d97982f6d47f9b13cfc64c02cc668f6fa1f93d63c259152f953d4dd06bd1e267",
+            "ee31071ec089b839c03284529ceb74d67427d5ee390e9b77f261cb93c798277f",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
