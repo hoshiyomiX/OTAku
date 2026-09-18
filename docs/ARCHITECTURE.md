@@ -20,9 +20,11 @@
 │  │  ├── ActionSection                                             │  │
 │  │  │   ├── Floating Build FAB "Build OTA Now" (T19 —            │
 │  │  │   │ enabled when ready; bottom-end overlay)                │
-│  │  │   └── Per-partition progress bars (full actions also    │  │
-│  │  │       in the TopAppBar overflow menu since T14: Build   │  │
-│  │  │       OTA ZIP / Inspect / Build payload.bin)            │  │
+│  │  │   └── Progress pop-up dialog (T29 — MD3 circular        │  │
+│  │  │       indicator mirroring the notification; full        │  │
+│  │  │       actions also live in the TopAppBar overflow       │  │
+│  │  │       menu since T14: Build OTA ZIP / Inspect /         │  │
+│  │  │       Build payload.bin)                                │  │
 │  │  └── LogSection (FLOATING overlay, T16)                    │  │
 │  │      └── MaterialCardView gravity=bottom — morphable       │  │
 │  │          pill ↔ card > ScrollView > TextView (log output)  │  │
@@ -158,7 +160,7 @@ OTABridge: emit Rust output lines to log, cancel progress polling,
            return OTAResult.success / OTAResult.error
     │
     ▼
-UI: Per-partition progress bars + log output + notification
+UI: Progress pop-up (T29) + log output + notification
 ```
 
 ## Payload.bin Toolchain Flow (prototype)
@@ -192,7 +194,7 @@ fun onBuildClicked() {
             level = selectedCompressionLevel,
             outputPath = outPath,
             skipVerify = skipVerifyCheckbox.isChecked,
-            onProgress = { progress -> /* update UI progress bars */ },
+            onProgress = { progress -> /* notification + progress pop-up */ },
             onOutputLine = { line -> /* append to log TextView */ }
         )
         handleBuildResult(result)
@@ -351,7 +353,8 @@ All file operations default to app-internal storage:
 ```
 Main Thread (UI)
 ├── Button clicks → dispatch to buildScope (application-scoped coroutine)
-├── Progress bar updates → posted to Main thread via onProgress callback
+├── Progress pop-up + notification updates → mirrored via
+│   showProgressNotification (T29)
 └── TextView log append → posted to Main thread via onOutputLine callback
 
 buildScope (Application-scoped CoroutineScope)

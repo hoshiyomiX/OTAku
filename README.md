@@ -45,7 +45,7 @@ All five algorithms are **always available** — they are statically compiled in
 │  │  ├─ Device codename + Auto-detect                 │  │
 │  │  ├─ Partition image picker (SAF)                   │  │
 │  │  ├─ Compression selector + level                   │  │
-│  │  ├─ Per-partition progress bars                    │  │
+│  │  ├─ Progress pop-up dialog, MD3 circular (T29)     │  │
 │  │  ├─ Floating "Build OTA Now" button (T19)       │  │
 │  │  └─ Log output + Copy/Clear                        │  │
 │  └───────────────────────┬───────────────────────────┘  │

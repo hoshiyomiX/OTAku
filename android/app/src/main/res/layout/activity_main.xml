@@ -14,7 +14,6 @@
     │   Settings Card                     │
     │     Device / Partitions /           │
     │     Compression / Level / Output    │
-    │   ProgressBar (per-partition bars)  │
     ├──────────────────────────────────────┤
     │ ~~ FLOATING Log Card (overlay) ~~   │
     │   gravity=bottom — morphable        │
@@ -23,6 +22,11 @@
     │ + FAB "Build OTA Now" (bottom-end,  │
     │   shows when inputs are filled)     │
     └────────────────────────────────────────┘
+
+    Progress display (T29): no in-flow element anymore — long-running
+    operations (DD OTA build / payload build / payload extract) show a
+    modal MD3 progress pop-up (dialog_progress_build.xml) that mirrors
+    the foreground notification's (message, percent).
 -->
 <androidx.coordinatorlayout.widget.CoordinatorLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
@@ -596,19 +600,6 @@
                     </LinearLayout>
 
                 </com.google.android.material.card.MaterialCardView>
-
-                <!-- ═══════════════════════════════════════════════════ -->
-                <!-- Progress Bar (per-partition bars while building)        -->
-                <!-- ═══════════════════════════════════════════════════ -->
-
-                <!-- Per-partition progress bars + labels (built programmatically) -->
-                <LinearLayout
-                    android:id="@+id/progressBarContainer"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:visibility="gone"
-                    android:layout_marginBottom="8dp" />
 
             </LinearLayout>
 

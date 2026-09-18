@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    dialog_progress_build.xml — OTAku
+
+    Progress pop-up (T29): replaces the inline per-partition split progress
+    bars (progressBarContainer) that used to sit under the settings card.
+    Shown while a long-running operation is active — DD OTA build, payload
+    build, or payload extract — and mirrors exactly what the foreground
+    notification shows: the (message, percent) pairs funneled through
+    showProgressNotification(), fed by the same .progress sidecar polling.
+
+    MD3 CircularProgressIndicator (determinate) — the migration target of
+    the old LinearProgressIndicator split row. Style + attrs verified
+    against the material 1.12.0 AAR. Indicator + track follow the ACTIVE
+    theme palette via ?attr (Material You on API 31+, Suisei Blue below).
+
+    Non-cancelable by design: builds cannot be aborted (no Rust-side cancel
+    plumbing exists); the "Hide" button dismisses the VIEW only — the build
+    keeps running, tracked by the notification and the log card.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:paddingHorizontal="8dp"
+    android:paddingTop="8dp">
+
+    <com.google.android.material.progressindicator.CircularProgressIndicator
+        android:id="@+id/progressDialogCircular"
+        style="@style/Widget.Material3.CircularProgressIndicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:max="100"
+        android:contentDescription="@string/cd_progress_overall"
+        app:indicatorSize="96dp"
+        app:trackThickness="10dp"
+        app:trackCornerRadius="5dp"
+        app:indicatorColor="?attr/colorPrimary"
+        app:trackColor="?attr/colorSurfaceVariant"
+        tools:progress="43" />
+
+    <TextView
+        android:id="@+id/progressDialogPercentText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:textAppearance="?attr/textAppearanceHeadlineMedium"
+        android:textColor="?attr/colorOnSurface"
+        android:maxLines="1"
+        tools:text="43%" />
+
+    <TextView
+        android:id="@+id/progressDialogStatusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:gravity="center_horizontal"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:maxLines="2"
+        android:ellipsize="end"
+        tools:text="Compressing system (2/7) — 43%" />
+
+</LinearLayout>

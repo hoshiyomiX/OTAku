@@ -133,6 +133,12 @@ class MainActivity : AppCompatActivity() {
         // Track last notification progress bar percent for dedup
         @Volatile private var lastNotifPercent: Int = -1
 
+        // T29: title of the running long-running operation (DD OTA build /
+        // payload build / payload extract) — drives the progress pop-up shown
+        // by setUIExecuting(true), re-seeded after Activity recreation via
+        // the companion (message, percent) mirrors below.
+        @Volatile private var currentOpTitle: String = ""
+
         // Persisted log text (survives Activity recreation)
         // Truncated to MAX_LOG_BYTES to prevent OOM during long builds in
         // floating window mode (rapid onResume/onPause cycles cause full
@@ -151,35 +157,6 @@ class MainActivity : AppCompatActivity() {
         // Threshold: if no progress for this long (ms), process is assumed dead
         private const val DEAD_PROCESS_THRESHOLD_MS = 120_000L  // 2 minutes
 
-        // Per-partition split progress bar state
-        @Volatile private var partitionCount: Int = 0
-        @Volatile private var partitionProgress: IntArray = IntArray(0)
-        @Volatile private var currentPartitionIndex: Int = -1
-
-        // IMPL-011: Thread-safe snapshot of partitionProgress contents.
-        // @Volatile ensures visibility of the array REFERENCE, but NOT the
-        // array CONTENTS. Without synchronization, copyOf() called from
-        // onConfigurationChanged/onResume (UI thread) can observe a
-        // partially-written array while the build coroutine (Dispatchers.Default)
-        // is updating elements. The lock is on the companion object itself
-        // (this), which is safe because:
-        //   - Kotlin object synchronization is reentrant (same thread can
-        //     re-enter without deadlock)
-        //   - The critical section is tiny (just copyOf), so lock contention
-        //     is negligible even at 500ms poll intervals
-        //   - Only the snapshot reader needs the lock; the writer (onProgress
-        //     callback) also takes the lock to ensure atomic visibility
-        private val progressLock = Any()
-        fun snapshotPartitionProgress(): IntArray = synchronized(progressLock) {
-            partitionProgress.copyOf()
-        }
-        fun updatePartitionProgress(index: Int, value: Int) = synchronized(progressLock) {
-            if (index in partitionProgress.indices) partitionProgress[index] = value
-        }
-        fun markAllProgressComplete() = synchronized(progressLock) {
-            for (i in partitionProgress.indices) partitionProgress[i] = 100
-        }
-        @Volatile private var partitionNames: List<String> = emptyList()
         // Device-supported partition names (from nativeScanDevicePartitions).
         // Populated once on app start, used to check user-picked .img files.
         // If a filename (minus .img) does not match any name in this list,
@@ -298,6 +275,20 @@ class MainActivity : AppCompatActivity() {
                 resolveNotificationAccent(ctx)?.let { builder.setColor(it) }
                 nm.notify(NOTIFICATION_ID, builder.build())
             } catch (_: Exception) { /* notification is non-critical */ }
+
+            // T29: mirror the SAME (message, percent) into the progress
+            // pop-up — the display layer of the .progress sidecar pipeline.
+            // ONE hook covers every producer (initial call, per-chunk sidecar
+            // ticks, heartbeat fallback, completion, onResume re-sync)
+            // because they all funnel through here. Best-effort: the dialog
+            // belongs to the current Activity instance and may not exist
+            // (backgrounded, or hidden via the Hide button).
+            val current = activityRef?.get()
+            if (current != null && !current.isFinishing && !current.isDestroyed) {
+                current.runOnUiThread {
+                    current.updateBuildProgressDialog(percent.coerceIn(0, 100), message)
+                }
+            }
         }
 
         /** Show completion/failure notification (auto-dismissable). */
@@ -358,12 +349,12 @@ class MainActivity : AppCompatActivity() {
          * Always runs (companion-level, uses appContext):
          *   - Sets isBuilding = false
          *   - Fires completion notification (success or failure)
-         *   - Marks all partition progress bars as 100%
          *   - Appends final log line to savedLogText
          *   - Stops the foreground service
          *
          * Conditionally runs (if Activity is alive):
-         *   - setUIExecuting(false) — hides progress bars + re-enables inputs
+         *   - setUIExecuting(false) — dismisses the progress pop-up +
+         *     re-enables inputs
          *   - Sets buildResultDisplayed = true
          *
          * If Activity is dead/null (user backgrounded the app), the UI reset is
@@ -385,12 +376,6 @@ class MainActivity : AppCompatActivity() {
                 showCompletionNotification(false, result.error ?: "Unknown error")
                 appendToSavedLog("\n[ERROR] ${result.error ?: "Unknown error"}\n")
             }
-
-            // Mark all partition progress as complete (companion state)
-            // AUDIT-F2: use the locked helper (IMPL-011) instead of raw array
-            // writes — direct writes here bypassed progressLock and raced
-            // with concurrent onProgress writes from Dispatchers.Default.
-            markAllProgressComplete()
 
             // Stop foreground service (uses appContext, works in background)
             try {
@@ -931,34 +916,6 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    /**
-     * Re-render partition progress bars from companion state.
-     *
-     * IMPL-008: Extracted from 3 duplicate code sites (onConfigurationChanged,
-     * onResume build-in-progress, onResume build-complete) to reduce code
-     * duplication and ensure consistent rendering logic.
-     *
-     * @param forceComplete If true, render all bars at 100% regardless of
-     *   actual progress (used for build completion display).
-     */
-    private fun renderPartitionProgress(forceComplete: Boolean = false) {
-        if (partitionCount <= 0) return
-        val barRow = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-            ?.findViewWithTag<android.widget.LinearLayout>("bar_row")
-        if (barRow != null) {
-            // AUDIT-F2: read through the locked snapshot (IMPL-011) — a raw
-            // indexed read could observe a partially-written array while the
-            // build coroutine (Dispatchers.Default) is updating elements.
-            val snapshot = snapshotPartitionProgress()
-            for (i in 0 until partitionCount) {
-                val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                if (bar != null) {
-                    bar.isIndeterminate = false
-                    bar.progress = if (forceComplete) 100 else snapshot[i]
-                }
-            }
-        }
-    }
     override fun onCreateOptionsMenu(menu: android.view.Menu?): Boolean {
         menuInflater.inflate(R.menu.toolbar_menu, menu)
         updateThemeIcon(menu)
@@ -1954,12 +1911,7 @@ class MainActivity : AppCompatActivity() {
     private var cachedEditDevice: View? = null
     private var cachedBtnAutoDetect: View? = null
     private var cachedEditFilename: View? = null
-    private var cachedProgressContainer: android.widget.LinearLayout? = null
     private var cachedFabBuild: com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton? = null
-    // IMPL-012: Cached bar_row reference — avoids findViewWithTag() on every
-    // onProgress callback (500ms poll interval × multi-minute build = thousands
-    // of calls). Resolved lazily in the onProgress UI update block.
-    private var cachedBarRow: android.widget.LinearLayout? = null
 
     // IMPL-013: Eagerly resolve all frequently-accessed view references.
     // Called once after setContentView() in onCreate(). Previously, these
@@ -1977,7 +1929,6 @@ class MainActivity : AppCompatActivity() {
         cachedEditDevice = findViewById(R.id.editTextDevice)
         cachedBtnAutoDetect = findViewById(R.id.buttonAutoDetect)
         cachedEditFilename = findViewById(R.id.editTextCustomFilename)
-        cachedProgressContainer = findViewById(R.id.progressBarContainer)
         // Also cache log views (previously done in a separate cacheLogViews())
         cachedLogView = findViewById(R.id.textViewLog)
         cachedScrollView = findViewById(R.id.scrollViewLog)
@@ -2357,7 +2308,7 @@ class MainActivity : AppCompatActivity() {
      * PARTIAL_WAKE_LOCK) plus a belt-and-suspenders companion WakeLock keep
      * the CPU alive under Doze, exactly like the DD build path. Progress is
      * reported through the per-partition `.progress` sidecar (Rust writes,
-     * OTABridge polls) and surfaces in the split progress bars, the log,
+     * OTABridge polls) and surfaces in the progress pop-up (T29), the log,
      * and the foreground notification.
      */
     private fun extractAllPayloadPartitions(
@@ -2372,6 +2323,12 @@ class MainActivity : AppCompatActivity() {
             showLog("Operation already in progress. Please wait.", LogLevel.WARN)
             return
         }
+        // T29: reset the mirrored (message, percent) BEFORE the pop-up is
+        // shown by setUIExecuting(true) — the dialog seeds from these, and a
+        // stale pair from the previous operation would flash for one frame.
+        currentOpTitle = getString(R.string.progress_title_extract)
+        lastProgressMessage = ""
+        lastNotifPercent = -1
         setUIExecuting(true)
         isExecuting = true
         // T23: extract used to set ONLY the instance flag — a mid-extract
@@ -2383,11 +2340,7 @@ class MainActivity : AppCompatActivity() {
         lastProgressTime = System.currentTimeMillis()  // heartbeat for dead-process detection
         resumedWhileBuildingLogged = false
         appContext = applicationContext
-        val names = result.partitions.map { it.name }
-        partitionNames = names
-        lastProgressMessage = ""
-        lastNotifPercent = -1
-        showProgressNotification("Extracting payload…", 0)
+        showProgressNotification(getString(R.string.progress_title_extract), 0)
 
         // Foreground service — process priority + service-side WakeLock.
         OTAService.start(applicationContext, "Extracting payload…")
@@ -2409,9 +2362,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // Split progress bars — one bar per manifest partition.
-                runOnUiThread { setupSplitProgressBar(names) }
-
                 val dir = File(payloadExtractDir())
                 dir.mkdirs()
                 val startMs = System.currentTimeMillis()
@@ -2432,19 +2382,6 @@ class MainActivity : AppCompatActivity() {
                         current = idx + 1,
                         total = total,
                         onProgress = { progress ->
-                            // Per-partition bar + mark previous bars complete
-                            if (partitionCount > 0) {
-                                val pIdx = progress.current - 1
-                                if (pIdx in 0 until partitionCount) {
-                                    updatePartitionProgress(pIdx, progress.partitionPercent)
-                                    synchronized(progressLock) {
-                                        for (j in 0 until pIdx) {
-                                            if (partitionProgress[j] < 100) partitionProgress[j] = 100
-                                        }
-                                    }
-                                }
-                            }
-
                             // Foreground notification — "Extracting system (2/7) — 43%"
                             val notifMsg = if (progress.partitionPercent in 1..99) {
                                 "${progress.message} (${progress.current}/${progress.total}) — ${progress.partitionPercent}%"
@@ -2472,40 +2409,17 @@ class MainActivity : AppCompatActivity() {
                                     current.runOnUiThread { current.appendLogLineUI(line, LogLevel.PLAIN) }
                                 }
                             }
-
-                            // Live bar re-render
-                            val current = activityRef?.get()
-                            if (current != null && !current.isFinishing && !current.isDestroyed) {
-                                current.runOnUiThread {
-                                    val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                                    val barRow = container?.findViewWithTag("bar_row") as? android.widget.LinearLayout
-                                    if (barRow != null && barRow.childCount == partitionCount) {
-                                        val snapshot = snapshotPartitionProgress()
-                                        for (i in 0 until partitionCount) {
-                                            val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                                            bar?.let {
-                                                it.isIndeterminate = false
-                                                it.progress = snapshot[i]
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                         }
                     ) { line -> showLog(line, LogLevel.PLAIN) }
                     if (r.success) {
                         ok++
                         totalExtracted += r.fileSize
-                        if (partitionCount > 0 && idx in 0 until partitionCount) {
-                            updatePartitionProgress(idx, 100)
-                        }
                     } else {
                         failed++
                     }
                 }
 
                 val durMs = System.currentTimeMillis() - startMs
-                markAllProgressComplete()
                 if (failed == 0) {
                     showLog(
                         "═══ Payload extraction done — $ok partitions, " +
@@ -2639,8 +2553,8 @@ class MainActivity : AppCompatActivity() {
      * self-verify the output. Long-run protection mirrors the DD build:
      * OTAService foreground + WakeLock. Progress mirrors the DD build and
      * the payload extract path: Rust writes the per-partition .progress
-     * sidecar, OTABridge polls it, and it surfaces in the split progress
-     * bars, the log, and the foreground notification.
+     * sidecar, OTABridge polls it, and it surfaces in the progress pop-up
+     * (T29), the log, and the foreground notification.
      */
     private fun buildPayloadBin(
         images: Map<String, String>,
@@ -2665,17 +2579,18 @@ class MainActivity : AppCompatActivity() {
         }
         val outPath = out.absolutePath
 
-        // Rust processes partitions in alphabetical order (deterministic
-        // manifest) — the split bars must match that order.
-        val sortedNames = images.keys.sorted()
-        partitionNames = sortedNames
-
         // T23: the dialog positive-click can race a build started while the
         // dialog was open — guard at the operation entry, not just the menu.
         if (isBuilding) {
             showLog("Operation already in progress. Please wait.", LogLevel.WARN)
             return
         }
+        // T29: reset the mirrored (message, percent) BEFORE the pop-up is
+        // shown by setUIExecuting(true) — the dialog seeds from these, and a
+        // stale pair from the previous operation would flash for one frame.
+        currentOpTitle = getString(R.string.progress_title_payload)
+        lastProgressMessage = ""
+        lastNotifPercent = -1
         setUIExecuting(true)
         isExecuting = true
         // T23: payload build set only the instance flag (same desync as the
@@ -2684,9 +2599,7 @@ class MainActivity : AppCompatActivity() {
         lastProgressTime = System.currentTimeMillis()  // heartbeat for dead-process detection
         resumedWhileBuildingLogged = false
         appContext = applicationContext
-        lastProgressMessage = ""
-        lastNotifPercent = -1
-        showProgressNotification("Building payload…", 0)
+        showProgressNotification(getString(R.string.progress_title_payload), 0)
         OTAService.start(applicationContext, "Building payload…")
 
         buildScope.launch {
@@ -2705,11 +2618,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // Split progress bars — one bar per partition, in Rust's
-                // alphabetical processing order (same setup as the extract
-                // batch loop).
-                runOnUiThread { setupSplitProgressBar(sortedNames) }
-
                 showLog(
                     "[*] Building payload.bin — ${images.size} partitions, " +
                         "compression=$compression, level=$effectiveLevel, " +
@@ -2725,20 +2633,6 @@ class MainActivity : AppCompatActivity() {
                     blockSize = blockSize,
                     minorVersion = minorVersion,
                     onProgress = { progress ->
-                        // Per-partition bar + mark previous bars complete
-                        // (same consumer as the extract batch loop).
-                        if (partitionCount > 0) {
-                            val pIdx = progress.current - 1
-                            if (pIdx in 0 until partitionCount) {
-                                updatePartitionProgress(pIdx, progress.partitionPercent)
-                                synchronized(progressLock) {
-                                    for (j in 0 until pIdx) {
-                                        if (partitionProgress[j] < 100) partitionProgress[j] = 100
-                                    }
-                                }
-                            }
-                        }
-
                         // Foreground notification — "Compressing system (2/7) — 43%"
                         val notifMsg = if (progress.partitionPercent in 1..99) {
                             "${progress.message} (${progress.current}/${progress.total}) — ${progress.partitionPercent}%"
@@ -2766,33 +2660,9 @@ class MainActivity : AppCompatActivity() {
                                 current.runOnUiThread { current.appendLogLineUI(line, LogLevel.PLAIN) }
                             }
                         }
-
-                        // Live bar re-render
-                        val current = activityRef?.get()
-                        if (current != null && !current.isFinishing && !current.isDestroyed) {
-                            current.runOnUiThread {
-                                val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                                val barRow = container?.findViewWithTag("bar_row") as? android.widget.LinearLayout
-                                if (barRow != null && barRow.childCount == partitionCount) {
-                                    val snapshot = snapshotPartitionProgress()
-                                    for (i in 0 until partitionCount) {
-                                        val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                                        bar?.let {
-                                            it.isIndeterminate = false
-                                            it.progress = snapshot[i]
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     },
                     onOutputLine = { line -> showLog(line, LogLevel.PLAIN) }
                 )
-
-                // All partitions processed — saturate the bars (success or
-                // error; the log lines that follow tell the story).
-                markAllProgressComplete()
-                runOnUiThread { renderPartitionProgress(true) }
 
                 if (result.success) {
                     showLog(
@@ -3003,10 +2873,10 @@ class MainActivity : AppCompatActivity() {
         isBuilding = true
         isExecuting = true
         appContext = applicationContext
+        // T29: title for the progress pop-up shown by setUIExecuting(true).
+        // The mirrored (message, percent) were reset above — no stale flash.
+        currentOpTitle = getString(R.string.progress_title_build)
         setUIExecuting(true)
-        val sortedNames = images.keys.sorted()
-        partitionNames = sortedNames
-        setupSplitProgressBar(sortedNames)
         showProgressNotification("Preparing…", 0)
 
         // Start foreground service — gives the process "foreground priority"
@@ -3099,34 +2969,6 @@ class MainActivity : AppCompatActivity() {
                                 showProgressNotification(notifMsg, notifPercent)
                             }
 
-                            // Update split progress bars (per-partition).
-                            // Use progress.current (1-based) for partition index — reliable
-                            // unlike message parsing which broke when message contained "%".
-                            // Use progress.partitionPercent for per-partition bar fill (0-100).
-                            if (partitionCount > 0) {
-                                val pIdx = progress.current - 1  // 0-based index
-                                when {
-                                    progress.message.contains("Building flasher") ||
-                                    progress.message.contains("Writing ZIP") -> {
-                                        // Post-partition steps: mark all bars complete
-                                        markAllProgressComplete()
-                                        currentPartitionIndex = partitionCount - 1
-                                    }
-                                    pIdx in 0 until partitionCount -> {
-                                        // Use partitionPercent for per-partition bar fill
-                                        updatePartitionProgress(pIdx, progress.partitionPercent)
-                                        currentPartitionIndex = pIdx
-                                        // Mark all previous partitions as complete
-                                        // Mark all previous partitions as complete (thread-safe)
-                                        synchronized(progressLock) {
-                                            for (j in 0 until pIdx) {
-                                                if (partitionProgress[j] < 100) partitionProgress[j] = 100
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
                             // Fix K3: ALWAYS persist per-partition progress log line (regardless of Activity state).
                             // Previously this was inside the activityRef gate, so log lines were lost when
                             // the app was backgrounded during compression.
@@ -3145,36 +2987,11 @@ class MainActivity : AppCompatActivity() {
                                 null
                             }
 
-                            // Update UI progress bars and log (only if Activity is alive)
+                            // UI-only log append if percent changed (persist already done above)
+                            // Use ?.let to get non-null smart cast inside the lambda
+                            // (Kotlin doesn't smart-cast String? to String inside lambdas)
                             val current = activityRef?.get()
                             if (current != null && !current.isFinishing && !current.isDestroyed) {
-                                current.runOnUiThread {
-                                    // IMPL-012: Use cached bar_row reference instead of
-                                    // findViewById + findViewWithTag on every callback.
-                                    // Fallback to resolve + cache if reference is stale
-                                    // (e.g., after Activity recreation).
-                                    if (current.cachedBarRow == null || current.cachedBarRow?.parent == null) {
-                                        val container = current.findViewById<android.widget.LinearLayout>(R.id.progressBarContainer)
-                                        current.cachedBarRow = container?.findViewWithTag("bar_row")
-                                    }
-                                    val barRow = current.cachedBarRow
-                                    if (barRow != null && barRow.childCount == partitionCount) {
-                                        // AUDIT-F2: read through the locked snapshot
-                                        // (IMPL-011) — raw indexed reads here raced with
-                                        // onProgress writes from Dispatchers.Default.
-                                        val snapshot = snapshotPartitionProgress()
-                                        for (i in 0 until partitionCount) {
-                                            val bar = barRow.getChildAt(i) as? com.google.android.material.progressindicator.LinearProgressIndicator
-                                            bar?.let {
-                                                it.isIndeterminate = false
-                                                it.progress = snapshot[i]
-                                            }
-                                        }
-                                    }
-                                }
-                                // UI-only log append if percent changed (persist already done above)
-                                // Use ?.let to get non-null smart cast inside the lambda
-                                // (Kotlin doesn't smart-cast String? to String inside lambdas)
                                 pendingLogLine?.let { line ->
                                     current.runOnUiThread {
                                         current.appendLogLineUI(line, LogLevel.PLAIN)
@@ -3560,15 +3377,11 @@ class MainActivity : AppCompatActivity() {
                 if (lastProgressMessage.isNotEmpty() && lastNotifPercent >= 0) {
                     showProgressNotification(lastProgressMessage, lastNotifPercent)
                 }
-                // Re-create split progress bars with current state
-                if (partitionCount > 0) {
-                    val savedProgress = snapshotPartitionProgress()
-                    val savedIndex = currentPartitionIndex
-                    setupSplitProgressBar(partitionNames)
-                    synchronized(progressLock) { savedProgress.copyInto(partitionProgress) }
-                    currentPartitionIndex = savedIndex
-                    renderPartitionProgress()
-                }
+                // T29: the progress pop-up was already re-shown by
+                // setUIExecuting(true) above — seeded from the companion
+                // (message, percent) mirrors, so it resumes at exactly the
+                // state the notification shows. No per-partition state to
+                // rebuild anymore.
             }
         } else {
             // Build finished while app was in background.
@@ -3579,16 +3392,10 @@ class MainActivity : AppCompatActivity() {
             setUIExecuting(false)
 
             // If we missed the completion event (build finished while backgrounded),
-            // display it now: mark progress bars 100%, re-render, show completion notification.
+            // display it now: show the completion notification.
             if (lastBuildResult != null && !buildResultDisplayed) {
                 buildResultDisplayed = true
                 val result = lastBuildResult!!
-
-                // Mark all partition progress as complete
-                markAllProgressComplete()
-
-                // Re-render progress bars at 100% if visible
-                renderPartitionProgress(forceComplete = true)
 
                 // Re-show completion notification (uses appContext, safe to call here)
                 if (result.success) {
@@ -3656,21 +3463,9 @@ class MainActivity : AppCompatActivity() {
         }
         lastUiMode = newUiMode
 
-        // Re-layout progress bars if a build is in progress.
-        // IMPL-001 (UI-001 fix): Save progress state before setupSplitProgressBar
-        // because it resets partitionProgress to IntArray(count) (all zeros).
-        // Without this, a config change (e.g. floating window resize) during
-        // an active build would reset all progress bars to 0%, making it
-        // appear as if the build restarted from scratch.
-        if (isBuilding && imageFiles.isNotEmpty()) {
-            val savedProgress = snapshotPartitionProgress()
-            val savedIndex = currentPartitionIndex
-            setupSplitProgressBar(imageFiles.map { it.first })
-            synchronized(progressLock) { savedProgress.copyInto(partitionProgress) }
-            currentPartitionIndex = savedIndex
-            // Re-render progress bars with restored values
-            renderPartitionProgress()
-        }
+        // T29: no progress-bar re-layout needed on config changes — the
+        // progress pop-up is a dialog window that keeps its own state, and
+        // uiMode recreations go through the onResume re-show path.
         // Scroll log to bottom (layout may have shifted)
         // IMPL-003 (BUG-02 fix): Use NestedScrollView type instead of ScrollView
         val scrollView = findViewById<androidx.core.widget.NestedScrollView>(R.id.scrollViewLog)
@@ -3696,93 +3491,16 @@ class MainActivity : AppCompatActivity() {
         cachedEditDevice = null
         cachedBtnAutoDetect = null
         cachedEditFilename = null
-        cachedProgressContainer = null
-        cachedBarRow = null
     }
 
     override fun onDestroy() {
+        // T29: release the progress pop-up window — without this, an
+        // Activity recreation mid-build leaks the old instance's dialog
+        // (WindowLeaked). The reconnect path (onResume → setUIExecuting(true))
+        // re-shows it on the new instance, seeded from the companion
+        // (message, percent) mirrors.
+        dismissBuildProgressDialog()
         super.onDestroy()
-    }
-
-    private fun setupSplitProgressBar(names: List<String>) {
-        val count = names.size
-        partitionCount = count
-        partitionProgress = IntArray(count)
-        currentPartitionIndex = -1
-        val container = findViewById<android.widget.LinearLayout>(R.id.progressBarContainer) ?: return
-        container.removeAllViews()
-        container.orientation = android.widget.LinearLayout.VERTICAL
-        container.visibility = View.VISIBLE
-
-        // Horizontal row for progress bars
-        val barRow = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-            tag = "bar_row"
-            layoutParams = android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-
-        // Horizontal row for partition name labels
-        val labelRow = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-            layoutParams = android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dpToPx(4)
-            }
-        }
-
-        // Resolve theme-aware track color (works in both light and dark mode)
-        val trackTv = android.util.TypedValue()
-        theme.resolveAttribute(com.google.android.material.R.attr.colorSurfaceVariant, trackTv, true)
-        val trackColor = ContextCompat.getColor(this@MainActivity, trackTv.resourceId)
-
-        // Resolve theme-aware indicator color (primary color for active progress)
-        val indicatorTv = android.util.TypedValue()
-        theme.resolveAttribute(com.google.android.material.R.attr.colorPrimary, indicatorTv, true)
-        val indicatorColor = ContextCompat.getColor(this@MainActivity, indicatorTv.resourceId)
-
-        for (i in 0 until count) {
-            val name = names.getOrElse(i) { "" }
-            val isLast = (i == count - 1)
-            val gap = if (!isLast) dpToPx(4) else 0
-
-            // Progress bar for this partition — theme-aware colors + animation
-            val bar = com.google.android.material.progressindicator.LinearProgressIndicator(this).apply {
-                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginEnd = gap
-                }
-                isIndeterminate = false
-                progress = 0
-                setTrackColor(trackColor)
-                setIndicatorColor(indicatorColor)
-            }
-            barRow.addView(bar)
-
-            // Partition name label — use theme attribute for dark mode support
-            val tv = android.util.TypedValue()
-            theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
-            val labelColor = ContextCompat.getColor(this@MainActivity, tv.resourceId)
-
-            val label = android.widget.TextView(this).apply {
-                text = name
-                textSize = 10f
-                setTextColor(labelColor)
-                gravity = android.view.Gravity.CENTER
-                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginEnd = gap
-                }
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
-            }
-            labelRow.addView(label)
-        }
-
-        container.addView(barRow)
-        container.addView(labelRow)
     }
 
     /**
@@ -3815,6 +3533,79 @@ class MainActivity : AppCompatActivity() {
 
     private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).toInt()
 
+    // ═══════════════════════════════════════════════════════════════
+    //  Progress Pop-up Dialog (T29)
+    //
+    //  MD3 migration: the inline per-partition split progress bars were
+    //  replaced by a modal progress dialog shown while a long-running
+    //  operation (DD OTA build / payload build / payload extract) is
+    //  active, triggered the moment the operation starts. The .progress
+    //  sidecar polling pipeline is UNTOUCHED — this is the display layer
+    //  only, mirroring showProgressNotification's (message, percent).
+    // ═══════════════════════════════════════════════════════════════
+
+    /** Active progress dialog — dies with the Activity; re-shown by setUIExecuting(true). */
+    private var progressDialog: android.app.Dialog? = null
+    private var progressDialogCircular: com.google.android.material.progressindicator.CircularProgressIndicator? = null
+    private var progressDialogPercentText: android.widget.TextView? = null
+    private var progressDialogStatusText: android.widget.TextView? = null
+
+    /**
+     * Show (idempotent) the progress pop-up. Seeds the circular indicator,
+     * the percent text, and the status line from the companion mirrors so a
+     * re-show after Activity recreation (theme switch, uiMode change) resumes
+     * exactly at the last (message, percent) the notification displayed.
+     */
+    private fun showBuildProgressDialog(title: String) {
+        if (isFinishing || isDestroyed) return
+        if (progressDialog?.isShowing == true) return
+        val view = layoutInflater.inflate(R.layout.dialog_progress_build, null)
+        progressDialogCircular = view.findViewById(R.id.progressDialogCircular)
+        progressDialogPercentText = view.findViewById(R.id.progressDialogPercentText)
+        progressDialogStatusText = view.findViewById(R.id.progressDialogStatusText)
+        val seedPercent = lastNotifPercent.coerceIn(0, 100)
+        val seedMessage = lastProgressMessage.ifEmpty { title }
+        progressDialogCircular?.apply {
+            max = 100
+            isIndeterminate = false
+            setProgressCompat(seedPercent, false)
+        }
+        progressDialogPercentText?.text = "$seedPercent%"
+        progressDialogStatusText?.text = seedMessage
+        progressDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setView(view)
+            // Non-cancelable: builds cannot be aborted (no Rust-side cancel
+            // plumbing) — an accidental back-gesture dismissal would leave the
+            // user with no way back to the progress view. "Hide" is the
+            // deliberate exit: it dismisses the VIEW only, the build keeps
+            // running (tracked by the notification + log card).
+            .setCancelable(false)
+            .setNegativeButton(R.string.progress_hide) { _, _ -> dismissBuildProgressDialog() }
+            .show()
+    }
+
+    /**
+     * Mirror a (message, percent) pair into the pop-up. Called on the UI
+     * thread from showProgressNotification's activity-alive hook — the
+     * dialog always shows exactly what the notification shows.
+     */
+    private fun updateBuildProgressDialog(percent: Int, message: String) {
+        if (progressDialog?.isShowing != true) return
+        progressDialogCircular?.setProgressCompat(percent, true)
+        progressDialogPercentText?.text = "$percent%"
+        progressDialogStatusText?.text = message
+    }
+
+    /** Dismiss + null out the pop-up (idempotent, safe from any lifecycle state). */
+    private fun dismissBuildProgressDialog() {
+        try { progressDialog?.dismiss() } catch (_: IllegalArgumentException) { /* view already detached */ }
+        progressDialog = null
+        progressDialogCircular = null
+        progressDialogPercentText = null
+        progressDialogStatusText = null
+    }
+
     /**
      * Update UI to reflect build execution state.
      *
@@ -3828,14 +3619,13 @@ class MainActivity : AppCompatActivity() {
             // IMPL-013: Cached views are eagerly resolved in cacheViews()
             // (called from onCreate after setContentView). No lazy resolution needed.
             if (executing) {
-                cachedProgressContainer?.visibility = View.VISIBLE
+                // T29: the progress pop-up is the operation's progress surface
+                // (migrated from the inline per-partition split bars). Shown
+                // idempotently — every setUIExecuting(true) call site is an
+                // operation start or an onResume reconnect of one.
+                showBuildProgressDialog(currentOpTitle)
             } else {
-                cachedProgressContainer?.visibility = View.GONE
-                cachedProgressContainer?.removeAllViews()
-                partitionCount = 0
-                partitionProgress = IntArray(0)
-                currentPartitionIndex = -1
-                partitionNames = emptyList()
+                dismissBuildProgressDialog()
             }
             cachedBtnAddImages?.isEnabled = !executing
             cachedBtnRemoveAll?.isEnabled = !executing
