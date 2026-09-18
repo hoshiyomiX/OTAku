@@ -69,8 +69,9 @@ All five algorithms are **always available** — they are statically compiled in
 │  │                    sha2, prost, zip, chrono         │  │
 │  │  Modules:                                          │  │
 │  │  ├─ lib.rs     JNI entry points (9 external fns)   │  │
-│  │  ├─ dd.rs      DD-mode flashable ZIP generator     │  │
-│  │  ├─ payload.rs OTAku custom payload (OTKU) read/write │  │
+│  │  ├─ dd/        DD-mode flashable ZIP generator     │  │
+│  │  │           (mod.rs · script.rs · tests.rs)       │  │
+│  │  ├─ payload.rs OTAku custom payload (OTKU) r/w     │  │
 │  │  ├─ proto.rs   Hand-written prost structs          │  │
 │  │  └─ compression.rs  gzip/bz2/xz/lz4/zstd + SHA-256 │  │
 │  └───────────────────────────────────────────────────┘  │
@@ -89,7 +90,7 @@ All five algorithms are **always available** — they are statically compiled in
 - **NativeBridge.kt** — Kotlin `object` that loads `libotaku_native.so` via `System.loadLibrary("otaku_native")` and exposes typed wrappers (`buildDd`, `getVersion`, `checkDeps`, `detectDeviceCodename`, `scanDevicePartitions`, plus prototype payload.bin bridges `readPayload` / `extractPartition` / `writePayload` / `verifyPayload`). Each wrapper parses the JSON returned by Rust into a typed data class.
 - **OTABridge.kt** — High-level Kotlin API. `OTABridge.dd()` calls `NativeBridge.buildDd()` on `Dispatchers.IO`, polls `<output_path>.progress` every 500ms to emit `ProgressUpdate` callbacks to the UI, and translates `DdBuildResult` into `OTAResult`. `extractPayloadPartition()` and `writePayload()` use the same sidecar-polling pattern (per-partition compression progress for the payload build); `verifyPayload()` is a single fast JNI call.
 - **OTAService.kt** — Foreground service that holds a `WakeLock` during long builds and payload extractions so the OS doesn't kill the app under Doze.
-- **DD mode (`rust/src/dd.rs`)** — Generates an otaku-format flashable ZIP containing `otaku.bin` (DDBU header + compressed partition data), `META-INF/com/google/android/update-binary` (TWRP/OrangeFox flasher script), `META-INF/com/google/android/updater-script` (stub), and `flash_info.txt` (human-readable metadata).
+- **DD mode (`rust/src/dd/` — `mod.rs` pipeline + `script.rs` templates + `tests.rs`)** — Generates an otaku-format flashable ZIP containing `otaku.bin` (DDBU header + compressed partition data), `META-INF/com/google/android/update-binary` (TWRP/OrangeFox flasher script), `META-INF/com/google/android/updater-script` (stub), and `flash_info.txt` (human-readable metadata).
 
 ### otaku.bin (DDBU) Format
 
@@ -109,7 +110,7 @@ All five algorithms are **always available** — they are statically compiled in
 
 Rust writes a JSON sidecar file at `<output_path>.progress` after every 4 MB chunk during compression. Kotlin polls this file every 500ms and emits `ProgressUpdate` callbacks to the UI. This avoids JNI callback complexity (which previously failed in v3.4/v3.5 due to `JNIEnv` reentrancy, exception-clearing, and local-reference-table overflow issues — see commit `c292e88`).
 
-Three producers share the same schema: the DD build (`dd.rs`), payload extraction (`payload.rs` `ProgressSidecarWriter`), and the payload.bin build (`payload.rs` `write_payload` — phases `compressing` → `compressed` → `assembling`). The sidecar is deleted on completion and error alike, by both the Rust caller and Kotlin's finally block.
+Three producers share the same schema: the DD build (`dd/mod.rs` `write_progress_with_percent`), payload extraction (`payload.rs` `ProgressSidecarWriter`), and the payload.bin build (`payload.rs` `write_payload` — phases `compressing` → `compressed` → `assembling`). The sidecar is deleted on completion and error alike, by both the Rust caller and Kotlin's finally block.
 
 The sidecar JSON contains: `current`, `total`, `name`, `phase`, `bytes_written`, `tmp_path`, `total_estimated`, `partition_percent`, `overall_percent`.
 
@@ -219,7 +220,10 @@ OTAku/
 │   │   └── update_metadata.proto     # divergence baseline (NOT our schema)
 │   └── src/
 │       ├── lib.rs                    # JNI entry points (9 external fns)
-│       ├── dd.rs                     # DD-mode flashable ZIP generator
+│       ├── dd/                       # DD-mode flashable ZIP generator
+│       │   ├── mod.rs                # pipeline + ZIP assembly + progress
+│       │   ├── script.rs             # flasher script templates (update-binary)
+│       │   └── tests.rs              # unit + golden-hash + invariant tests
 │       ├── payload.rs                # OTAku custom payload (OTKU) read/write
 │       ├── proto.rs                  # Hand-written prost structs
 │       └── compression.rs            # gzip/bz2/xz/lz4/zstd + SHA-256

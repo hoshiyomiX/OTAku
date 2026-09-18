@@ -60,8 +60,9 @@
 │  │                    serde, serde_json, zip, chrono, log          │  │
 │  │                                                                │  │
 │  │  src/lib.rs        — 9 JNI entry points (JSON in/out)          │  │
-│  │  src/dd.rs         — DD-mode flashable ZIP generator           │  │
-│  │  src/payload.rs    — OTAku custom payload (OTKU) read/write     │  │
+│  │  src/dd/           — DD-mode flashable ZIP generator           │  │
+│  │    mod.rs · script.rs · tests.rs (T27 Fase-1 split)            │  │
+│  │  src/payload.rs    — OTAku custom payload (OTKU) r/w           │  │
 │  │  src/proto.rs      — Hand-written prost structs                │  │
 │  │  src/compression.rs — gzip/bz2/xz/zstd/lz4 + SHA-256           │  │
 │  └────────────────────────────────────────────────────────────────┘  │
@@ -245,7 +246,8 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     // call dd::run_dd_build(), serialize result to JSON, return
 }
 
-// 5. Rust DD build pipeline (rust/src/dd.rs)
+// 5. Rust DD build pipeline (rust/src/dd/ — mod.rs orchestrates,
+// script.rs holds the flasher templates)
 pub fn run_dd_build(
     images: &[(String, String)],
     compression: &str, level: i32,
@@ -263,7 +265,7 @@ The progress sidecar file is the **only** mechanism for Rust → Kotlin progress
 
 ### Write side (Rust)
 
-`write_progress_with_percent()` in `dd.rs` writes the JSON after every 4 MB chunk during compression; it is shared (`pub(crate)`) with the payload.bin build — `write_payload` calls it from the `_with_progress` compression callback (`compressing` / `compressed`) and from the data-blob copy loop (`assembling`). For payload extraction, `ProgressSidecarWriter` in `payload.rs` slices every `write_all` into ≤4 MB chunks and rewrites the sidecar atomically (tmp + rename) after each. The write is best-effort — failures are silently ignored (`let _ = std::fs::write(...)`).
+`write_progress_with_percent()` in `dd/mod.rs` writes the JSON after every 4 MB chunk during compression; it is shared (`pub(crate)`) with the payload.bin build — `write_payload` calls it from the `_with_progress` compression callback (`compressing` / `compressed`) and from the data-blob copy loop (`assembling`). For payload extraction, `ProgressSidecarWriter` in `payload.rs` slices every `write_all` into ≤4 MB chunks and rewrites the sidecar atomically (tmp + rename) after each. The write is best-effort — failures are silently ignored (`let _ = std::fs::write(...)`).
 
 ### Read side (Kotlin)
 
