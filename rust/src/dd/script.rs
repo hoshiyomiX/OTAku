@@ -474,6 +474,7 @@ BUNDLE_SIZE=0       # Size of otaku.bin data (not the ZIP file size)
 TOTAL_FLASH_SIZE={total_unc_size}   # Total uncompressed size of all partitions (for free space check)
 {part_vars}NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
+SKIP_VERIFY={skip_verify_flag}   # F2: 1 = no post-flash hash; dd failures must then prove themselves
 
 ui_print "======================================"
 ui_print "  OTAku — {script_version}"
@@ -486,6 +487,7 @@ ui_print "======================================"
         total_unc_size = total_unc_size,
         num_parts = num_parts,
         compress_id = compress_id,
+        skip_verify_flag = if skip_verify { 1 } else { 0 },
     ));
 
     // ── Step 0: Open payload (direct ZIP reading or fallback extract) ──
@@ -1803,8 +1805,8 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # end of writing. On dm-linear block devices, ftruncate() fails with
     # EINVAL, causing dd to exit with status=1 — a FALSE-FAILURE, because
     # all data was already written successfully.
-    # Instead, we write WITHOUT conv= flags and verify data was written
-    # by checking blockdev --getsize64 when dd returns non-zero.
+    # Instead, we write WITHOUT conv= flags; a non-zero dd exit is judged
+    # by dd_failure_verdict (dd's own byte-count / post-flash hash).
     EXTRACT_SKIP=$(( ZIP_DATA_OFFSET + DATA_OFFSET + POFFSET ))
     SKIP_BLOCKS=$(( EXTRACT_SKIP / 4096 ))
     SKIP_REMAINDER=$(( EXTRACT_SKIP % 4096 ))
@@ -1873,6 +1875,39 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
                 dd bs=1 count=$PCSIZE_REMAINDER 2>/dev/null
             fi
         fi
+    }}
+
+    # ── F2 policy: dd failure verdict (proof, never proxy) ──
+    # dd exited nonzero. The old excuse compared the PARTITION's total size
+    # (blockdev --getsize64) against the expected image size — but capacity
+    # says nothing about how many bytes dd actually wrote, so a REAL write
+    # failure (EIO/ENOSPC/EINVAL) was excused as "busybox ftruncate — data
+    # OK". With SKIP_VERIFY=1 that meant a silent brick (T25 finding F2).
+    #
+    # New policy:
+    #   1. dd's own stderr byte-count line ("N bytes ... copied") >= expected
+    #      → busybox ftruncate quirk on block devices: full write PROVEN.
+    #   2. Verification enabled → defer to the Step-C post-flash hash, which
+    #      reads the data back and compares against the embedded SHA-256.
+    #   3. SKIP_VERIFY=1 + no byte-count proof → ABORT (fail-stop).
+    # Args: $1 = dd exit status, $2 = dd stderr file, $3 = partition name,
+    #       $4 = expected (uncompressed) size in bytes.
+    dd_failure_verdict() {{
+        DF_STATUS=$1; DF_ERR=$2; DF_NAME=$3; DF_EXPECTED=$4
+        # busybox/toybox/GNU dd all print "N bytes (...) copied" to stderr.
+        # tr -d ' bytes' strips the unit letters from the matched text.
+        DF_COPIED=$(grep -o '^[0-9][0-9]* bytes' "$DF_ERR" 2>/dev/null | head -1 | tr -d ' bytes')
+        if [ -n "$DF_COPIED" ] && [ "$DF_COPIED" -ge "$DF_EXPECTED" ]; then
+            ui_print "  Note: dd status=$DF_STATUS (busybox ftruncate quirk — $DF_COPIED bytes fully written, data OK)"
+            return 0
+        fi
+        if [ "$SKIP_VERIFY" != "1" ]; then
+            ui_print "  ! dd status=$DF_STATUS (copied ${{DF_COPIED:-0}} of $DF_EXPECTED bytes) — verdict deferred to post-flash hash verify"
+            return 0
+        fi
+        ui_print "! ABORT: dd write failed for $DF_NAME (status=$DF_STATUS, copied ${{DF_COPIED:-0}} of $DF_EXPECTED bytes)"
+        ui_print "!  dd stderr: $(head -3 "$DF_ERR" 2>/dev/null | tr '\n' ' ')"
+        return 1
     }}
 
     # ── Pre-flash compressed-data hash verification (streaming) ──
@@ -2036,6 +2071,10 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
         # If it fails (EINVAL/EOPNOTSUPP), fall back to buffered writes.
         # The 1-sector write is harmless — we're about to overwrite the
         # entire partition anyway, and 4096 bytes is a single flash page.
+        # F2: capture dd's stderr — its byte-count line ("N bytes ... copied")
+        # is the only honest proof of how many bytes reached the device.
+        DD_ERR="/tmp/dderr_$$_${{i}}"
+        rm -f "$DD_ERR"
         DD_OFLAG=""
         if [ -b "$PTARGET" ]; then
             # Probe O_DIRECT on the actual target device.
@@ -2052,10 +2091,11 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
         fi
 
         # No conv= flags — busybox dd ftruncate() on dm-linear is a false-failure
+        # (the false-failure itself is handled by dd_failure_verdict below)
         if [ -n "$DD_OFLAG" ]; then
-            dd of="$PTARGET" bs=1048576 if="$TMP_FIFO" $DD_OFLAG 2>/dev/null
+            dd of="$PTARGET" bs=1048576 if="$TMP_FIFO" $DD_OFLAG 2>"$DD_ERR"
         else
-            dd of="$PTARGET" bs=1048576 if="$TMP_FIFO" 2>/dev/null
+            dd of="$PTARGET" bs=1048576 if="$TMP_FIFO" 2>"$DD_ERR"
         fi
         DD_STATUS=$?
 
@@ -2134,7 +2174,7 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
                         trim_pipe | \
                         $FB_DECOMP > "$TMP_FIFO2" 2>"$GZIP_ERR" &
                     FB_PID=$!
-                    dd of="$PTARGET" bs=1048576 if="$TMP_FIFO2" $DD_OFLAG 2>/dev/null
+                    dd of="$PTARGET" bs=1048576 if="$TMP_FIFO2" $DD_OFLAG 2>"$DD_ERR"
                     FB_DD_STATUS=$?
                     wait $FB_PID 2>/dev/null
                     FB_DECOMP_STATUS=$?
@@ -2142,18 +2182,14 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
                     if [ $FB_DECOMP_STATUS -eq 0 ]; then
                         ui_print "  ✓ $FB_DECOMP succeeded!"
                         FALLBACK_OK=1
-                        # Check dd write status
+                        # Check dd write status — F2 policy (proof, never proxy)
                         if [ $FB_DD_STATUS -ne 0 ]; then
-                            WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
-                            if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
-                                ui_print "  Note: dd status=$FB_DD_STATUS (busybox ftruncate — data OK)"
-                            else
-                                ui_print "! ABORT: dd write failed in fallback (status=$FB_DD_STATUS)"
-                                rm -f "$GZIP_ERR"
+                            if ! dd_failure_verdict "$FB_DD_STATUS" "$DD_ERR" "$PNAME" "$PSIZE"; then
+                                rm -f "$GZIP_ERR" "$DD_ERR"
                                 exit 1
                             fi
                         fi
-                        rm -f "$GZIP_ERR"
+                        rm -f "$GZIP_ERR" "$DD_ERR"
                         break
                     else
                         FB_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -1)
@@ -2179,16 +2215,16 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
         # Only check DD_STATUS if we didn't already handle it in the fallback path
         if [ "$DECOMP_STATUS" -eq 0 ]; then
             # busybox dd may return status=1 on block devices (ftruncate EINVAL)
-            # even when all data was written. Verify by checking partition size.
+            # even when all data was written — but that must be PROVEN, not
+            # assumed. F2 policy: dd's own byte-count, or the post-flash hash
+            # (Step C). Partition capacity is not evidence of written bytes.
             if [ $DD_STATUS -ne 0 ]; then
-                WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
-                if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
-                    ui_print "  Note: dd reported status=$DD_STATUS (busybox ftruncate on block device — data OK)"
-                else
-                    ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS, written=$WRITTEN_SIZE < expected=$PSIZE)"
+                if ! dd_failure_verdict "$DD_STATUS" "$DD_ERR" "$PNAME" "$PSIZE"; then
+                    rm -f "$DD_ERR"
                     exit 1
                 fi
             fi
+            rm -f "$DD_ERR"
         fi
     else
         # FIFO not available (very rare) — fall back to direct 3-pipeline.
@@ -2198,10 +2234,16 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
         # O_DIRECT: apply if DD_OFLAG was set by the probe above. In the
         # 3-pipeline, dd is the last stage so we can add oflag=direct.
         GZIP_ERR="/tmp/ddpart_${{i}}.err"
-        rm -f "$GZIP_ERR"
-        if [ -b "$PTARGET" ] && [ -z "$DD_OFLAG" ]; then
-            # Re-probe O_DIRECT for this path (DD_OFLAG may not be set yet
-            # if FIFO path was skipped). Same probe as above.
+        DD_ERR="/tmp/dderr_$$_${{i}}"
+        rm -f "$GZIP_ERR" "$DD_ERR"
+        # F5 fix: reset DD_OFLAG unconditionally for THIS partition. A stale
+        # "oflag=direct" from a previous partition (whose device supported
+        # O_DIRECT) must not leak here — this partition's device may reject
+        # it with EINVAL, and the old `-z "$DD_OFLAG"` guard skipped the
+        # re-probe precisely when the flag was stale.
+        DD_OFLAG=""
+        if [ -b "$PTARGET" ]; then
+            # Re-probe O_DIRECT for this path. Same probe as above.
             _OD_PROBE="/tmp/od_probe_$$_${{i}}_nf"
             dd if=/dev/zero of="$_OD_PROBE" bs=4096 count=1 2>/dev/null
             if dd oflag=direct if="$_OD_PROBE" of="$PTARGET" bs=4096 count=1 conv=notrunc 2>/dev/null; then
@@ -2212,22 +2254,22 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
         dd_if_bundle | \
             trim_pipe | \
             $DECOMP_PIPE 2>"$GZIP_ERR" | \
-            dd of="$PTARGET" bs=1048576 $DD_OFLAG 2>/dev/null
+            dd of="$PTARGET" bs=1048576 $DD_OFLAG 2>"$DD_ERR"
         DD_STATUS=$?
 
         if [ $DD_STATUS -ne 0 ]; then
             GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -1)
             rm -f "$GZIP_ERR"
-            WRITTEN_SIZE=$(blockdev --getsize64 "$PTARGET" 2>/dev/null)
-            if [ -n "$WRITTEN_SIZE" ] && [ "$WRITTEN_SIZE" -ge "$PSIZE" ]; then
-                ui_print "  Note: dd reported status=$DD_STATUS (busybox ftruncate on block device — data OK)"
-            else
-                ui_print "! ABORT: dd write failed for $PNAME (status=$DD_STATUS, written=$WRITTEN_SIZE < expected=$PSIZE)"
+            # F2 policy: proof via dd byte-count or post-flash hash — never
+            # via partition size (the old silent-brick path, T25 finding F2).
+            if ! dd_failure_verdict "$DD_STATUS" "$DD_ERR" "$PNAME" "$PSIZE"; then
                 ui_print "!  Decompressor stderr: $GZIP_ERR_MSG"
+                rm -f "$DD_ERR"
                 exit 1
             fi
+            rm -f "$DD_ERR"
         else
-            rm -f "$GZIP_ERR"
+            rm -f "$GZIP_ERR" "$DD_ERR"
         fi
     fi
 

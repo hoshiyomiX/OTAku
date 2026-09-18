@@ -6,6 +6,85 @@ use super::script::build_update_script;
 use super::*;
 
 
+
+    // ──────────────────────────────────────────────────────────────
+    // T27 Fase-2a: F2 (dd failure verdict) + F5 (stale DD_OFLAG) invariants
+    // ──────────────────────────────────────────────────────────────
+
+    /// F2: the partition-size proxy must stay DEAD — it excused real dd
+    /// write failures as "data OK" and (with skip_verify) bricked silently.
+    #[test]
+    fn test_f2_no_partition_size_proxy() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        for &sv in &[false, true] {
+            let s = build_update_script(1, 1, "gzip", &meta, 0, "", sv);
+            assert!(
+                !s.contains("WRITTEN_SIZE"),
+                "F2 REGRESSION: partition-size proxy WRITTEN_SIZE kembali (skip_verify={})",
+                sv
+            );
+            assert!(
+                !s.contains("WRITTEN_SIZE=$(blockdev"),
+                "F2 REGRESSION: proxy kapasitas-partisi kembali sebagai bukti tulis (skip_verify={})",
+                sv
+            );
+        }
+    }
+
+    /// F2: the verdict helper + SKIP_VERIFY runtime flag must exist so the
+    /// script can distinguish "no hash proof available" from "hash will decide".
+    #[test]
+    fn test_f2_verdict_helper_and_skip_verify_flag() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s_off = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s_on = build_update_script(1, 1, "gzip", &meta, 0, "", true);
+        assert!(s_off.contains("dd_failure_verdict() {"), "helper verdict hilang");
+        assert!(s_off.contains("SKIP_VERIFY=0"), "flag SKIP_VERIFY=0 hilang (verify aktif)");
+        assert!(s_on.contains("SKIP_VERIFY=1"), "flag SKIP_VERIFY=1 hilang (skip_verify)");
+        // inti kebijakan: tanpa hash, kegagalan dd harus abort (return 1 path)
+        assert!(
+            s_on.contains("grep -o '^[0-9][0-9]* bytes'"),
+            "F2: parse byte-count dd hilang"
+        );
+    }
+
+    /// F5: the no-FIFO path must reset DD_OFLAG per partition — the stale
+    /// `-z` guard is what let oflag=direct leak across partitions.
+    #[test]
+    fn test_f5_nofifo_resets_dd_oflag() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            !s.contains(r#"[ -b "$PTARGET" ] && [ -z "$DD_OFLAG" ]"#),
+            "F5 REGRESSION: guard -z DD_OFLAG kembali (stale oflag bisa bocor)"
+        );
+        assert!(
+            s.contains("F5 fix: reset DD_OFLAG unconditionally"),
+            "F5: reset DD_OFLAG per-partisi hilang"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────
     // T27 golden template lock — byte-identical guarantee
     // ──────────────────────────────────────────────────────────────
@@ -47,11 +126,13 @@ use super::*;
         let hexstr: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hexstr,
-            "482d07f2874113efa0232350511af53b14712c7a22e346bd6483beb78d0a6562",
+            "d97982f6d47f9b13cfc64c02cc668f6fa1f93d63c259152f953d4dd06bd1e267",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
     }
+
+
 
     #[test]
     fn test_align_up() {
