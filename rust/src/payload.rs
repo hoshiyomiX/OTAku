@@ -26,13 +26,11 @@ use crate::compression::{
     hash_and_compress_file_to_writer_with_progress,
     operation_type_for_algorithm,
 };
-#[cfg(test)]
-use crate::compression::decompress;
 use crate::proto::{
     build_extent, build_manifest, build_partition_info, build_partition_update,
     build_payload_header, build_replace_operation, decode_manifest, decode_payload_header,
     encode_manifest, encode_payload_header, DeltaArchiveManifest,
-    PartitionUpdate, PayloadHeader, OP_ZERO, OP_DISCARD,
+    PartitionUpdate, PayloadHeader, OP_ZERO, OP_DISCARD, is_known_op_type,
     ManifestJson, ParsedPayloadJson,
 };
 
@@ -269,6 +267,18 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
     for op in &partition.install_operations {
         let op_type = op.r#type;
 
+        // T27 (AlgoSpec): reject op types outside OTAku's canonical set
+        // BEFORE any data handling. The old path silently treated unknown
+        // ops as raw data (passthrough corruption — same failure class as
+        // the removed brotli mapping).
+        if !is_known_op_type(op_type) {
+            return Err(format!(
+                "Unsupported InstallOperation type {} for partition '{}' — \
+                 not part of the OTAku custom format (corrupt or foreign payload?)",
+                op_type, partition_name
+            ));
+        }
+
         // ZERO: write zeros directly to writer (no Vec allocation)
         if op_type == OP_ZERO {
             // BUG FIX (O-3): Use checked_add to detect overflow in sum of num_blocks.
@@ -283,7 +293,8 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
             }
             let zero_size = zero_bytes as usize;
             // Write in 4MB chunks to avoid allocating a huge zero Vec
-            let zero_chunk = [0u8; 4 * 1024 * 1024];
+            // F14 (T27): heap buffer — 4MB stack array overflows small-stack threads.
+            let zero_chunk = vec![0u8; 4 * 1024 * 1024];
             let mut remaining = zero_size;
             while remaining > 0 {
                 let n = remaining.min(zero_chunk.len());
@@ -335,8 +346,9 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
         // type indicates compression, fall back to the operation-type hint.
         let detected_alg = detect_from_data(&compressed_data);
         let effective_alg = if detected_alg == "none" {
-            let op_hint = detect_compression(op_type);
-            if op_hint != "none" { op_hint } else { "none" }
+            // NEW-4: data sniffing found no magic — trust the manifest's
+            // op_type hint (canonical set already validated above).
+            detect_compression(op_type)
         } else {
             detected_alg
         };
@@ -444,7 +456,8 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
         if let Some(expected) = expected_size {
             if decomp_bytes < expected {
                 let padding = (expected - decomp_bytes) as usize;
-                let zero_chunk = [0u8; 4 * 1024 * 1024];
+                // F14 (T27): heap buffer — 4MB stack array overflows small-stack threads.
+            let zero_chunk = vec![0u8; 4 * 1024 * 1024];
                 let mut remaining = padding;
                 while remaining > 0 {
                     let n = remaining.min(zero_chunk.len());
@@ -1351,12 +1364,11 @@ mod tests {
 
         // Magic is OTKU on disk.
         let mut head = [0u8; 4];
-        use std::io::Read as _;
-        std::io::Read::read_exact(
-            &mut std::fs::File::open(&out).unwrap(),
-            &mut head,
-        )
-        .unwrap();
+        {
+            let mut f = std::fs::File::open(&out).unwrap();
+            use std::io::Read;
+            f.read_exact(&mut head).unwrap();
+        }
         assert_eq!(&head, b"OTKU", "magic di-disk bukan OTKU");
 
         // Read-back parses: 1 partition, block size preserved.
@@ -1403,6 +1415,106 @@ mod tests {
         assert!(
             err.contains("expected 'OTKU'"),
             "pesan magic tidak menyebut OTKU: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    /// End-to-end per algorithm: write payload (op_type now HONEST) ->
+    /// extract -> bytes must equal the original image. This is the test the
+    /// old format could not pass honestly for lz4/zstd (manifest said
+    /// REPLACE while the blob was compressed).
+    #[test]
+    fn test_extract_round_trip_per_algorithm() {
+        for alg in ["gzip", "bzip2", "xz", "lz4", "zstd", "none"] {
+            let dir = temp_dir("rtx");
+            let original: Vec<u8> = (0..196_608usize) // 48 KB = 12 blocks
+                .map(|i| ((i * 7 + i / 4096) % 251) as u8)
+                .collect();
+            let img_path = dir.join("sys.img");
+            std::fs::write(&img_path, &original).unwrap();
+            let out = dir.join("p.bin").to_string_lossy().to_string();
+
+            let pd = vec![PartitionData {
+                name: "system".to_string(),
+                image_path: img_path.to_string_lossy().to_string(),
+                compress: alg.to_string(),
+            }];
+            let res = write_payload(&out, &pd, 4096, 0, None);
+            assert!(res.success, "write({}) gagal: {:?}", alg, res.error);
+
+            let info = read_payload(&out).expect("read gagal");
+            let mut extracted = std::io::Cursor::new(Vec::new());
+            let n = extract_and_decompress_partition_to_writer(
+                &info,
+                "system",
+                &mut extracted,
+            )
+            .unwrap_or_else(|e| panic!("extract({}) gagal: {}", alg, e));
+            assert_eq!(n as usize, original.len(), "ukuran extract({}) salah", alg);
+            assert_eq!(
+                extracted.get_ref(),
+                &original,
+                "isi extract({}) != asli — manifest op_type masih bohong?",
+                alg
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Unknown op types must be REJECTED at extract, not silently treated
+    /// as raw data (the old passthrough-corruption path).
+    #[test]
+    fn test_extract_rejects_unknown_op_type() {
+        // Bangun payload gzip yang valid, lalu patch byte op_type di dalam
+        // manifest protobuf: field 1 (type) varint. Lokasi: cari manifest
+        // bytes di file dan flip op_type menjadi 99.
+        let dir = temp_dir("badop");
+        let original = vec![0x5Au8; 8192];
+        let img_path = dir.join("boot.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        // Rebuild file dengan op_type 99: manifest_len hidup DI DALAM header
+        // protobuf (field manifest_len), jadi header ikut dire-encode.
+        let info = read_payload(&out).unwrap();
+        let file_bytes = std::fs::read(&out).unwrap();
+        let old_data_start = info.data_offset as usize;
+
+        let mut bad_manifest = info.manifest.clone();
+        bad_manifest.partitions[0].install_operations[0].r#type = 99;
+        let bad_manifest_bytes = crate::proto::encode_manifest(&bad_manifest);
+
+        let mut bad_header = info.header.clone();
+        bad_header.manifest_len = bad_manifest_bytes.len() as u64;
+        let bad_header_bytes = crate::proto::encode_payload_header(&bad_header);
+
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(b"OTKU");
+        rebuilt.extend_from_slice(&(bad_header_bytes.len() as u64).to_be_bytes());
+        rebuilt.extend_from_slice(&bad_header_bytes);
+        rebuilt.extend_from_slice(&bad_manifest_bytes);
+        rebuilt.extend_from_slice(&file_bytes[old_data_start..]);
+        std::fs::write(&out, &rebuilt).unwrap();
+
+        let err = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "boot",
+            &mut std::io::Cursor::new(Vec::new()),
+        )
+        .err()
+        .expect("op_type 99 harus ditolak");
+        assert!(
+            err.contains("Unsupported InstallOperation type 99"),
+            "pesan tolak op tidak jelas: {}",
             err
         );
         let _ = std::fs::remove_dir_all(&dir);

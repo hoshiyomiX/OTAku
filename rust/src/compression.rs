@@ -10,7 +10,8 @@
 use std::io::{Read, Write};
 
 use crate::proto::{
-    OP_BROTLI_BSDIFF, OP_PUIGZIP, OP_REPLACE, OP_REPLACE_BROT, OP_REPLACE_BZ, OP_REPLACE_XZ,
+    OP_REPLACE, OP_REPLACE_BZ, OP_REPLACE_GZIP, OP_REPLACE_LZ4, OP_REPLACE_XZ, OP_REPLACE_ZSTD,
+    OP_ZERO, OP_DISCARD,
 };
 
 // ---------------------------------------------------------------------------
@@ -282,7 +283,9 @@ pub fn decompress_to_writer<W: Write>(
     }
 
     const BUF_SIZE: usize = 4 * 1024 * 1024; // 4 MB
-    let mut buf = [0u8; BUF_SIZE];
+    // F14 (T27): heap buffer — a 4MB STACK array overflows small-stack
+    // threads (test threads ~2MB; ART JNI threads ~1MB).
+    let mut buf = vec![0u8; BUF_SIZE];
     let mut total: u64 = 0;
 
     if effective_alg == ALG_GZIP {
@@ -1575,39 +1578,47 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
 /// Map an InstallOperation type enum value to a compression algorithm string.
 /// Matches Python compression.py detect_compression().
 pub fn detect_compression(operation_type: u32) -> &'static str {
+    // T27 AlgoSpec — the single op_type -> algorithm table. Unknown op types
+    // return ALG_NONE here, BUT the extract path validates op types against
+    // proto::is_known_op_type() FIRST and rejects unknowns with an error —
+    // this match is only reached for canonical ops. (The old table silently
+    // mapped brotli ops to "uncompressed" — passthrough corruption.)
     match operation_type {
-        OP_REPLACE => ALG_NONE,          // REPLACE
+        OP_REPLACE => ALG_NONE,          // REPLACE — raw data
         OP_REPLACE_XZ => ALG_XZ,         // REPLACE_XZ
         OP_REPLACE_BZ => ALG_BZIP2,      // REPLACE_BZ
-        OP_REPLACE_BROT => ALG_NONE,     // REPLACE_BROT — brotli demoted, treat as uncompressed
-        OP_PUIGZIP => ALG_GZIP,          // PUIGZIP
-        OP_BROTLI_BSDIFF => ALG_NONE,    // BROTLI_BSDIFF — brotli demoted, treat as uncompressed
-        21 | 22 => ALG_NONE,             // ZERO / DISCARD (OP_ZERO / OP_DISCARD)
-        _ => ALG_NONE,
+        OP_REPLACE_GZIP => ALG_GZIP,     // REPLACE_GZIP
+        OP_REPLACE_LZ4 => ALG_LZ4,       // REPLACE_LZ4 (T27: was emitted as plain REPLACE)
+        OP_REPLACE_ZSTD => ALG_ZSTD,     // REPLACE_ZSTD (T27: was emitted as plain REPLACE)
+        OP_ZERO | OP_DISCARD => ALG_NONE, // no data ops
+        _ => ALG_NONE,                   // unreachable for validated ops (see above)
     }
 }
 
 /// Map a compression algorithm name to the recommended InstallOperation type.
 /// Matches Python compression.py operation_type_for_algorithm().
 pub fn operation_type_for_algorithm(algorithm: &str) -> u32 {
+    // T27: the OTAku custom format has its OWN op for every algorithm the
+    // build can emit. The old LZ4/ZSTD -> REPLACE fallback made the manifest
+    // LIE about the blob contents (raw vs compressed) — extraction only
+    // survived because detect_from_data() re-sniffs the magic bytes.
     if is_alg(algorithm, ALG_NONE) {
-        return OP_REPLACE; // REPLACE
+        return OP_REPLACE; // REPLACE — raw data
     }
     if is_alg(algorithm, ALG_BZIP2) {
         return OP_REPLACE_BZ; // REPLACE_BZ
     }
     if is_alg(algorithm, ALG_GZIP) {
-        return OP_PUIGZIP; // PUIGZIP
+        return OP_REPLACE_GZIP; // REPLACE_GZIP
     }
     if is_alg(algorithm, ALG_XZ) {
         return OP_REPLACE_XZ; // REPLACE_XZ
     }
-    // DEMOTED: if is_alg(algorithm, ALG_BROTLI) { return OP_REPLACE_BROT; } — brotli removed from APK build
     if is_alg(algorithm, ALG_LZ4) {
-        return OP_REPLACE; // LZ4 has no AOSP operation type; use REPLACE as fallback
+        return OP_REPLACE_LZ4; // REPLACE_LZ4 (T27 fix — no more REPLACE lie)
     }
     if is_alg(algorithm, ALG_ZSTD) {
-        return OP_REPLACE; // ZSTD has no AOSP operation type; use REPLACE as fallback
+        return OP_REPLACE_ZSTD; // REPLACE_ZSTD (T27 fix)
     }
     OP_REPLACE
 }
@@ -1843,16 +1854,41 @@ mod tests {
         assert_eq!(detect_compression(OP_REPLACE), ALG_NONE); // REPLACE
         assert_eq!(detect_compression(OP_REPLACE_XZ), ALG_XZ); // REPLACE_XZ
         assert_eq!(detect_compression(OP_REPLACE_BZ), ALG_BZIP2); // REPLACE_BZ
-        assert_eq!(detect_compression(OP_REPLACE_BROT), ALG_NONE); // REPLACE_BROT (brotli demoted)
-        assert_eq!(detect_compression(OP_PUIGZIP), ALG_GZIP); // PUIGZIP
-        assert_eq!(detect_compression(OP_BROTLI_BSDIFF), ALG_NONE); // BROTLI_BSDIFF (brotli demoted)
-        assert_eq!(detect_compression(21), ALG_NONE); // ZERO (OP_ZERO)
+        assert_eq!(detect_compression(OP_REPLACE_GZIP), ALG_GZIP); // REPLACE_GZIP
+        assert_eq!(detect_compression(OP_REPLACE_LZ4), ALG_LZ4); // REPLACE_LZ4 (T27)
+        assert_eq!(detect_compression(OP_REPLACE_ZSTD), ALG_ZSTD); // REPLACE_ZSTD (T27)
+        assert_eq!(detect_compression(OP_ZERO), ALG_NONE); // ZERO (no data)
+        assert_eq!(detect_compression(OP_DISCARD), ALG_NONE); // DISCARD (no data)
 
         assert_eq!(operation_type_for_algorithm("none"), OP_REPLACE);   // REPLACE
         assert_eq!(operation_type_for_algorithm("bzip2"), OP_REPLACE_BZ); // REPLACE_BZ
         assert_eq!(operation_type_for_algorithm("xz"), OP_REPLACE_XZ);     // REPLACE_XZ
-        assert_eq!(operation_type_for_algorithm("gzip"), OP_PUIGZIP); // PUIGZIP
-        // DEMOTED: assert_eq!(operation_type_for_algorithm("brotli"), OP_REPLACE_BROT); // REPLACE_BROT (brotli demoted → returns OP_REPLACE)
+        assert_eq!(operation_type_for_algorithm("gzip"), OP_REPLACE_GZIP); // REPLACE_GZIP
+        // T27: LZ4/ZSTD kini punya op sendiri — bukan lagi kebohongan REPLACE
+        assert_eq!(operation_type_for_algorithm("lz4"), OP_REPLACE_LZ4);
+        assert_eq!(operation_type_for_algorithm("zstd"), OP_REPLACE_ZSTD);
+    }
+
+    #[test]
+    fn test_algospec_round_trip_op_types() {
+        // Setiap algoritma yang bisa di-emit ↔ dideteksi balik dari op_type.
+        for alg in ["none", "gzip", "bzip2", "xz", "lz4", "zstd"] {
+            let op = operation_type_for_algorithm(alg);
+            assert!(
+                crate::proto::is_known_op_type(op),
+                "op_type {} utk algoritma '{}' tidak kanonik",
+                op,
+                alg
+            );
+            if alg != "none" {
+                assert_eq!(
+                    detect_compression(op),
+                    alg,
+                    "round-trip op_type<->alg rusak utk {}",
+                    alg
+                );
+            }
+        }
     }
 
     #[test]
@@ -1922,3 +1958,4 @@ mod tests {
         );
     }
 }
+

@@ -1,54 +1,60 @@
-//! Protobuf message definitions for AOSP update_engine payload format.
+//! Protobuf message definitions for the OTAku custom payload format.
 //!
 //! Uses prost with hand-defined structs matching the Python protobuf.py approach.
 //! All structs implement `prost::Message` for zero-copy encode/decode.
 //!
-//! Reference: system/update_engine/update_metadata.proto
+//! HONESTY NOTE (T27, replaces a false claim): these field numbers and enum
+//! values are OTAku-INTERNAL. They were originally hand-ported with the
+//! comment "Field numbers match AOSP update_metadata.proto exactly" — that
+//! claim was FALSE (T25 finding F1, proven against the LineageOS
+//! lineage-20.0 proto): our InstallOperation tags (src_extents=6,
+//! dst_extents=7, dst_length=8, ...) diverge from AOSP (src_extents=4,
+//! src_length=5, dst_extents=6, dst_length=7, data_sha256_hash=8, ...), and
+//! several enum values below never existed in AOSP at all. Since the format
+//! is now explicitly custom (magic "OTKU", Option B), the numbers are simply
+//! OUR spec. Deltas vs AOSP are intentional and documented here so nobody
+//! "fixes" them toward AOSP without also changing the magic and every
+//! reader/writer in lockstep.
+//!
+//! Reference (divergence baseline): system/update_engine/update_metadata.proto
 
 use prost::Message;
 
 // ---------------------------------------------------------------------------
-//  AOSP InstallOperation type enum
+//  OTAku InstallOperation type enum (internal — see HONESTY NOTE above)
 // ---------------------------------------------------------------------------
 
 /// REPLACE — raw data replacement (no compression).
 pub const OP_REPLACE: u32 = 0;
-/// MOVE — block-level move within the same partition.
-pub const OP_MOVE: u32 = 1;
-/// BSDIFF — bsdiff patch against source partition.
-pub const OP_BSDIFF: u32 = 2;
-/// SOURCE_COPY — block-level copy from source partition.
-pub const OP_SOURCE_COPY: u32 = 3;
-/// SOURCE_BSDIFF — bsdiff patch using source extents.
-pub const OP_SOURCE_BSDIFF: u32 = 4;
 /// REPLACE_XZ — XZ-compressed replacement data.
 pub const OP_REPLACE_XZ: u32 = 8;
-/// REPLACE_BROT — Brotli-compressed replacement (DEMOTED: brotli removed from APK build).
-pub const OP_REPLACE_BROT: u32 = 13;
-/// REPLACE_BZ — Bzip2-compressed replacement data.
+/// REPLACE_BZ — Bzip2-compressed replacement data. (OTAku value 12; note
+/// AOSP's REPLACE_BZ is 1 — this divergence is intentional, see HONESTY NOTE.)
 pub const OP_REPLACE_BZ: u32 = 12;
-/// PUIGZIP — Gzip-compressed replacement data (AOSP name for gzip operations).
-pub const OP_PUIGZIP: u32 = 14;
+/// REPLACE_LZ4 — LZ4-frame-compressed replacement data (T27: previously LZ4
+/// blobs were emitted as plain REPLACE, so the manifest LIED about the data —
+/// extraction only survived via magic-byte sniffing).
+pub const OP_REPLACE_LZ4: u32 = 15;
+/// REPLACE_ZSTD — Zstandard-compressed replacement data (same T27 fix).
+pub const OP_REPLACE_ZSTD: u32 = 16;
+/// REPLACE_GZIP — Gzip-compressed replacement data. (OTAku value 14; no such
+/// op exists in AOSP. The old name "PUIGZIP" was inherited fiction — renamed
+/// for honesty, value unchanged.)
+pub const OP_REPLACE_GZIP: u32 = 14;
 /// ZERO — zero-fill the destination extents.
 pub const OP_ZERO: u32 = 21;
 /// DISCARD — discard the destination extents (no data needed).
 pub const OP_DISCARD: u32 = 22;
-/// BROTLI_BSDIFF — Brotli-compressed bsdiff (DEMOTED: brotli removed from APK build).
-pub const OP_BROTLI_BSDIFF: u32 = 23;
 
 pub const OP_TYPE_NAMES: &[(u32, &str)] = &[
     (OP_REPLACE, "REPLACE"),
-    (OP_MOVE, "MOVE"),
-    (OP_BSDIFF, "BSDIFF"),
-    (OP_SOURCE_COPY, "SOURCE_COPY"),
-    (OP_SOURCE_BSDIFF, "SOURCE_BSDIFF"),
     (OP_REPLACE_XZ, "REPLACE_XZ"),
-    (OP_REPLACE_BROT, "REPLACE_BROT"),
     (OP_REPLACE_BZ, "REPLACE_BZ"),
-    (OP_PUIGZIP, "PUIGZIP"),
+    (OP_REPLACE_GZIP, "REPLACE_GZIP"),
+    (OP_REPLACE_LZ4, "REPLACE_LZ4"),
+    (OP_REPLACE_ZSTD, "REPLACE_ZSTD"),
     (OP_ZERO, "ZERO"),
     (OP_DISCARD, "DISCARD"),
-    (OP_BROTLI_BSDIFF, "BROTLI_BSDIFF"),
 ];
 
 /// Get the human-readable name for an InstallOperation type.
@@ -58,6 +64,12 @@ pub fn op_type_name(op_type: u32) -> &'static str {
         .find(|(t, _)| *t == op_type)
         .map(|(_, name)| *name)
         .unwrap_or("UNKNOWN")
+}
+
+/// Is this op type part of OTAku's canonical set? Extract refuses anything
+/// else instead of silently treating unknown ops as raw data.
+pub fn is_known_op_type(op_type: u32) -> bool {
+    OP_TYPE_NAMES.iter().any(|(t, _)| *t == op_type)
 }
 
 // ---------------------------------------------------------------------------
@@ -594,8 +606,34 @@ mod tests {
     fn test_op_type_name() {
         assert_eq!(op_type_name(OP_REPLACE), "REPLACE");
         assert_eq!(op_type_name(OP_REPLACE_XZ), "REPLACE_XZ");
-        assert_eq!(op_type_name(OP_PUIGZIP), "PUIGZIP");
+        assert_eq!(op_type_name(OP_REPLACE_GZIP), "REPLACE_GZIP");
+        assert_eq!(op_type_name(OP_REPLACE_LZ4), "REPLACE_LZ4");
+        assert_eq!(op_type_name(OP_REPLACE_ZSTD), "REPLACE_ZSTD");
+        assert_eq!(op_type_name(OP_ZERO), "ZERO");
+        assert_eq!(op_type_name(OP_DISCARD), "DISCARD");
         assert_eq!(op_type_name(99), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_is_known_op_type() {
+        // Kanonik: emit-set + ZERO/DISCARD. Semua nilai lama yang tidak
+        // pernah di-emit (MOVE=1, BSDIFF=2, SOURCE_*=3/4, brotli 13/23,
+        // nilai asing) HARUS tidak-kanonik — extract menolaknya.
+        for op in [
+            OP_REPLACE,
+            OP_REPLACE_XZ,
+            OP_REPLACE_BZ,
+            OP_REPLACE_GZIP,
+            OP_REPLACE_LZ4,
+            OP_REPLACE_ZSTD,
+            OP_ZERO,
+            OP_DISCARD,
+        ] {
+            assert!(is_known_op_type(op), "op {} harus kanonik", op);
+        }
+        for bad in [1u32, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 23, 99, 250] {
+            assert!(!is_known_op_type(bad), "op {} harus TIDAK kanonik", bad);
+        }
     }
 
     #[test]
