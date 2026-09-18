@@ -969,6 +969,19 @@ if [ "$HDR_NUM_PARTS" -lt 1 ] || [ "$HDR_NUM_PARTS" -gt 20 ]; then
     exit 1
 fi
 
+# F8 fix (T25): cross-check the bundle header against the script's own
+# constant. A mismatch means this update-binary and this otaku.bin come
+# from DIFFERENT builds (e.g. someone re-packed an old bundle into a new
+# ZIP shell) — the offsets/hashes baked into the script would not match
+# the bundle layout, flashing garbage at wrong offsets.
+if [ "$HDR_NUM_PARTS" != "$NUM_PARTS" ]; then
+    ui_print "! ABORT: Header/script partition count mismatch"
+    ui_print "!  otaku.bin header says : $HDR_NUM_PARTS"
+    ui_print "!  update-binary says    : $NUM_PARTS"
+    ui_print "!  This ZIP mixes bundles from different builds — re-download or rebuild."
+    exit 1
+fi
+
 # Header size is always exactly 4096 (HEADER_SIZE constant in build_header).
 # Previously accepted any value >= 64, which let malformed bundles pass.
 # Strict equality check rejects any drift from the constant.
@@ -1194,7 +1207,16 @@ unmount_partition() {{
     dev_name=$(basename "$real_dev" 2>/dev/null)
     # Find mount points referencing the REAL device path or its basename.
     # This avoids false positives from matching partition names in mount paths.
-    mount_points=$(mount 2>/dev/null | grep -E "($real_dev|$dev_name)" | awk '{{print $3}}')
+    # F7 fix (T25): ANCHOR the device-name match — an unanchored device
+    # name matched dm-5 inside dm-55 (and any path containing the
+    # substring), unmounting the WRONG partition's mounts. Anchor:
+    # preceded by start-or-slash, followed by space-or-EOL. The retry
+    # probe below uses grep -qF (fixed string) so mount-point text is
+    # never treated as a regex.
+    if [ -z "$real_dev" ] || [ -z "$dev_name" ]; then
+        return 0
+    fi
+    mount_points=$(mount 2>/dev/null | grep -E "(^|/)($real_dev|$dev_name)([[:space:]]|\$)" | awk '{{print $3}}')
     for mp in $mount_points; do
         ui_print "    unmount $pname from $mp"
         umount "$mp" 2>/dev/null
@@ -1202,7 +1224,7 @@ unmount_partition() {{
         # retry once with lazy unmount as a safety net. Lazy unmount detaches
         # the mount immediately even if a process still has open fds — safe
         # here because we are about to destroy the underlying dm device.
-        if mount 2>/dev/null | grep -q " $mp "; then
+        if mount 2>/dev/null | grep -qF " $mp "; then
             sleep 1
             umount -l "$mp" 2>/dev/null
         fi
@@ -1278,7 +1300,10 @@ validate_target() {{
     local real_dev
     real_dev=$(readlink -f "$target" 2>/dev/null || echo "$target")
     DEV_NAME=$(basename "$real_dev")
-    MOUNT_POINT=$(mount 2>/dev/null | grep -E "($real_dev|$DEV_NAME)" | awk '{{print $3}}' | head -1)
+    # F7 fix (T25): anchored match — see the identical fix in the unmount
+    # helper. Unanchored device names matched dm-5 inside dm-55 and matched
+    # device names appearing inside unrelated mount paths.
+    MOUNT_POINT=$(mount 2>/dev/null | grep -E "(^|/)($real_dev|$DEV_NAME)([[:space:]]|\$)" | awk '{{print $3}}' | head -1)
     if [ -n "$MOUNT_POINT" ]; then
         ui_print "  Unmounting $name from $MOUNT_POINT..."
         umount "$MOUNT_POINT" 2>/dev/null
@@ -1287,7 +1312,7 @@ validate_target() {{
         # wasted 1s per partition (10 partitions × 1s = 10s of pure stall).
         # dm-verity and dm-crypt mounts sometimes need a moment to release,
         # so we keep a single retry as a safety net.
-        if mount 2>/dev/null | grep -q " $MOUNT_POINT "; then
+        if mount 2>/dev/null | grep -qF " $MOUNT_POINT "; then
             sleep 1
         fi
     fi

@@ -114,6 +114,67 @@ use super::*;
         );
     }
 
+
+    fn t7_count_anchored(script: &str) -> usize {
+        script.matches(r"(^|/)($real_dev|$DEV_NAME)([[:space:]]|\$)").count()
+            + script.matches(r"(^|/)($real_dev|$dev_name)([[:space:]]|\$)").count()
+    }
+
+    /// F7: device-name grep must be anchored — unanchored "dm-5" matches
+    /// "dm-55" (and any path containing the substring), unmounting the
+    /// wrong partition's mounts.
+    #[test]
+    fn test_f7_mount_grep_anchored() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            !s.contains(r#"mount_points=$(mount 2>/dev/null | grep -E "($real_dev|$dev_name)""#),
+            "F7 REGRESSION: grep device-name tanpa anchor kembali di helper unmount"
+        );
+        assert!(
+            !s.contains(r#"MOUNT_POINT=$(mount 2>/dev/null | grep -E "($real_dev|$DEV_NAME)""#),
+            "F7 REGRESSION: grep device-name tanpa anchor kembali di validasi pre-flash"
+        );
+        assert!(
+            s.contains(r"([[:space:]]|\$)") && t7_count_anchored(&s) == 2,
+            "F7: kedua situs grep harus ber-anchor (^|/) ... ([[:space:]]|$)"
+        );
+        assert!(
+            s.contains(r#"grep -qF " $mp ""#) && s.contains(r#"grep -qF " $MOUNT_POINT ""#),
+            "F7: probe retry harus fixed-string (-qF)"
+        );
+    }
+
+    /// F8: bundle header partition count must be cross-checked against the
+    /// script's own NUM_PARTS constant — mixed-build ZIPs must abort.
+    #[test]
+    fn test_f8_header_script_parts_crosscheck() {
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            s.contains(r#"[ "$HDR_NUM_PARTS" != "$NUM_PARTS" ]"#),
+            "F8: cross-check HDR_NUM_PARTS vs NUM_PARTS hilang"
+        );
+        assert!(
+            s.contains("different builds"),
+            "F8: pesan diagnostik mixed-build hilang"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────
     // T27 golden template lock — byte-identical guarantee
     // ──────────────────────────────────────────────────────────────
@@ -155,7 +216,7 @@ use super::*;
         let hexstr: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hexstr,
-            "826b8ed0336259ecce7fb9576d38addf7d255712ccd3f3de02df563a30beebba",
+            "ae782eed1af17300962e764d853179f6e0562c2534a3ec5d0d85d344db7f61f2",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
