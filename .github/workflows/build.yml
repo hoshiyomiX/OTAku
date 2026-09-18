@@ -46,7 +46,13 @@ jobs:
 
       - name: Run cargo tests
         working-directory: rust
-        run: cargo test --lib 2>&1
+        run: |
+          # Insurance against a restored cache holding a stale target/dump:
+          # test_ci_dump_flasher_scripts rewrites it, but without this a
+          # future removal of that test would let the shellcheck gate below
+          # lint stale scripts.
+          rm -rf target/dump
+          cargo test --lib 2>&1
 
       - name: Shellcheck generated flasher scripts
         working-directory: rust

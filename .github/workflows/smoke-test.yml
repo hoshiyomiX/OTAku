@@ -56,7 +56,13 @@ jobs:
 
       - name: Run cargo test (host target, no Android cross-compile)
         working-directory: rust
-        run: cargo test --verbose --lib 2>&1
+        run: |
+          # Insurance against a restored cache holding a stale target/dump
+          # from an older commit: test_ci_dump_flasher_scripts rewrites it,
+          # but if that test is ever removed/renamed the shellcheck steps
+          # below would silently lint STALE scripts — delete first.
+          rm -rf target/dump
+          cargo test --verbose --lib 2>&1
 
       - name: Run cargo clippy (lint)
         working-directory: rust
@@ -73,69 +79,27 @@ jobs:
           echo "  3. New code path added but not covered by tests"
           exit 1
 
-      # ── Step 2: Extract generated shell script from Rust source ──
-      # We can't run cargo run (would need full app context), so we extract
-      # the embedded shell scripts from dd.rs source and lint them with
-      # shellcheck. This catches shell-level bugs that Rust unit tests
-      # can't easily verify (syntax errors, missing quotes, etc).
-      - name: Extract embedded shell scripts from dd.rs
+      # ── Step 2: Shellcheck the RENDERED flasher scripts ──
+      # cargo test above already ran test_ci_dump_flasher_scripts, which
+      # renders both verify variants of the update-binary to target/dump/
+      # with every format!() arg substituted. We lint those — exact parity
+      # with the Build workflow's shellcheck gate, but early (fail-fast).
+      # This replaces the old "extract raw strings from dd.rs" approach,
+      # which hard-coupled CI to the pre-T27 single-file layout (broke when
+      # dd.rs was split into dd/{mod,script,tests}.rs) and skipped every
+      # templated script anyway — i.e. most of them.
+      - name: Verify flasher script dump exists
+        working-directory: rust
         run: |
           set -e
-          mkdir -p /tmp/extracted /tmp/skipped
-          python3 << 'PYEOF'
-          import re
-          from pathlib import Path
-
-          src = Path("rust/src/dd.rs").read_text()
-
-          # Find all raw string literals r#"..."# in the source.
-          pattern = re.compile(r'r#"(.*?)"#', re.DOTALL)
-          matches = pattern.findall(src)
-
-          if not matches:
-              print("ERROR: no raw string literals found in dd.rs")
-              exit(1)
-
-          shell_count = 0
-          skipped_count = 0
-          # Rust format arg pattern: {name} where name is a Rust identifier
-          # (not {{ or }} which are escaped braces, not ${var} which is shell var)
-          format_arg_re = re.compile(r'(?<![\{\$])\{([a-z_][a-z0-9_]*)\}(?!\})')
-
-          for i, raw in enumerate(matches):
-              # Heuristic: only lint strings that look like shell (contain '#!/sbin/sh' or 'ui_print')
-              if "#!/sbin/sh" in raw or "ui_print" in raw or "lptools" in raw:
-                  # Unescape Rust string escapes that affect shell parsing
-                  # {{  -> {  (Rust format string escape)
-                  # }}  -> }
-                  # \\  -> \  (escaped backslash)
-                  shell = raw.replace("{{", "{").replace("}}", "}")
-
-                  # Detect unresolved Rust format args (e.g. {flash_step_offset}, {verify_block}).
-                  # These will be substituted by Rust format!() at runtime, so the extracted
-                  # shell script is INCOMPLETE — shellcheck would report false syntax errors.
-                  # We move these to /tmp/skipped/ and only lint the fully-rendered ones.
-                  # The Rust unit tests in cargo test step verify the rendered output instead.
-                  unresolved_args = format_arg_re.findall(shell)
-                  if unresolved_args:
-                      skipped_count += 1
-                      out_path = Path(f"/tmp/skipped/script_{shell_count}_templated.sh")
-                      out_path.write_text(shell)
-                      print(f"  SKIPPED (templated, has {len(unresolved_args)} unresolved args): {out_path} ({len(shell)} bytes)")
-                      print(f"    Unresolved: {unresolved_args[:5]}{'...' if len(unresolved_args) > 5 else ''}")
-                  else:
-                      out_path = Path(f"/tmp/extracted/script_{shell_count}.sh")
-                      out_path.write_text(shell)
-                      print(f"  Extracted: {out_path} ({len(shell)} bytes)")
-                      shell_count += 1
-
-          if shell_count == 0 and skipped_count == 0:
-              print("ERROR: no shell-like raw strings found")
-              exit(1)
-
-          print(f"\nTotal shell scripts extracted for linting: {shell_count}")
-          print(f"Total templated scripts skipped (verified by Rust tests): {skipped_count}")
-          PYEOF
+          # Loud failure if the dump contract breaks — never lint nothing.
+          for f in target/dump/update-binary.sh target/dump/update-binary-skip.sh; do
+            if [ ! -s "$f" ]; then
+              echo "FAIL: $f missing or empty — did test_ci_dump_flasher_scripts run?"
+              exit 1
+            fi
+            echo "OK: $f ($(wc -c < "$f") bytes)"
+          done
 
       - name: Install shellcheck
         run: |
@@ -143,163 +107,117 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           shellcheck --version
 
-      - name: Run shellcheck on extracted scripts
+      - name: Run shellcheck on dumped flasher scripts
+        working-directory: rust
         run: |
-          set +e  # don't fail immediately — collect all errors
-          EXIT_CODE=0
-          TOTAL_COUNT=0
-          PASS_COUNT=0
-          FAIL_COUNT=0
+          # Same files, same flags as the Build workflow's gate — this is
+          # the fail-fast duplicate of that late gate. Excludes are
+          # calibrated false positives:
+          #   SC2034 PART_i_* vars are read via indirect expansion
+          #   SC3043 'local' is busybox-ash (our recovery target), not POSIX
+          #   SC3037 busybox echo flags
+          shellcheck -s sh -S warning --exclude=SC2034,SC3043,SC3037 \
+            target/dump/update-binary.sh
+          shellcheck -s sh -S warning --exclude=SC2034,SC3043,SC3037 \
+            target/dump/update-binary-skip.sh
 
-          # If no scripts to lint (all templated), skip gracefully
-          shopt -s nullglob
-          SCRIPTS=(/tmp/extracted/*.sh)
-          if [ ${#SCRIPTS[@]} -eq 0 ]; then
-            echo "No fully-rendered shell scripts to lint (all templated). Skipping shellcheck."
-            echo "Templated scripts are verified by Rust unit tests instead."
-            exit 0
-          fi
-
-          for f in "${SCRIPTS[@]}"; do
-            TOTAL_COUNT=$((TOTAL_COUNT + 1))
-            echo "=========================================="
-            echo "Linting: $f"
-            echo "=========================================="
-
-            # ── Exclusion list (with rationale) ──
-            # Each exclusion is a known false positive or intentional pattern
-            # for recovery environment shells (TWRP/OrangeFox use bash/dash
-            # with busybox extensions, NOT strict POSIX sh).
-            #
-            # SC1009/SC1054/SC1056/SC1072/SC1073/SC1083 — parse errors from
-            #   residual {format_arg} patterns we couldn't substitute. Should
-            #   be empty after the extract step filter, but exclude as safety
-            #   net so a regression doesn't crash shellcheck.
-            # SC1090/SC1091 — sourcing files (N/A, no source statements)
-            # SC2002 — useless cat (style; we use cat | sha256sum for clarity)
-            # SC2004 — $/${} unnecessary in arithmetic (style preference)
-            # SC2030/SC2031 — variable modified in subshell (false positive:
-            #   we use file-based hash passing, not direct var assignment in pipeline)
-            # SC2034 — var appears unused (false positive: used in templated context)
-            # SC2036 — pipeline assignment (false positive: we capture to file via redirect)
-            # SC2046 — word splitting in $() (intentional for arg lists)
-            # SC2086 — word splitting unquoted vars (intentional for $LPMAKE_PARTS etc)
-            # SC2128 — array expansion (N/A)
-            # SC2154 — var referenced but not assigned (false positive: assigned in parent scope)
-            # SC2155 — declare and assign separately (style preference)
-            # SC2162 — read without -r (minor; recovery input is short)
-            # SC2181 — check exit code directly (intentional pattern for clarity)
-            # SC2235 — use { ..; } instead of (..) (style preference)
-            # SC2236 — use -z over ! -n (style preference)
-            # SC3043 — 'local' undefined in POSIX sh (recovery shells support local)
-            # SC3045 — 'read -t' undefined in POSIX sh (recovery shells support read -t)
-
-            shellcheck \
-              --exclude=SC1009,SC1054,SC1056,SC1072,SC1073,SC1083,SC1090,SC1091,SC2002,SC2004,SC2030,SC2031,SC2034,SC2036,SC2046,SC2086,SC2128,SC2154,SC2155,SC2162,SC2181,SC2235,SC2236,SC3043,SC3045 \
-              --shell=bash \
-              --format=gcc \
-              "$f"
-            RC=$?
-            if [ $RC -ne 0 ]; then
-              echo "FAIL: $f (exit $RC)"
-              FAIL_COUNT=$((FAIL_COUNT + 1))
-              EXIT_CODE=$RC
-            else
-              echo "PASS: $f"
-              PASS_COUNT=$((PASS_COUNT + 1))
-            fi
-            echo ""
-          done
-
-          echo "=========================================="
-          echo "  Shellcheck Summary"
-          echo "=========================================="
-          echo "  Total:  $TOTAL_COUNT"
-          echo "  PASS:   $PASS_COUNT"
-          echo "  FAIL:   $FAIL_COUNT"
-          echo "=========================================="
-
-          exit $EXIT_CODE
-
-      # ── Step 3: Brace balance check on Rust source (code only) ──
+      # ── Step 3: Brace balance check on the dd module (code only) ──
       # Catches a class of bugs where { or } is missing in code. Uses a
       # state machine that properly skips string literals, raw strings,
       # and comments — simple content.count() fails because shell scripts
       # inside raw strings contain unbalanced {{ / }} pairs.
       # Note: cargo test (Step 1) already verifies compilability — this is
       # a redundant safety net that catches stray braces early.
-      - name: Verify Rust brace balance
+      # Scans rust/src/dd/*.rs (module glob) instead of the pre-T27 single
+      # dd.rs file — resilient to future splits inside the module.
+      - name: Verify Rust brace balance (dd module)
         run: |
           python3 << 'PYEOF'
           import sys
-          content = open("rust/src/dd.rs").read()
-          i = 0; depth = 0
-          in_line_cmt = in_block_cmt = in_str = in_raw = False
-          raw_hashes = 0
-          while i < len(content):
-              ch = content[i]
-              if in_line_cmt:
-                  if ch == '\n': in_line_cmt = False
-                  i += 1; continue
-              if in_block_cmt:
-                  if ch == '*' and i+1 < len(content) and content[i+1] == '/':
-                      in_block_cmt = False; i += 2; continue
-                  i += 1; continue
-              if in_raw:
-                  if ch == '"' and i+raw_hashes < len(content):
-                      ok = all(content[i+1+h] == '#' for h in range(raw_hashes))
-                      if ok: in_raw = False; i += 1+raw_hashes; continue
-                  i += 1; continue
-              if in_str:
-                  if ch == '\\': i += 2; continue
-                  if ch == '"': in_str = False
-                  i += 1; continue
-              if ch == '/' and i+1 < len(content):
-                  if content[i+1] == '/': in_line_cmt = True; i += 2; continue
-                  if content[i+1] == '*': in_block_cmt = True; i += 2; continue
-              if ch == '"': in_str = True; i += 1; continue
-              if ch == 'r' and i+1 < len(content) and content[i+1] == '#':
-                  h = 0; j = i+1
-                  while j < len(content) and content[j] == '#': h += 1; j += 1
-                  if j < len(content) and content[j] == '"':
-                      in_raw = True; raw_hashes = h; i = j+1; continue
-              if ch == '{': depth += 1
-              elif ch == '}': depth -= 1
-              i += 1
-          if depth != 0:
-              print(f"FAIL: brace imbalance (code only) -- depth={depth}")
+          from pathlib import Path
+
+          files = sorted(Path("rust/src/dd").glob("*.rs"))
+          if not files:
+              print("FAIL: no Rust sources found under rust/src/dd/")
               sys.exit(1)
-          print(f"PASS: brace balance (code only) -- depth returns to 0")
-          tbo = content.count('{'); tbc = content.count('}')
-          print(f"Info: total braces including strings -- open={tbo}, close={tbc}, diff={tbo-tbc}")
+
+          def brace_depth(content):
+              # State machine: skips // and /* */ comments, "str" and r#"raw"#.
+              i = 0; depth = 0
+              in_line_cmt = in_block_cmt = in_str = in_raw = False
+              raw_hashes = 0
+              while i < len(content):
+                  ch = content[i]
+                  if in_line_cmt:
+                      if ch == '\n': in_line_cmt = False
+                      i += 1; continue
+                  if in_block_cmt:
+                      if ch == '*' and i+1 < len(content) and content[i+1] == '/':
+                          in_block_cmt = False; i += 2; continue
+                      i += 1; continue
+                  if in_raw:
+                      if ch == '"' and i+raw_hashes < len(content):
+                          ok = all(content[i+1+h] == '#' for h in range(raw_hashes))
+                          if ok: in_raw = False; i += 1+raw_hashes; continue
+                      i += 1; continue
+                  if in_str:
+                      if ch == '\\': i += 2; continue
+                      if ch == '"': in_str = False
+                      i += 1; continue
+                  if ch == '/' and i+1 < len(content):
+                      if content[i+1] == '/': in_line_cmt = True; i += 2; continue
+                      if content[i+1] == '*': in_block_cmt = True; i += 2; continue
+                  if ch == '"': in_str = True; i += 1; continue
+                  if ch == 'r' and i+1 < len(content) and content[i+1] == '#':
+                      h = 0; j = i+1
+                      while j < len(content) and content[j] == '#': h += 1; j += 1
+                      if j < len(content) and content[j] == '"':
+                          in_raw = True; raw_hashes = h; i = j+1; continue
+                  if ch == '{': depth += 1
+                  elif ch == '}': depth -= 1
+                  i += 1
+              return depth
+
+          failed = False
+          for f in files:
+              content = f.read_text()
+              depth = brace_depth(content)
+              if depth != 0:
+                  print(f"FAIL: {f} brace imbalance (code only) -- depth={depth}")
+                  failed = True
+              else:
+                  tbo = content.count('{'); tbc = content.count('}')
+                  print(f"PASS: {f.name} brace balance -- depth returns to 0 (raw braces: open={tbo}, close={tbc}, diff={tbo-tbc})")
+          sys.exit(1 if failed else 0)
           PYEOF
 
       # ── Step 4: Sanity check — verify all format!() args are present ──
-      # build_update_script uses named args: {script_version}, {header_info},
-      # {part_vars}, etc. If any arg is missing in the format!() call but
-      # referenced in the string, compilation fails. We can't easily
-      # verify this without compiling, but we already did cargo test above.
-      - name: Sanity check format args
+      # build_update_script uses named args ({script_version}, {header_info},
+      # {part_vars}, ...). If any arg is missing in the format!() call but
+      # referenced in the string, compilation fails — cargo test above
+      # already proves that. This check is the readable arg contract: it
+      # fails loudly when the template arg set evolves, forcing a conscious
+      # list update instead of silent drift.
+      # Scans the dd module glob — templates live in script.rs post-T27.
+      - name: Sanity check format args (dd module)
         run: |
           python3 << 'PYEOF'
-          content = open("rust/src/dd.rs").read()
+          from pathlib import Path
 
-          # All named format args used in build_update_script
-          # Note: list reflects current alur (post Pilihan B refactor):
-          #   - extract_step (Step 0)
-          #   - verify_step (Step 1 — NEW, pre-flash partition table verify)
-          #   - integrity_step (Step 2 — MERGED: bundle integrity + decompressor)
-          #   - slot_step, validation_step, resize_step, flash_step_offset
-          # 'decomp_step' was REMOVED — old Step 1 merged into Step 2 (integrity_step).
-          # 'verify_step' was ADDED — new pre-flash verify step.
+          content = "\n".join(f.read_text() for f in sorted(Path("rust/src/dd").glob("*.rs")))
+
+          # All named format args used by build_update_script templates
+          # (regenerated post-T27 against rust/src/dd/script.rs):
           required_args = [
               "script_version", "header_info", "part_vars", "num_parts", "compress_id",
               "extract_step", "verify_step", "integrity_step", "slot_step",
               "validation_step", "resize_step", "flash_step_offset",
               "num_parts_minus_1", "total_steps", "verify_block",
-              "device_check_step", "device",
+              "device_check_step", "escaped_device", "decomp_cmd",
+              "fallback_decompressors", "free_space_step", "skip_verify_flag",
+              "total_unc_size",
           ]
-          # Verify zstd COMPRESS_ID=6 is present in the generated script
+          # Verify zstd plumbing is present in the generated script
           zstd_checks = [
               ("zstd", "zstd DECOMP_PIPE"),
               ("zstdcat", "zstdcat fallback"),
@@ -307,14 +225,14 @@ jobs:
           ]
           for check, desc in zstd_checks:
               if check not in content:
-                  print(f"WARNING: zstd check '{desc}' not found in dd.rs")
+                  print(f"WARNING: zstd check '{desc}' not found in dd module")
           missing = []
           for arg in required_args:
               if arg not in content:
                   missing.append(arg)
 
           if missing:
-              print(f"FAIL: missing format args in dd.rs: {missing}")
+              print(f"FAIL: missing format args in dd module: {missing}")
               exit(1)
           print(f"PASS: all {len(required_args)} format args present")
           PYEOF
@@ -323,10 +241,14 @@ jobs:
       # We can't run the full Rust build pipeline in smoke test (it needs
       # Android NDK), but we CAN verify the ZIP layout that run_dd_build
       # produces by checking the expected entries are documented in source.
-      - name: Verify ZIP structure expectations in source
+      # Scans the dd module glob — ZIP assembly lives in mod.rs, the flasher
+      # template references the entries in script.rs.
+      - name: Verify ZIP structure expectations in source (dd module)
         run: |
           python3 << 'PYEOF'
-          content = open("rust/src/dd.rs").read()
+          from pathlib import Path
+
+          content = "\n".join(f.read_text() for f in sorted(Path("rust/src/dd").glob("*.rs")))
 
           # All expected ZIP entries that run_dd_build must create
           required_entries = [
@@ -341,7 +263,7 @@ jobs:
                   missing.append(f"{entry} ({desc})")
 
           if missing:
-              print(f"FAIL: missing ZIP entry references in dd.rs: {missing}")
+              print(f"FAIL: missing ZIP entry references in dd module: {missing}")
               exit(1)
           print(f"PASS: all {len(required_entries)} ZIP entries referenced in source")
 
@@ -357,7 +279,7 @@ jobs:
               if check not in content:
                   missing_opt.append(f"{check} ({desc})")
           if missing_opt:
-              print(f"FAIL: missing optimizations in dd.rs: {missing_opt}")
+              print(f"FAIL: missing optimizations in dd module: {missing_opt}")
               exit(1)
           print(f"PASS: all {len(optimizations)} optimizations present")
           PYEOF
@@ -368,16 +290,15 @@ jobs:
         run: |
           echo "=========================================="
           echo "  Smoke Test Summary"
-          echo "=========================================="
           echo "  Workflow: ${{ github.workflow }}"
           echo "  Commit:   ${{ github.sha }}"
           echo "  Branch:   ${{ github.ref_name }}"
           echo "  Actor:    ${{ github.actor }}"
           echo ""
           echo "Steps completed:"
-          echo "  1. Rust unit tests (host target)"
-          echo "  2. Shellcheck on extracted shell scripts"
-          echo "  3. Rust brace balance check"
-          echo "  4. Format args presence check"
-          echo "  5. ZIP structure expectations check"
+          echo "  1. Rust unit tests (host target) + flasher script dump"
+          echo "  2. Shellcheck on rendered flasher scripts (Build-gate parity)"
+          echo "  3. Rust brace balance check (dd module)"
+          echo "  4. Format args presence check (dd module)"
+          echo "  5. ZIP structure expectations check (dd module)"
           echo "=========================================="
