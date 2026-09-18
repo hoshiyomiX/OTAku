@@ -231,6 +231,40 @@ use super::*;
         );
     }
 
+
+    /// F3: the flasher must ABORT on legacy brotli (id 4) and unknown
+    /// compression ids BEFORE wiring any decompressor — the old path wired
+    /// "cat -dc" (broken) or passed raw brotli bytes to the partition.
+    #[test]
+    fn test_f3_flasher_gates_compress_id() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            s.contains(r#"case "$COMPRESS_ID" in"#),
+            "F3: gate case compress_id hilang"
+        );
+        assert!(
+            s.contains("legacy brotli compression (id 4)"),
+            "F3: pesan abort brotli hilang"
+        );
+        assert!(
+            s.contains("Unknown compression id $COMPRESS_ID"),
+            "F3: pesan abort id tak dikenal hilang"
+        );
+        // blok wiring brotli lama harus hilang
+        assert!(
+            !s.contains(r#"if [ "$COMPRESS_ID" = "4" ]; then"#),
+            "F3 REGRESSION: wiring brotli cat -dc kembali"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────
     // T27 golden template lock — byte-identical guarantee
     // ──────────────────────────────────────────────────────────────
@@ -272,7 +306,7 @@ use super::*;
         let hexstr: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hexstr,
-            "78f20a19308fd879f4c21c3181af6ebeabff9dca2600868d6c299c9f705e766a",
+            "8ff5dc1c8ce089a6767772e4ee2e03618d648b641c1f81c0ec6d40084d471c75",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );

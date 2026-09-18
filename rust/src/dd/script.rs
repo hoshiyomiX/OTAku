@@ -838,6 +838,28 @@ check_decompressor() {{
     return 1
 }}
 
+# F3 fix (T25): gate the compression id BEFORE any decompressor wiring.
+#   id 4 = legacy brotli — OTAku can no longer PRODUCE such bundles and
+#   recovery-side brotli was removed; the old path wired "cat -dc"
+#   (broken flags) or raw passthrough = brotli bytes straight onto the
+#   partition. Old brotli bundles must abort with a clear rebuild hint.
+#   Any id outside 0/1/2/3/5/6 is a mixed/corrupt build — abort too.
+case "$COMPRESS_ID" in
+    0|1|2|3|5|6)
+        ;;
+    4)
+        ui_print "! ABORT: This bundle uses legacy brotli compression (id 4)."
+        ui_print "!  OTAku no longer produces or flashes brotli bundles."
+        ui_print "!  Rebuild the bundle with gzip/bzip2/xz/lz4/zstd."
+        exit 1
+        ;;
+    *)
+        ui_print "! ABORT: Unknown compression id $COMPRESS_ID (supported: 0,1,2,3,5,6)."
+        ui_print "!  Bundle header and update-binary disagree — mixed or corrupt build."
+        exit 1
+        ;;
+esac
+
 if [ "$COMPRESS_ID" = "0" ]; then
     # ALG_NONE: no decompression needed — use plain cat (no -d flag).
     # BUG FIX (NEW-F): Previously used "$DECOMP_CMD -d" which expands
@@ -867,14 +889,6 @@ else
     # ZSTD also requires -c for stdout output when piped (like lz4).
     # zstd -d without -c writes to a file with .zst removed by default.
     if [ "$COMPRESS_ID" = "6" ]; then
-        DECOMP_PIPE="$DECOMP_CMD -dc"
-    fi
-    # Brotli also requires -c for stdout output when piped (like lz4/zstd).
-    # On OrangeFox, brotli is only available via busybox, and busybox brotli -d
-    # without -c attempts to write to a file (removing .br extension) instead of
-    # stdout. The fallback chain already uses "busybox brotli -dc", so the
-    # primary pipe should match.
-    if [ "$COMPRESS_ID" = "4" ]; then
         DECOMP_PIPE="$DECOMP_CMD -dc"
     fi
 

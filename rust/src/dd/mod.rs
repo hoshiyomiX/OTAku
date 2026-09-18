@@ -111,15 +111,19 @@ pub const ALIGN: usize = 4096;
 
 /// Get the shell decompressor command for a compress ID.
 fn decomp_cmd_for_id(compress_id: u16) -> &'static str {
+    // F3 (T25): ids 4 and unknown are UNREACHABLE from the generated script —
+    // it aborts on them before any decompressor wiring (see script.rs gate).
+    // The arms remain as defense-in-depth for future call sites; they map to
+    // "cat" rather than panicking in case a diagnostic path ever asks.
     match compress_id {
         0 => "cat",
         1 => "gzip",
         2 => "bzip2",
         3 => "xz",
-        4 => "cat",  // brotli removed — treat as uncompressed passthrough
+        4 => "cat",  // legacy brotli — script ABORTS on this id (F3 gate)
         5 => "lz4",
         6 => "zstd",
-        _ => "cat",
+        _ => "cat",  // unknown — script ABORTS on unknown ids (F3 gate)
     }
 }
 
