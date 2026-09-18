@@ -17,9 +17,12 @@ android {
         versionName '1.0.0'
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
-        ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
-        }
+        // T24: NO ndk.abiFilters here. AGP UNIONs defaultConfig's filter
+        // set into every product flavor, so declaring both ABIs at this
+        // level silently un-filters arm7/arm8 — all three APKs shipped
+        // BOTH ABIs (verified in Build run #274: arm7/arm8/universal
+        // release APKs were byte-equal in size, each containing both
+        // .so files). ABI filtering lives ONLY in productFlavors below.
     }
 
     flavorDimensions "abi"

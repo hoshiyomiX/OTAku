@@ -400,6 +400,30 @@ The flasher recognizes these dynamic partition names (lives inside `super`, resi
 
 Adding a name is safe — `is_dynamic_partition()` returns false for partitions that don't exist on the device.
 
+## CI Artifact Pipeline (T24)
+
+The Build workflow publishes artifacts in two layers. Each matrix leg
+uploads its own `OTAku-<abi>-release` (APK plus the R8 `mapping.txt`
+required to de-obfuscate crashes from the minified release build) and
+`OTAku-<abi>-debug` artifacts. A final `publish` job then downloads every
+`OTAku-*` artifact of the run and re-uploads one flat `OTAku-all-builds`
+bundle containing all six APKs plus the three mapping files.
+
+The final job exists because GitHub's run page lists artifacts per
+attempt: after "re-run failed jobs" (for example a transient Maven
+Central outage), the run summary only shows artifacts uploaded during
+the latest attempt. Because the publish job always runs in the newest
+attempt (`if: !cancelled()`) and every upload sets `overwrite: true`,
+the complete bundle is re-published after any rerun and remains visible
+on the main run page. Artifact names are never suffixed with the attempt
+number; reruns replace same-named artifacts instead of conflicting.
+
+ABI packaging invariant: `ndk.abiFilters` must be declared ONLY on the
+product flavors. AGP unions `defaultConfig`'s filters into every flavor,
+which once silently un-filtered all three APKs (each shipped both ABIs).
+The `Verify APK ABI filtering` CI step fails the build if an APK's ABI
+set does not exactly match its flavor.
+
 ## Non-Root Limitations
 
 ### What Works Without Root

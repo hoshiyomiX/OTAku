@@ -92,6 +92,9 @@ jobs:
           name: rust-native-libs
           path: android/app/src/main/jniLibs/
           retention-days: 1
+          # T24 rerun safety: re-runs re-upload the same name; without
+          # overwrite the upload 409s against the earlier attempt's copy.
+          overwrite: true
 
   build-android:
     name: Build APK (${{ matrix.target.label }})
@@ -102,9 +105,9 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - { flavor: Arm7, abi: arm7, label: ARMv7 }
-          - { flavor: Arm8, abi: arm8, label: ARMv8 }
-          - { flavor: Universal, abi: universal, label: Universal }
+          - { flavor: Arm7, abi: arm7, label: ARMv7, expected_abis: 'armeabi-v7a' }
+          - { flavor: Arm8, abi: arm8, label: ARMv8, expected_abis: 'arm64-v8a' }
+          - { flavor: Universal, abi: universal, label: Universal, expected_abis: 'arm64-v8a armeabi-v7a' }
 
     steps:
       - name: Checkout repository
@@ -150,14 +153,37 @@ jobs:
             exit 1
           fi
 
-      - name: Upload release APK
+      - name: Verify APK ABI filtering (T24 regression guard)
+        working-directory: android
+        run: |
+          APK_FILE=$(find app/build/outputs/apk -name '*.apk' -path '*release*' | head -1)
+          if [ -z "$APK_FILE" ]; then
+            echo "WARNING: No release APK found to verify"
+            exit 0
+          fi
+          echo "Verifying ABI set: $APK_FILE"
+          EXPECTED="${{ matrix.target.expected_abis }}"
+          ACTUAL=$(unzip -l "$APK_FILE" | grep -oP 'lib/\K[^/]+(?=/libotaku_native\.so)' | sort -u | tr '\n' ' ' | xargs)
+          echo "Expected ABIs: $EXPECTED"
+          echo "Actual ABIs:   $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "ERROR: APK ABI set mismatch — flavor ndk.abiFilters is not filtering"
+            echo "Hint: defaultConfig must have NO ndk.abiFilters (AGP unions it into every flavor — T24)"
+            exit 1
+          fi
+          echo "[OK] APK contains exactly the expected ABIs"
+
+      - name: Upload release APK (+ R8 mapping)
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: OTAku-${{ matrix.target.abi }}-release
-          path: android/app/build/outputs/apk/**/release/*.apk
+          path: |
+            android/app/build/outputs/apk/**/release/*.apk
+            android/app/build/outputs/mapping/**/mapping.txt
           if-no-files-found: warn
           retention-days: 30
+          overwrite: true
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -167,3 +193,52 @@ jobs:
           path: android/app/build/outputs/apk/**/debug/*.apk
           if-no-files-found: warn
           retention-days: 30
+          overwrite: true
+
+  # T24 BUG-1: the GitHub run page lists artifacts PER ATTEMPT. After
+  # "re-run failed jobs" (e.g. a transient Maven outage), the run summary
+  # only shows artifacts uploaded during the latest attempt — everything
+  # from earlier attempts disappears from the main page. This final job
+  # re-publishes the complete bundle on the newest attempt so the page
+  # always shows the full artifact set once the run is green.
+  publish:
+    name: Publish full artifact bundle
+    needs: build-android
+    runs-on: ubuntu-latest
+    # Runs even when a build leg failed, so a post-rerun attempt
+    # re-publishes the COMPLETE set. Skips only on cancellation.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Download all per-ABI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Artifacts are run-scoped, not attempt-scoped: this also sees
+          # artifacts uploaded by earlier attempts of the same run.
+          pattern: OTAku-*
+          path: dist
+          merge-multiple: true
+          if-no-files-found: error
+
+      - name: Assemble flat bundle
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          # APKs already carry unique names (app-<flavor>-<type>.apk)
+          find dist -name '*.apk' -print -exec cp {} bundle/ \;
+          # R8 mappings: prefix with the variant dir to keep them flat + unique
+          find dist -name 'mapping.txt' | while read -r m; do
+            variant="$(basename "$(dirname "$m")")"
+            cp "$m" "bundle/mapping-${variant}.txt"
+          done
+          echo "=== bundle contents ==="
+          ls -lh bundle/
+          echo "APK count: $(find bundle -name '*.apk' | wc -l) (expect 6 = 3 flavors x 2 build types)"
+
+      - name: Upload complete bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: OTAku-all-builds
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
