@@ -786,8 +786,14 @@ pub fn run_dd_build(
             // injection. Previously, raw values were interpolated into double-quoted
             // shell strings, allowing $(cmd) or backtick injection to execute
             // arbitrary commands with root privileges in recovery shell.
-            let rom_escaped = shell_escape_dq(rom_display);
-            let maker_escaped = shell_escape_dq(maker_display);
+            // F10 fix (T25): shell_escape_dq only escapes QUOTES — a newline in
+            // the input still breaks out of the ui_print line, injecting a whole
+            // new shell line. Strip newlines first (same treatment as the O-2
+            // header_info sanitizer).
+            let rom_sanitized = rom_display.replace(['\n', '\r'], " ");
+            let maker_sanitized = maker_display.replace(['\n', '\r'], " ");
+            let rom_escaped = shell_escape_dq(&rom_sanitized);
+            let maker_escaped = shell_escape_dq(&maker_sanitized);
             let injection = format!(
                 "ui_print \"        by hoshiyomiX\"\nui_print \"  ROM: {} | Maker: {}\"",
                 rom_escaped, maker_escaped
@@ -875,7 +881,14 @@ pub fn run_dd_build(
                 .map_err(|e| format!("Cannot write flash_info.txt: {}", e))?;
 
             // Add update-binary
-            zip.start_file("META-INF/com/google/android/update-binary", options)
+            // F13 fix (T25): carry the executable bit (0o755) in the ZIP entry —
+            // recoveries that exec the extracted file directly rely on it; a
+            // modeless entry defaults to 0o600 on some unzip implementations.
+            let exec_options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .large_file(true)
+                .unix_permissions(0o755);
+            zip.start_file("META-INF/com/google/android/update-binary", exec_options)
                 .map_err(|e| format!("Cannot start update-binary in ZIP: {}", e))?;
             zip.write_all(update_binary.as_bytes())
                 .map_err(|e| format!("Cannot write update-binary: {}", e))?;

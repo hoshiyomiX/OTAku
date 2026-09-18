@@ -175,6 +175,62 @@ use super::*;
         );
     }
 
+
+    /// F9: the LLM-tokenization artifact must never re-enter the template.
+    #[test]
+    fn test_f9_no_llm_artifact() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            !s.contains("$HARUKA_PARSER_CHANGE_LINE"),
+            "F9 REGRESSION: artefak tokenisasi LLM kembali di template"
+        );
+    }
+
+    /// F12: GZIP_ERR_MSG must be flattened to a single line before ui_print.
+    #[test]
+    fn test_f12_gzip_err_msg_single_line() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            s.contains("| head -3 | tr '\\n' ' '"),
+            "F12: flatten tr-'\\n'-' ' hilang dari pipeline GZIP_ERR_MSG"
+        );
+    }
+
+    /// F11: the 'lptools map' hint must be guarded — lp_name is only set in
+    /// the dynamic auto-map branch; physical partitions need a different hint.
+    #[test]
+    fn test_f11_lp_name_hint_guarded() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: "a".repeat(64),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: "b".repeat(64),
+        }];
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        assert!(
+            s.contains(r#"[ "$is_dynamic" = "1" ] && [ -n "$lp_name" ]"#),
+            "F11: guard is_dynamic+lp_name hilang (hint 'lptools map ' kosong bisa kembali)"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────
     // T27 golden template lock — byte-identical guarantee
     // ──────────────────────────────────────────────────────────────
@@ -216,7 +272,7 @@ use super::*;
         let hexstr: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hexstr,
-            "ae782eed1af17300962e764d853179f6e0562c2534a3ec5d0d85d344db7f61f2",
+            "78f20a19308fd879f4c21c3181af6ebeabff9dca2600868d6c299c9f705e766a",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );

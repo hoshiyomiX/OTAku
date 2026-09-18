@@ -1282,7 +1282,15 @@ validate_target() {{
     if [ ! -e "$target" ]; then
         ui_print "✗ Error: $name partition not found"
         ui_print "  Path: $target"
-        ui_print "  Hint: Reboot recovery after Format Data, or run 'lptools map $lp_name'"
+        # F11 fix (T25): $lp_name is only set inside the dynamic auto-map branch
+        # above — for a missing PHYSICAL partition it is empty, and the old hint
+        # printed 'lptools map ' (nonsense: physical partitions are not in super).
+        if [ "$is_dynamic" = "1" ] && [ -n "$lp_name" ]; then
+            ui_print "  Hint: Reboot recovery after Format Data, or run 'lptools map $lp_name'"
+        else
+            ui_print "  Hint: Physical partition missing — check the device partition layout"
+            ui_print "        (lptools does not manage physical partitions)."
+        fi
         return 1
     fi
 
@@ -1875,7 +1883,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # When NEED_TRIM=0, dd_if_bundle already outputs exactly PCSIZE bytes.
     # When NEED_TRIM=1, we need to strip trailing padding. Instead of
     # head -c (1-byte-at-a-time), use dd with computed block count.
-$HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full blocks, then if
+    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full blocks, then if
     # PCSIZE_REMAINDER > 0 we append the remaining bytes with a second dd.
     # This avoids head -c entirely — all reads are in 4KB blocks.
     trim_pipe() {{
@@ -2165,7 +2173,9 @@ $HARUKA_PARSER_CHANGE_LINE    # dd bs=4096 count=$PCSIZE_BLOCKS reads the full b
             # Print diagnostic info on decompression failure.
             # This is critical for debugging — without it, we only see
             # "status=2" with no context.
-            GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3)
+            # F12 fix (T25): flatten to ONE line — ui_print renders a single
+            # line per call; embedded newlines broke the recovery log layout.
+            GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ' ')
             rm -f "$GZIP_ERR"
             # Use "! WARNING" (not "! ABORT") because we'll try fallback decompressors
             # if the compressed hash was verified OK. Only say ABORT when all fallbacks
