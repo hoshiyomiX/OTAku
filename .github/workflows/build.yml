@@ -44,6 +44,10 @@ jobs:
         working-directory: rust
         run: cargo clippy --lib -- -D warnings 2>&1
 
+      - name: Run cargo tests
+        working-directory: rust
+        run: cargo test --lib 2>&1
+
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
