@@ -52,10 +52,12 @@ data class ProgressUpdate(
  * images (.img) for TWRP/OrangeFox recovery flashing.
  *
  * Payload.bin toolchain (prototype): inspect → extract → verify → write —
- * reads an AOSP OTA payload.bin (e.g. from a full OTA ZIP), extracts
- * partition images from it (sidecar progress + WakeLock for long runs),
- * self-verifies generated payloads, and builds a payload.bin from the
- * loaded partition images (sidecar progress, same as extraction).
+ * works on OTAku's OWN custom payload format (magic "OTKU", T27 Option B):
+ * extracts partition images from a payload.bin (sidecar progress + WakeLock
+ * for long runs), self-verifies generated payloads, and builds a payload.bin
+ * from the loaded partition images (sidecar progress, same as extraction).
+ * NOTE: real AOSP OTA payloads (magic "CrAU") are deliberately NOT
+ * supported — the Rust layer rejects them with a clear error.
  *
  * Supported compression: zstd, xz, bzip2, gzip, lz4  ("none" and "brotli" excluded from user-facing options)
  *
@@ -343,9 +345,10 @@ object OTABridge {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Inspect an AOSP payload.bin — parse header + manifest, list partitions.
+     * Inspect an OTAku payload.bin (custom "OTKU" format) — parse header +
+     * manifest, list partitions.
      *
-     * Read-only: parses the CrAU header and protobuf manifest on
+     * Read-only: parses the OTKU header and protobuf manifest on
      * Dispatchers.IO and returns the partition list. Output lines are
      * streamed to onOutputLine for the UI log (same pattern as dd()).
      *

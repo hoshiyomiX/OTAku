@@ -61,7 +61,7 @@
 │  │                                                                │  │
 │  │  src/lib.rs        — 9 JNI entry points (JSON in/out)          │  │
 │  │  src/dd.rs         — DD-mode flashable ZIP generator           │  │
-│  │  src/payload.rs    — AOSP payload.bin read/write               │  │
+│  │  src/payload.rs    — OTAku custom payload (OTKU) read/write     │  │
 │  │  src/proto.rs      — Hand-written prost structs                │  │
 │  │  src/compression.rs — gzip/bz2/xz/zstd/lz4 + SHA-256           │  │
 │  └────────────────────────────────────────────────────────────────┘  │
@@ -174,7 +174,7 @@ Write:    menu "Build payload.bin…" → compression dialog → writePayload
           + WakeLock → <output>.progress sidecar → 500ms poller
           → split bars + notification "Compressing system (2/7) — 43%"
           → per-partition summaries in the log
-Verify:   verifyPayload(output) — CrAU magic + header + manifest re-read
+Verify:   verifyPayload(output) — OTKU magic + header + manifest re-read
           (fast: no data-blob re-hash) → check log in the UI
 ```
 

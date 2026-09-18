@@ -230,14 +230,15 @@ object NativeBridge {
 
     // ═══════════════════════════════════════════════════════════════
     //  Payload.bin inspect + extract (prototype)
-    //  AOSP OTA payload.bin — Rust implementation in rust/src/payload.rs
-    //  (CrAU magic + protobuf manifest), JSON in/out like the other bridges.
+    //  OTAku custom payload format — Rust implementation in rust/src/payload.rs
+    //  (OTKU magic + protobuf manifest, T27 Option B), JSON in/out like the
+    //  other bridges. AOSP payloads (CrAU) are rejected, not parsed.
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Read and parse an AOSP payload.bin file.
+     * Read and parse an OTAku payload.bin file (custom "OTKU" format).
      *
-     * Parses the CrAU header + DeltaArchiveManifest protobuf and returns
+     * Parses the OTKU header + DeltaArchiveManifest protobuf and returns
      * the partition list (name, size, operation count) plus file metadata.
      * Read-only — never writes anything.
      *
@@ -333,7 +334,7 @@ object NativeBridge {
     /**
      * Self-verify a payload.bin by re-reading it.
      *
-     * Checks the CrAU magic, header + manifest parseability, partition
+     * Checks the OTKU magic (OTAku custom format), header + manifest parseability, partition
      * count, and echoes each partition's manifest hash. Header/manifest
      * only — fast even for multi-GB payloads.
      *
@@ -364,7 +365,7 @@ object NativeBridge {
     /** Result of parsing a payload.bin (readPayload). */
     data class PayloadInspectResult(
         val success: Boolean,
-        /** payload.bin format version (2 for modern AOSP). */
+        /** payload.bin format version (2 = OTAku custom format family). */
         val payloadVersion: Long = 0L,
         val manifestLen: Long = 0L,
         val minorVersion: Int = 0,

@@ -70,7 +70,7 @@ All five algorithms are **always available** — they are statically compiled in
 │  │  Modules:                                          │  │
 │  │  ├─ lib.rs     JNI entry points (9 external fns)   │  │
 │  │  ├─ dd.rs      DD-mode flashable ZIP generator     │  │
-│  │  ├─ payload.rs AOSP payload.bin read/write         │  │
+│  │  ├─ payload.rs OTAku custom payload (OTKU) read/write │  │
 │  │  ├─ proto.rs   Hand-written prost structs          │  │
 │  │  └─ compression.rs  gzip/bz2/xz/lz4/zstd + SHA-256 │  │
 │  └───────────────────────────────────────────────────┘  │
@@ -216,11 +216,11 @@ OTAku/
 │   ├── Cargo.toml                    # otaku-native crate (cdylib)
 │   ├── build.rs                      # prost-build config (currently no-op)
 │   ├── proto/
-│   │   └── update_metadata.proto     # AOSP payload.bin protobuf schema
+│   │   └── update_metadata.proto     # divergence baseline (NOT our schema)
 │   └── src/
 │       ├── lib.rs                    # JNI entry points (9 external fns)
 │       ├── dd.rs                     # DD-mode flashable ZIP generator
-│       ├── payload.rs                # AOSP payload.bin read/write
+│       ├── payload.rs                # OTAku custom payload (OTKU) read/write
 │       ├── proto.rs                  # Hand-written prost structs
 │       └── compression.rs            # gzip/bz2/xz/lz4/zstd + SHA-256
 ├── android/                          # Android project
