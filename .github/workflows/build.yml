@@ -48,6 +48,20 @@ jobs:
         working-directory: rust
         run: cargo test --lib 2>&1
 
+      - name: Shellcheck generated flasher scripts
+        working-directory: rust
+        run: |
+          # T27 Fase-4: lint the flasher script dumped by
+          # test_ci_dump_flasher_scripts (both verify variants).
+          # Excludes are calibrated false positives:
+          #   SC2034 PART_i_* vars are read via indirect expansion
+          #   SC3043 'local' is busybox-ash (our recovery target), not POSIX
+          #   SC3037 busybox echo flags
+          shellcheck -s sh -S warning --exclude=SC2034,SC3043,SC3037 \
+            target/dump/update-binary.sh
+          shellcheck -s sh -S warning --exclude=SC2034,SC3043,SC3037 \
+            target/dump/update-binary-skip.sh
+
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk

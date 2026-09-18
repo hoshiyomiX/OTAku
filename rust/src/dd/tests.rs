@@ -265,6 +265,35 @@ use super::*;
         );
     }
 
+
+    // ──────────────────────────────────────────────────────────────
+    // T27 Fase-4: dump skrip flasher utk gerbang shellcheck CI
+    // ──────────────────────────────────────────────────────────────
+
+    /// Dump representative generated flasher scripts for the CI shellcheck
+    /// gate (both verify variants — the verify_block differs between them).
+    /// Writes under target/dump/ — cargo test CWD is the crate root, so this
+    /// lands next to build artifacts and never pollutes the source tree.
+    #[test]
+    fn test_ci_dump_flasher_scripts() {
+        let meta: Vec<PartitionMeta> = (0..2)
+            .map(|i| PartitionMeta {
+                name: format!("part_{}", i),
+                unc_size: 1024 * (i as u64 + 1),
+                hash_hex: format!("{:064x}", i),
+                comp_size: 512 * (i as u64 + 1),
+                data_offset: 4096 * (i as u64 + 1),
+                comp_hash_hex: format!("{:064x}", i + 7),
+            })
+            .collect();
+        let dir = std::path::Path::new("target/dump");
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, sv) in [("update-binary.sh", false), ("update-binary-skip.sh", true)] {
+            let s = build_update_script(2, 1, "gzip", &meta, 33554432, "crosshatch", sv);
+            std::fs::write(dir.join(name), s).unwrap();
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────
     // T27 golden template lock — byte-identical guarantee
     // ──────────────────────────────────────────────────────────────
@@ -311,6 +340,7 @@ use super::*;
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
     }
+
 
 
 
