@@ -155,7 +155,7 @@ use super::*;
         let hexstr: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hexstr,
-            "ee31071ec089b839c03284529ceb74d67427d5ee390e9b77f261cb93c798277f",
+            "826b8ed0336259ecce7fb9576d38addf7d255712ccd3f3de02df563a30beebba",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
@@ -537,38 +537,46 @@ use super::*;
         );
     }
 
-    /// Regression: Bug #8 (P2) — `choose` binary fallback chain.
-    /// The old code called `choose` unconditionally, which fails on
-    /// minimal TWRP builds. The fix adds a fallback chain:
-    /// choose → read -t 30 -n 1 → default abort.
+    /// F6 (T25 audit): device-mismatch handling must be HONEST — no dead
+    /// interactivity. `choose` does not exist in TWRP/busybox, and `read`
+    /// consumes the recovery update-binary protocol pipe (STDIN), so the
+    /// old "confirm" chain could never actually confirm anything.
+    /// Policy: undetectable device → warn + proceed (false-negative
+    /// protection); genuinely different device → ABORT.
     #[test]
-    fn test_regression_choose_fallback() {
+    fn test_f6_device_mismatch_policy() {
         let meta = vec![PartitionMeta {
             name: "boot".to_string(),
             unc_size: 33554432,
             hash_hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             comp_size: 16777216,
             data_offset: 0,
-        comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+            comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false);
 
-        // Assert: choose is gated by command -v check.
+        // Dead interactivity must stay dead.
         assert!(
-            script.contains("command -v choose"),
-            "REGRESSION: `choose` binary not guarded by command -v (Bug #8)"
+            !script.contains("command -v choose"),
+            "F6 REGRESSION: binary `choose` (tidak ada di TWRP/busybox) dipakai lagi"
+        );
+        assert!(
+            !script.contains("read -t 30"),
+            "F6 REGRESSION: read dari STDIN (pipe protokol recovery) kembali"
+        );
+        assert!(
+            !script.contains("USER_CONFIRMED"),
+            "F6 REGRESSION: gerbang konfirmasi mati kembali"
         );
 
-        // Assert: fallback to read -t is present.
+        // Honest policy branches must exist.
         assert!(
-            script.contains("read -t 30"),
-            "REGRESSION: `read -t 30` fallback missing (Bug #8)"
+            script.contains("Device codename could not be detected"),
+            "F6: cabang deteksi-gagal (warn + proceed) hilang"
         );
-
-        // Assert: USER_CONFIRMED gate is present (so default abort works).
         assert!(
-            script.contains("USER_CONFIRMED"),
-            "REGRESSION: USER_CONFIRMED gate missing (Bug #8)"
+            script.contains("Refusing to flash a bundle"),
+            "F6: cabang abort device-beda hilang"
         );
     }
 

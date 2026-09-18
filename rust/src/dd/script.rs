@@ -151,35 +151,30 @@ if [ -n "$TARGET_DEVICE" ]; then
         ui_print ""
         ui_print "  Flashing on wrong device may BRICK it."
 
-        # Interactive confirmation with fallback chain:
-        #   1. `choose` binary (TWRP native, supported by OrangeFox)
-        #   2. `read -t -n 1` (busybox/toybox interactive read)
-        #   3. Default ABORT (safer than silently continuing)
-        # If `choose` is missing (minimal TWRP builds), the old code would
-        # auto-abort because the failed `choose` returned non-zero. Now we
-        # fall through to read, then to a default abort.
-        USER_CONFIRMED=0
-        if command -v choose >/dev/null 2>&1; then
-            ui_print "  Press Power to continue, Vol- to abort."
-            choose -t 30 "Continue?" "Yes" "No" 2>/dev/null
-            [ $? -eq 0 ] && USER_CONFIRMED=1
-        elif command -v read >/dev/null 2>&1; then
-            ui_print "  Press Y to continue, any other key to abort (30s timeout):"
-            # `read -t 30 -n 1` reads 1 char with 30s timeout.
-            # Exit code 0 = char read, non-zero = timeout/EOF.
-            ANSWER=""
-            read -t 30 -n 1 ANSWER 2>/dev/null
-            RC=$?
-            if [ $RC -eq 0 ] && ([ "$ANSWER" = "y" ] || [ "$ANSWER" = "Y" ]); then
-                USER_CONFIRMED=1
-            fi
-        fi
-
-        if [ "$USER_CONFIRMED" != "1" ]; then
-            ui_print "! ABORT: User cancelled (device mismatch)"
+        # F6 fix (T25 audit): the old interactive confirm was a dead feature:
+        #   - `choose` does not exist in TWRP/busybox (verified against the
+        #     TWRP android-12.1 tree and the busybox applet list)
+        #   - `read` reads STDIN — in recovery that is the update-binary
+        #     protocol pipe, not a console: it hangs or consumes protocol
+        #     data. (`command -v read` is always true anyway — builtin.)
+        # New policy, no fake interactivity:
+        #   - Detection FAILED (CURRENT_DEVICE empty) → warn + proceed.
+        #     Codename detection has real false negatives (OEM props absent
+        #     in minimal recoveries); blocking the user on a failed probe
+        #     would prevent flashing the CORRECT device. Partition
+        #     validation (existence + size) remains the real safety gate.
+        #   - Genuinely DIFFERENT device detected → ABORT (matches the old
+        #     de-facto behavior, since both confirm branches always failed).
+        if [ -z "$CURRENT_DEVICE" ]; then
+            ui_print "  ! Device codename could not be detected on this recovery."
+            ui_print "  ! Continuing — partition validation still gates the flash."
+        else
+            ui_print "! ABORT: Refusing to flash a bundle built for $TARGET_DEVICE"
+            ui_print "!  onto this device ($CURRENT_DEVICE)."
+            ui_print "!  Rebuild the bundle with the correct device selected,"
+            ui_print "!  or flash it on the intended device."
             exit 1
         fi
-        ui_print "  User confirmed — continuing despite device mismatch."
     else
         ui_print "  ✓ Device: $CURRENT_DEVICE"
     fi
