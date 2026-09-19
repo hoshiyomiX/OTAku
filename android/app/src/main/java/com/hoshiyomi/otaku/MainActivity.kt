@@ -17,7 +17,6 @@ import android.provider.DocumentsContract
 import android.provider.Settings
 import android.util.Log
 import android.view.View
-import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
