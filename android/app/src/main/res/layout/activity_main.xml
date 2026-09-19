@@ -764,6 +764,10 @@
         <!-- the first layout pass on the target device).           -->
         <!-- T18: explicit 56dp height (M3 Extended FAB canonical   -->
         <!-- size — deterministic regardless of style resolution).  -->
+        <!-- T34 audit E6: cornerRadius 16dp -> 28dp — MD3            -->
+        <!-- Expressive favors rounder FAB shapes (views-1.12        -->
+        <!-- approximation; full expressive FAB morphing is           -->
+        <!-- Compose-only).                                          -->
         <!-- ═══════════════════════════════════════════════════ -->
 
         <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
@@ -776,6 +780,6 @@
             android:text="@string/button_build_now"
             android:contentDescription="@string/button_build_now"
             app:icon="@drawable/ic_play"
-            app:cornerRadius="16dp" />
+            app:cornerRadius="28dp" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

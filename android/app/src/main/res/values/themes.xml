@@ -124,6 +124,15 @@
         <item name="colorOutline">@color/suisei_light_outline</item>
         <item name="colorOutlineVariant">@color/suisei_light_outlineVariant</item>
 
+        <!-- Surface containers (T34 audit E1): dialog/menu/popup surfaces
+             follow the Suisei palette on API 26-30 (DynamicColors covers 31+);
+             without these they fell back to baseline M3 neutral gray. -->
+        <item name="colorSurfaceContainerLowest">@color/suisei_light_surfaceContainerLowest</item>
+        <item name="colorSurfaceContainerLow">@color/suisei_light_surfaceContainerLow</item>
+        <item name="colorSurfaceContainer">@color/suisei_light_surfaceContainer</item>
+        <item name="colorSurfaceContainerHigh">@color/suisei_light_surfaceContainerHigh</item>
+        <item name="colorSurfaceContainerHighest">@color/suisei_light_surfaceContainerHighest</item>
+
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
@@ -208,48 +217,50 @@
     <!-- ═══════════════════════════════════════════════════════════════ -->
 
     <!-- Toolbar style -->
+    <!-- T34 audit E4: flat tonal M3 top app bar — colorSurfaceContainer
+         container color (M3-2023 app bar spec), zero elevation (the old
+         2dp shadow was an M2-ism; separation comes from the tonal step,
+         which E1's container ramp now provides). -->
     <style name="Widget.OTAku.Toolbar" parent="Widget.Material3.Toolbar.Surface">
         <item name="titleTextColor">?attr/colorOnSurface</item>
         <item name="subtitleTextColor">?attr/colorOnSurfaceVariant</item>
-        <item name="android:background">?attr/colorSurface</item>
-        <item name="elevation">2dp</item>
+        <item name="android:background">?attr/colorSurfaceContainer</item>
     </style>
 
     <!-- Primary button style -->
+    <!-- T34 audit E3: cornerRadius 12dp -> 20dp — M3 canonical full-round
+         pill for the 40dp-tall default button (Expressive favors rounder
+         shapes; 12dp was the pre-M3 app standard). -->
     <style name="Widget.OTAku.Button" parent="Widget.Material3.Button">
-        <item name="cornerRadius">12dp</item>
+        <item name="cornerRadius">20dp</item>
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.05</item>
         <item name="android:textSize">14sp</item>
     </style>
 
-    <!-- Tonal button variant — ensures consistent 12dp corner radius
-         for TonalButton-style buttons (filled background, no stroke).
-         ROUNDED-FIX: Without this, TonalButtons use M3 default corner
-         radius (20dp) which doesn't match the OTAku 12dp standard,
-         causing visual mismatch between button outline and background. -->
+    <!-- Tonal button variant — 20dp pill (T34 audit E3, matches the filled
+         and outlined variants; M3 canonical button shape). -->
     <style name="Widget.OTAku.Button.Tonal" parent="Widget.Material3.Button.TonalButton">
-        <item name="cornerRadius">12dp</item>
+        <item name="cornerRadius">20dp</item>
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.05</item>
         <item name="android:textSize">14sp</item>
     </style>
 
-    <!-- Outlined button variant — ensures consistent 12dp corner radius
-         for OutlinedButton-style buttons (stroke border, no fill).
-         ROUNDED-FIX: Without this, OutlinedButtons use M3 default
-         corner radius which may not match the stroke shape. -->
+    <!-- Outlined button variant — 20dp pill (T34 audit E3, matches the
+         filled and tonal variants; M3 canonical button shape). -->
     <style name="Widget.OTAku.Button.Outlined" parent="Widget.Material3.Button.OutlinedButton">
-        <item name="cornerRadius">12dp</item>
+        <item name="cornerRadius">20dp</item>
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.05</item>
         <item name="android:textSize">14sp</item>
     </style>
 
     <!-- Text button variant — for inline/minimal buttons (no stroke, no fill).
-         Uses 8dp corner radius for a subtler shape matching smaller size. -->
+         T34 audit E3: 24dp = full pill for the 48dp-tall log-header buttons
+         (M3 text buttons are fully rounded; 24dp = half of the 48dp height). -->
     <style name="Widget.OTAku.Button.Text" parent="Widget.Material3.Button.TextButton">
-        <item name="cornerRadius">8dp</item>
+        <item name="cornerRadius">24dp</item>
         <item name="android:textAllCaps">false</item>
     </style>
 

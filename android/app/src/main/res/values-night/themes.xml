@@ -92,6 +92,15 @@
         <item name="colorOutline">@color/suisei_dark_outline</item>
         <item name="colorOutlineVariant">@color/suisei_dark_outlineVariant</item>
 
+        <!-- Surface containers (T34 audit E1): dialog/menu/popup surfaces
+             follow the Suisei palette on API 26-30 (DynamicColors covers 31+);
+             without these they fell back to baseline M3 neutral gray. -->
+        <item name="colorSurfaceContainerLowest">@color/suisei_dark_surfaceContainerLowest</item>
+        <item name="colorSurfaceContainerLow">@color/suisei_dark_surfaceContainerLow</item>
+        <item name="colorSurfaceContainer">@color/suisei_dark_surfaceContainer</item>
+        <item name="colorSurfaceContainerHigh">@color/suisei_dark_surfaceContainerHigh</item>
+        <item name="colorSurfaceContainerHighest">@color/suisei_dark_surfaceContainerHighest</item>
+
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
