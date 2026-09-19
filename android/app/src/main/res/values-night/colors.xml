@@ -2,25 +2,15 @@
 <resources>
     <!--
         Dark mode overrides for utility colors.
-        Theme color attributes (colorSurface, etc.) are handled via
-        values-night/themes.xml inheriting Theme.OTAku.Dark.
-    -->
+        Theme color attributes are handled by the values-night/themes.xml
+        variants of Theme.OTAku and Theme.OTAku.Suisei (dark parents + dark
+        palette); the surface-container ramp (T34 audit E1) lives there too.
 
-    <!-- Card borders -->
-    <color name="card_border">#3F4944</color>
+        T34 audit E8: the dead night overrides (card_border, log_background,
+        log_text, log_divider, log_info, log_debug) were removed together
+        with their base values/colors.xml entries — zero references.
+    -->
 
     <!-- Partition list text dark override (near-white on dark surface) -->
     <color name="partition_text">#E1E3E0</color>
-
-    <!-- Log output dark theme overrides — dark bg + light text -->
-    <color name="log_background">#1E1E1E</color>
-    <color name="log_text">#D4D4D4</color>
-    <color name="log_divider">#333333</color>
-
-    <!-- DEPRECATED (MD3-FIX IMPL-001): log level colors now resolve from the
-         ACTIVE theme's color tokens at runtime (?attr/colorPrimary etc.), which
-         automatically provide proper dark-variant values. These static overrides
-         are no longer referenced; kept for reference only. -->
-    <color name="log_info">#A7E8DB</color>     <!-- bright teal — was #80CBC4 (too muted on dark) -->
-    <color name="log_debug">#BDBDBD</color>    <!-- light gray — was #9E9E9E (too dark on dark) -->
 </resources>

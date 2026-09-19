@@ -92,11 +92,11 @@
     <!-- Utility colors                                                -->
     <!-- ═══════════════════════════════════════════════════════════════ -->
 
-    <!-- Log output — light theme: light bg + dark text.
-         Dark theme overrides in values-night/colors.xml. -->
-    <color name="log_background">#F5F5F5</color>
-    <color name="log_text">#1E1E1E</color>
-    <color name="log_divider">#E0E0E0</color>
+    <!-- T34 audit E8: the static log-color utility block (log_background,
+         log_text, log_divider — and the deprecated log_error/log_success/
+         log_warning/log_info/log_debug set) was removed — zero references
+         in code or layouts (verified by rg); log output resolves theme
+         tokens at runtime since MD3-FIX IMPL-001. -->
 
     <!-- Partition list text — P1-fix C-T-03: kept as resource for programmatic resolve.
          Light: near-black (#191C1B) on light surface.
@@ -110,31 +110,12 @@
          You). This teal resource is kept only as a runtime-resolution fallback and
          is no longer the primary source. -->
     <color name="partition_text_loading">#80CBC4</color>
-    <!-- DEPRECATED (MD3-FIX IMPL-001): log level colors are now resolved at runtime
-         from the ACTIVE theme's color tokens — INFO ?attr/colorPrimary, SUCCESS
-         ?attr/colorSecondary, WARN ?attr/colorTertiary, ERROR ?attr/colorError,
-         DEBUG ?android:textColorSecondary — so log lines follow the active palette
-         (Suisei Blue brand accent or Material You dynamic). These teal-derived
-         resources are no longer referenced (release builds strip via
-         shrinkResources); kept for reference. -->
-    <color name="log_error">#BA1A1A</color>
-    <color name="log_success">#4B635B</color>
-    <color name="log_warning">#426278</color>
-    <color name="log_info">#80CBC4</color>
-    <color name="log_debug">#9E9E9E</color>
 
-    <!-- DEPRECATED (MD3-FIX IMPL-007): status_running and status_success are
-         unreferenced (dead resources). status_error is still used for the
-         remove-partition icon tint — keep; it maps to the M3 error token anyway. -->
-    <color name="status_running">#426278</color>
-    <color name="status_success">#4B635B</color>
+    <!-- T34 audit E8: status_running/status_success removed (zero refs);
+         status_error stays — remove-partition icon tint (maps to the M3
+         error token). card_border also removed (zero refs; prefer
+         ?attr/colorOutlineVariant when a card stroke color is needed). -->
     <color name="status_error">#BA1A1A</color>
-
-    <!-- Card colors -->
-    <!-- Card border — unused in current code. When needed, prefer
-         ?attr/colorOutlineVariant for theme-awareness (teal/Suisei/dark).
-         Kept for reference; safe to remove. -->
-    <color name="card_border">#E0E0E0</color>
 
     <!-- Launcher icon background -->
     <color name="ic_launcher_background">#000000</color>
