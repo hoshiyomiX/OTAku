@@ -1506,26 +1506,9 @@ else
                 eval "PNAME_SZ=\$PART_${{FOUND_IDX}}_UNC_SIZE"
                 NEW_SIZE_BYTES=$PNAME_SZ
 
-                # Capture ORIGINAL size BEFORE resize for cleanup-trap rollback
-                ORIG_PTARGET=$(resolve_target "$pname")
-                ORIG_SIZE_BYTES=0
-                if [ -e "$ORIG_PTARGET" ]; then
-                    ORIG_SIZE_BYTES=$(blockdev --getsize64 "$ORIG_PTARGET" 2>/dev/null)
-                fi
-                if [ -z "$ORIG_SIZE_BYTES" ] || [ "$ORIG_SIZE_BYTES" = "0" ]; then
-                    DEV_NAME=$(basename "$ORIG_PTARGET" 2>/dev/null)
-                    if [ -n "$DEV_NAME" ] && [ -f "/sys/class/block/$DEV_NAME/size" ]; then
-                        SECTORS=$(cat "/sys/class/block/$DEV_NAME/size" 2>/dev/null)
-                        [ -n "$SECTORS" ] && ORIG_SIZE_BYTES=$(( SECTORS * 512 ))
-                    fi
-                fi
-                if [ -n "$ORIG_SIZE_BYTES" ] && [ "$ORIG_SIZE_BYTES" != "0" ]; then
-                    RESIZED_ORIGINAL="$RESIZED_ORIGINAL $pname:$ORIG_SIZE_BYTES"
-                fi
-
-                ui_print "  [$pname] $(( ORIG_SIZE_BYTES / 1048576 )) MB → $(( NEW_SIZE_BYTES / 1048576 )) MB"
-
                 # ── Build slot-suffixed partition name for lptools ──
+                # (computed BEFORE the original-size capture below — the F-B
+                #  fix needs $LP_NAME to re-map an unmapped partition first)
                 # On A/B devices, lptools partition names in super partition
                 # metadata are SLOT-SUFFIXED (e.g. vendor_a, vendor_b).
                 # Passing plain "vendor" to lptools resize/map may silently
@@ -1541,6 +1524,45 @@ else
                     LP_NAME="${{pname}}${{TARGET_SLOT}}"
                     ui_print "    (lptools name: $LP_NAME)"
                 fi
+
+                # Capture ORIGINAL size BEFORE resize for cleanup-trap rollback.
+                # F-B fix (T30): the old capture SILENTLY failed when the
+                # partition's dm-linear was unmapped at this point — resolve_target
+                # then returns its best-guess mapper path, [ -e ] fails, and the
+                # /sys/class/block fallback cannot work either (dm-linear devices
+                # are named dm-N in sysfs, never by mapper name). The partition
+                # was left out of RESIZED_ORIGINAL, so a later flash failure left
+                # its ALREADY-RESIZED super metadata un-rolled-back (wrong size,
+                # possibly smaller than the old ROM needs → boot issues).
+                # Fix: materialize the CURRENT-size dm-linear first — lptools map
+                # builds from metadata that is still PRE-resize here, so the size
+                # it exposes IS the original. Harmless when already mapped: the
+                # unmap below is per-partition and runs right after.
+                ORIG_PTARGET=$(resolve_target "$pname")
+                if [ ! -e "$ORIG_PTARGET" ]; then
+                    lptools map "$LP_NAME" >/dev/null 2>&1 || true
+                    ORIG_PTARGET=$(resolve_target "$pname")
+                fi
+                ORIG_SIZE_BYTES=0
+                if [ -e "$ORIG_PTARGET" ]; then
+                    ORIG_SIZE_BYTES=$(blockdev --getsize64 "$ORIG_PTARGET" 2>/dev/null)
+                fi
+                if [ -z "$ORIG_SIZE_BYTES" ] || [ "$ORIG_SIZE_BYTES" = "0" ]; then
+                    DEV_NAME=$(basename "$ORIG_PTARGET" 2>/dev/null)
+                    if [ -n "$DEV_NAME" ] && [ -f "/sys/class/block/$DEV_NAME/size" ]; then
+                        SECTORS=$(cat "/sys/class/block/$DEV_NAME/size" 2>/dev/null)
+                        [ -n "$SECTORS" ] && ORIG_SIZE_BYTES=$(( SECTORS * 512 ))
+                    fi
+                fi
+                if [ -n "$ORIG_SIZE_BYTES" ] && [ "$ORIG_SIZE_BYTES" != "0" ]; then
+                    RESIZED_ORIGINAL="$RESIZED_ORIGINAL $pname:$ORIG_SIZE_BYTES"
+                else
+                    # Loud honesty — rollback will not cover this partition.
+                    ui_print "    ! WARNING: original size of $pname unknown —"
+                    ui_print "      cleanup rollback will NOT restore its size if this flash fails"
+                fi
+
+                ui_print "  [$pname] $(( ORIG_SIZE_BYTES / 1048576 )) MB → $(( NEW_SIZE_BYTES / 1048576 )) MB"
 
                 # ── Step 1: Targeted umount (release mount points) ──
                 # Uses unmount_partition (not unmount_and_unmap_partition) to avoid
@@ -1723,18 +1745,20 @@ FLASH_SPACE_CHECK=0
 if [ "$HAS_LPTOOLS" = "1" ] && [ -n "$RESIZE_NEEDED" ]; then
     LP_FREE=$(lptools free 2>/dev/null | grep -o 'Free space: [0-9]*' | awk '{{print $3}}')
     if [ -n "$LP_FREE" ]; then
-        # For dynamic partitions, we need: existing partition sizes + resize delta.
-        # But TOTAL_FLASH_SIZE includes ALL partitions (dynamic + non-dynamic).
-        # The resize step already verified LP_FREE ≥ RESIZE_TOTAL.
-        # Here we just report informational comparison.
-        ui_print "  Super free space: $(( LP_FREE / 1048576 )) MB"
+        # INFORMATIONAL ONLY — never aborts here (T30 finding F-A).
+        # The authoritative space gate ran in the resize step BEFORE any
+        # super metadata was mutated (pre-resize LP_FREE ≥ RESIZE_TOTAL).
+        # This block runs AFTER the resize already consumed RESIZE_TOTAL
+        # bytes, so post-resize LP_FREE ≈ pre-resize LP_FREE − RESIZE_TOTAL.
+        # The old code compared that POST-resize value against the
+        # PRE-resize requirement and exit 1 — falsely aborting every bundle
+        # whose initial free margin was < 2× the resize need, right after a
+        # perfectly successful resize (the abort then fired the cleanup trap
+        # and rolled the good resize back). lptools resize itself remains
+        # the hard safety net when the pre-resize gate could not parse
+        # `lptools free` output.
+        ui_print "  Super free space (post-resize): $(( LP_FREE / 1048576 )) MB"
         ui_print "  Total flash size: $(( TOTAL_FLASH_SIZE / 1048576 )) MB"
-        if [ "$LP_FREE" -lt "$RESIZE_TOTAL" ]; then
-            # Already caught by resize step, but double-check for safety
-            ui_print "✗ Error: Insufficient free space in super partition."
-            ui_print "  Need: $(( RESIZE_TOTAL / 1048576 )) MB, available: $(( LP_FREE / 1048576 )) MB"
-            exit 1
-        fi
         FLASH_SPACE_CHECK=1
     fi
 fi
