@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    item_dropdown_menu.xml — OTAku (T34)
+
+    Dropdown row for fixed-choice ExposedDropdownMenus
+    (MaterialAutoCompleteTextView, inputType=none). Replaces
+    android.R.layout.simple_list_item_1, which carried no M3 text
+    appearance, no 48dp touch target, and platform-default sizing.
+
+    Mirrors the canonical Material row (mtrl_auto_complete_simple_item in
+    the 1.12.0 AAR: 16dp horizontal padding, 13dp vertical padding, single
+    ellipsized line, large body text) and adds the M3 guarantees the AAR
+    row leaves to the theme: a 48dp minimum height (touch target) and an
+    explicit colorOnSurface text color so popup rows always follow the
+    active palette (Suisei fallback on API 26-30 / Material You on 31+).
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="48dp"
+    android:gravity="center_vertical"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingTop="13dp"
+    android:paddingBottom="13dp"
+    android:ellipsize="end"
+    android:maxLines="1"
+    android:textAppearance="?attr/textAppearanceBodyLarge"
+    android:textColor="?attr/colorOnSurface" />

@@ -1131,7 +1131,10 @@ class MainActivity : AppCompatActivity() {
             "gzip — standard (~60%)",
             "lz4 — fast (~70%)"
         )
-        dropdown?.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, displayLabels))
+        // T34: NoFilterArrayAdapter — the stock ArrayAdapter prefix-filter
+        // can collapse the popup to just the selected row ("only gzip");
+        // pass-through filter + M3 item layout (48dp touch targets).
+        dropdown?.setAdapter(NoFilterArrayAdapter(this, R.layout.item_dropdown_menu, displayLabels))
 
         // Restore persisted compression selection (survives Activity recreation from
         // theme switch, config change, etc). Without this, recreate() resets the
@@ -1213,7 +1216,10 @@ class MainActivity : AppCompatActivity() {
         val items = getCurrentLevelItems()
         val defaultLevel = DEFAULT_COMPRESSION_LEVELS[selectedCompression] ?: 0
         val labels = items.map { if (it == 0) "Default ($defaultLevel)" else "$it" }
-        dropdown.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, labels))
+        // T34: NoFilterArrayAdapter — same fix as the algorithm dropdown:
+        // "Default (6)" as filter constraint would otherwise narrow the
+        // list to a single row.
+        dropdown.setAdapter(NoFilterArrayAdapter(this, R.layout.item_dropdown_menu, labels))
         // Reset selection to "Default" (labels is never empty — sentinel 0
         // always present, see getCurrentLevelItems).
         dropdown.setText(labels[0], false)
@@ -2523,17 +2529,19 @@ class MainActivity : AppCompatActivity() {
         var chosenMinorVersion = minorVersionValues[0]
 
         dropdownCompression?.let { dd ->
-            dd.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, algorithms))
+            // T34: NoFilterArrayAdapter — see setupCompressionSelector();
+            // fixed-choice dropdowns must never prefix-filter themselves.
+            dd.setAdapter(NoFilterArrayAdapter(this, R.layout.item_dropdown_menu, algorithms))
             dd.setText(algorithms[checkedIdx], false)
             dd.setOnItemClickListener { _, _, position, _ -> chosenCompression = algorithms[position] }
         }
         dropdownBlockSize?.let { dd ->
-            dd.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, blockSizeLabels))
+            dd.setAdapter(NoFilterArrayAdapter(this, R.layout.item_dropdown_menu, blockSizeLabels))
             dd.setText(blockSizeLabels[0], false)
             dd.setOnItemClickListener { _, _, position, _ -> chosenBlockSize = blockSizeValues[position] }
         }
         dropdownMinorVersion?.let { dd ->
-            dd.setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, minorVersionLabels))
+            dd.setAdapter(NoFilterArrayAdapter(this, R.layout.item_dropdown_menu, minorVersionLabels))
             dd.setText(minorVersionLabels[0], false)
             dd.setOnItemClickListener { _, _, position, _ -> chosenMinorVersion = minorVersionValues[position] }
         }

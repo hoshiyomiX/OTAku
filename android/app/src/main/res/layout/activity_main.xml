@@ -639,14 +639,18 @@
                      T18: paddingVertical 4dp keeps the collapsed pill at 56dp
                      (48dp arrow + 2×4dp) — exact M3 parity with the 56dp
                      Build FAB across from it. Was 10dp → 68dp pill that
-                     visually dwarfed the FAB. -->
+                     visually dwarfed the FAB.
+                     T34: paddingHorizontal slimmed 24dp → 12dp — the collapsed
+                     pill read as oversized end-to-end; 12dp keeps the M3
+                     rhythm while the 48dp arrow box retains its built-in
+                     visual inset (touch target unchanged). -->
                 <LinearLayout
                     android:id="@+id/logHeaderBar"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
-                    android:paddingHorizontal="24dp"
+                    android:paddingHorizontal="12dp"
                     android:paddingVertical="4dp"
                     android:clickable="true"
                     android:focusable="true"
@@ -688,7 +692,7 @@
                         android:text="@string/button_copy_log"
                         
                         android:minWidth="0dp"
-                        android:paddingHorizontal="24dp" />
+                        android:paddingHorizontal="12dp" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonClearLog"
@@ -699,7 +703,7 @@
                         
                         android:minWidth="0dp"
                         android:layout_marginStart="4dp"
-                        android:paddingHorizontal="24dp" />
+                        android:paddingHorizontal="12dp" />
 
                 </LinearLayout>
 
