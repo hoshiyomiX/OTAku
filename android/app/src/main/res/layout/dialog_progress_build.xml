@@ -25,8 +25,16 @@
     android:layout_height="wrap_content"
     android:orientation="vertical"
     android:gravity="center_horizontal"
-    android:paddingHorizontal="8dp"
-    android:paddingTop="8dp">
+    android:paddingHorizontal="24dp"
+    android:paddingTop="16dp"
+    android:paddingBottom="16dp">
+    <!-- T34 audit E5: was 8dp horizontal / 8dp vertical — the custom view
+         sits in the dialog's custom panel with NO automatic insets, so the
+         indicator column landed ~16dp off the title's 24dp grid and nearly
+         edge-to-edge with the dialog surface. 24dp horizontal = M3
+         dialogPreferredPadding (aligned with the builder title + button
+         row); 16dp vertical keeps the round indicator breathing room
+         (Expressive favors generous whitespace). -->
 
     <com.google.android.material.progressindicator.CircularProgressIndicator
         android:id="@+id/progressDialogCircular"
