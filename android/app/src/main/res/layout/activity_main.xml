@@ -636,14 +636,17 @@
                 android:orientation="vertical">
 
                 <!-- Log header bar — clickable + swipeable to toggle expand/collapse.
-                     T18: paddingVertical 4dp keeps the collapsed pill at 56dp
-                     (48dp arrow + 2×4dp) — exact M3 parity with the 56dp
-                     Build FAB across from it. Was 10dp → 68dp pill that
-                     visually dwarfed the FAB.
+                     T18: the collapsed pill keeps exact M3 parity with the
+                     56dp Build FAB across from it (was 10dp vertical →
+                     68dp pill that visually dwarfed the FAB).
                      T34: paddingHorizontal slimmed 24dp → 12dp — the collapsed
-                     pill read as oversized end-to-end; 12dp keeps the M3
-                     rhythm while the 48dp arrow box retains its built-in
-                     visual inset (touch target unchanged). -->
+                     pill read as oversized end-to-end.
+                     T36: arrow box slimmed 48dp → 36dp (its 12dp built-in
+                     inset around the 24dp glyph read as fat arrow padding)
+                     and paddingVertical re-balanced 4dp → 10dp so the pill
+                     height stays exactly 56dp (36dp + 2×10dp); the glyph's
+                     optical distance from the pill edge is unchanged
+                     vertically (6dp inset + 10dp pad = the old 12dp + 4dp). -->
                 <LinearLayout
                     android:id="@+id/logHeaderBar"
                     android:layout_width="match_parent"
@@ -651,7 +654,7 @@
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="12dp"
-                    android:paddingVertical="4dp"
+                    android:paddingVertical="10dp"
                     android:clickable="true"
                     android:focusable="true"
                     android:background="?attr/selectableItemBackgroundBorderless">
@@ -659,11 +662,18 @@
                     <!-- Arrow toggle — LEFT of "Logs" text.
                          Plain ImageView with ?attr/colorPrimary tint for accent color.
                          Click handled by parent logHeaderBar (full-width clickable).
-                         P0-fix A-02: 32dp → 48dp (M3 touch target minimum) -->
+                         P0-fix A-02: 32dp → 48dp (M3 touch target minimum).
+                         T36: 48dp → 36dp — halve the built-in visual inset
+                         around the 24dp glyph (12dp → 6dp per side). The pill
+                         keeps its 56dp height via header paddingVertical, and
+                         the primary gesture surface stays the full-width 56dp
+                         header bar (T17 unified handler) — the arrow box only
+                         remains an a11y/keyboard focus target, which 36dp
+                         serves honestly. -->
                     <ImageView
                         android:id="@+id/buttonToggleLog"
-                        android:layout_width="48dp"
-                        android:layout_height="48dp"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
                         android:src="@drawable/ic_expand_log"
                         android:contentDescription="@string/cd_arrow_expand_log"
                         android:clickable="true"
