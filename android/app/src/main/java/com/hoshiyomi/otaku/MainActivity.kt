@@ -24,6 +24,8 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import android.view.WindowManager
+import androidx.appcompat.app.AlertDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -371,6 +373,10 @@ class MainActivity : AppCompatActivity() {
                 showProgressNotification("Build complete!", 100)
                 showCompletionNotification(true, "Finished in $duration")
                 appendToSavedLog("\n═══ Build complete ═══\n")
+            } else if (result.isCancelled) {
+                // T36: deliberate cancellation — neutral banner, not an ERROR.
+                showCompletionNotification(false, "Cancelled by user")
+                appendToSavedLog("\n═══ Build cancelled by user ═══\n")
             } else {
                 showCompletionNotification(false, result.error ?: "Unknown error")
                 appendToSavedLog("\n[ERROR] ${result.error ?: "Unknown error"}\n")
@@ -2332,6 +2338,8 @@ class MainActivity : AppCompatActivity() {
         // shown by setUIExecuting(true) — the dialog seeds from these, and a
         // stale pair from the previous operation would flash for one frame.
         currentOpTitle = getString(R.string.progress_title_extract)
+        // T36: arm a fresh cancellation context for this operation.
+        NativeBridge.resetCancel()
         lastProgressMessage = ""
         lastNotifPercent = -1
         setUIExecuting(true)
@@ -2372,10 +2380,14 @@ class MainActivity : AppCompatActivity() {
                 val startMs = System.currentTimeMillis()
                 var ok = 0
                 var failed = 0
+                var cancelled = false  // T36: user cancellation via the pop-up
                 var totalExtracted = 0L
                 val total = result.partitions.size
 
                 result.partitions.forEachIndexed { idx, p ->
+                    // T36: once cancelled, skip the remaining partitions (the
+                    // in-flight one aborts inside its extraction loop).
+                    if (cancelled || NativeBridge.cancelRequested) return@forEachIndexed
                     // Sanitize: manifest-controlled name → safe filename component
                     val safeName = p.name.replace(Regex("[^a-zA-Z0-9_.\\-]"), "_")
                     if (safeName != p.name) {
@@ -2419,13 +2431,21 @@ class MainActivity : AppCompatActivity() {
                     if (r.success) {
                         ok++
                         totalExtracted += r.fileSize
+                    } else if (r.error?.contains("cancel", ignoreCase = true) == true) {
+                        // T36: the native sentinel — deliberate cancellation.
+                        cancelled = true
                     } else {
                         failed++
                     }
                 }
 
                 val durMs = System.currentTimeMillis() - startMs
-                if (failed == 0) {
+                if (cancelled) {
+                    showLog(
+                        "═══ Payload extraction cancelled by user — $ok of $total partitions done ═══",
+                        LogLevel.WARN
+                    )
+                } else if (failed == 0) {
                     showLog(
                         "═══ Payload extraction done — $ok partitions, " +
                             "${formatFileSize(totalExtracted)}, ${durMs} ms ═══",
@@ -2600,6 +2620,8 @@ class MainActivity : AppCompatActivity() {
         // shown by setUIExecuting(true) — the dialog seeds from these, and a
         // stale pair from the previous operation would flash for one frame.
         currentOpTitle = getString(R.string.progress_title_payload)
+        // T36: arm a fresh cancellation context for this operation.
+        NativeBridge.resetCancel()
         lastProgressMessage = ""
         lastNotifPercent = -1
         setUIExecuting(true)
@@ -2700,6 +2722,9 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         showLog("[!] Self-verification FAILED: ${verify.error}", LogLevel.ERROR)
                     }
+                } else if (result.error?.contains("cancel", ignoreCase = true) == true) {
+                    // T36: deliberate cancellation — neutral banner, not ERROR.
+                    showLog("═══ payload.bin build cancelled by user ═══", LogLevel.WARN)
                 } else {
                     showLog("[!] payload.bin build failed: ${result.error}", LogLevel.ERROR)
                 }
@@ -2887,6 +2912,8 @@ class MainActivity : AppCompatActivity() {
         // T29: title for the progress pop-up shown by setUIExecuting(true).
         // The mirrored (message, percent) were reset above — no stale flash.
         currentOpTitle = getString(R.string.progress_title_build)
+        // T36: arm a fresh cancellation context for this operation.
+        NativeBridge.resetCancel()
         setUIExecuting(true)
         showProgressNotification("Preparing…", 0)
 
@@ -3586,14 +3613,86 @@ class MainActivity : AppCompatActivity() {
         progressDialog = MaterialAlertDialogBuilder(this)
             .setTitle(title)
             .setView(view)
-            // Non-cancelable: builds cannot be aborted (no Rust-side cancel
-            // plumbing) — an accidental back-gesture dismissal would leave the
-            // user with no way back to the progress view. "Hide" is the
-            // deliberate exit: it dismisses the VIEW only, the build keeps
-            // running (tracked by the notification + log card).
+            // Non-cancelable (back gesture / outside tap): an accidental
+            // dismissal would leave the user with no way back to the progress
+            // view. Two deliberate exits exist (T36): "Hide" dismisses the
+            // VIEW only — the operation keeps running (tracked by the
+            // notification + log card) — and the red "Cancel" button stops
+            // the operation itself via a confirmation dialog.
             .setCancelable(false)
             .setNegativeButton(R.string.progress_hide) { _, _ -> dismissBuildProgressDialog() }
+            .setPositiveButton(R.string.progress_cancel) { _, _ -> requestCancelWithConfirm() }
             .show()
+        // Destructive action — error-red per MD3 (T36).
+        resolveThemeColorAttr(com.google.android.material.R.attr.colorError)?.let { err ->
+            progressDialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(err)
+        }
+        // T36: blur the main UI behind the pop-up (API 31+), deep dim below.
+        applyProgressDialogWindowEffects()
+    }
+
+    /** T36: blur radius (dp) for the area behind the progress pop-up (API 31+). */
+    private val progressBlurRadiusDp = 24
+
+    /**
+     * T36: window effects for the progress pop-up.
+     *
+     * API 31+: FLAG_BLUR_BEHIND + blurBehindRadius — the whole activity
+     * behind the dialog is blurred (24dp radius), with a light dim on top
+     * so the dialog surface still separates from the blurred content.
+     * API 26-30 (the app's floor below 31): cross-window blur is not
+     * supported — fall back to a deeper dim (0.6) only, matching the
+     * Suisei-palette API<31 fallback convention used elsewhere.
+     */
+    private fun applyProgressDialogWindowEffects() {
+        val window = progressDialog?.window ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+                window.attributes = window.attributes.apply {
+                    blurBehindRadius = dpToPx(progressBlurRadiusDp)
+                    dimAmount = 0.30f
+                }
+            } else {
+                window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                window.attributes = window.attributes.apply { dimAmount = 0.60f }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("OTAku", "progress dialog window effects failed: ${e.message}")
+        }
+    }
+
+    /**
+     * T36: red Cancel pressed on the progress pop-up — confirm the
+     * destructive action before touching the running operation.
+     *
+     * Cancel is real: the native flag makes the Rust compression /
+     * extraction loop abort at its next 4MB chunk checkpoint and return
+     * the "cancelled by user" sentinel; partial outputs are cleaned up by
+     * the existing error paths. The progress pop-up itself stays open —
+     * it dismisses via setUIExecuting(false) when the operation ends.
+     */
+    private fun requestCancelWithConfirm() {
+        if (isFinishing || isDestroyed) return
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.cancel_confirm_title)
+            .setMessage(R.string.cancel_confirm_message)
+            .setNegativeButton(R.string.cancel_confirm_no) { _, _ ->
+                // Keep going — the progress pop-up is still up underneath.
+            }
+            .setPositiveButton(R.string.cancel_confirm_yes) { _, _ ->
+                NativeBridge.requestCancel()
+                progressDialogStatusText?.text = getString(R.string.progress_cancelling)
+                showLog(
+                    "[*] Cancel requested — the operation stops at its next checkpoint.",
+                    LogLevel.WARN
+                )
+            }
+            .show()
+        // Destructive confirm — error-red (same convention as its trigger).
+        resolveThemeColorAttr(com.google.android.material.R.attr.colorError)?.let { err ->
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(err)
+        }
     }
 
     /**

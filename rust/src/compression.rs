@@ -1389,6 +1389,10 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
 
     if is_alg(algorithm, ALG_NONE) {
         loop {
+            // T36: user cancellation — abort at the next 4MB chunk boundary.
+            if crate::cancel_requested() {
+                return Err(crate::CANCEL_SENTINEL.to_string());
+            }
             let n = file
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
@@ -1420,6 +1424,10 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         let level_clamped = resolved_level.clamp(1, 9) as u32;
         let mut encoder = GzEncoder::new(&mut counting, Compression::new(level_clamped));
         loop {
+            // T36: user cancellation — abort at the next 4MB chunk boundary.
+            if crate::cancel_requested() {
+                return Err(crate::CANCEL_SENTINEL.to_string());
+            }
             let n = file
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
@@ -1453,6 +1461,10 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         let level_clamped = resolved_level.clamp(1, 9) as u32;
         let mut encoder = BzEncoder::new(&mut counting, Compression::new(level_clamped));
         loop {
+            // T36: user cancellation — abort at the next 4MB chunk boundary.
+            if crate::cancel_requested() {
+                return Err(crate::CANCEL_SENTINEL.to_string());
+            }
             let n = file
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
@@ -1483,6 +1495,10 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         let level_clamped = resolved_level.clamp(0, 9) as u32;
         let mut encoder = xz2::write::XzEncoder::new(&mut counting, level_clamped);
         loop {
+            // T36: user cancellation — abort at the next 4MB chunk boundary.
+            if crate::cancel_requested() {
+                return Err(crate::CANCEL_SENTINEL.to_string());
+            }
             let n = file
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
@@ -1514,6 +1530,10 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         {
             let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting).auto_finish();
             loop {
+                // T36: user cancellation — abort at the next 4MB chunk boundary.
+                if crate::cancel_requested() {
+                    return Err(crate::CANCEL_SENTINEL.to_string());
+                }
                 let n = file
                     .read(&mut buf)
                     .map_err(|e| format!("Read error: {}", e))?;
@@ -1543,6 +1563,10 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         let mut encoder = zstd::Encoder::new(&mut counting, level_clamped)
             .map_err(|e| format!("zstd encoder init error: {}", e))?;
         loop {
+            // T36: user cancellation — abort at the next 4MB chunk boundary.
+            if crate::cancel_requested() {
+                return Err(crate::CANCEL_SENTINEL.to_string());
+            }
             let n = file
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;

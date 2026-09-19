@@ -600,6 +600,12 @@ pub fn run_dd_build(
         // the header placeholder — all with the same file handle, no
         // close+reopen that could fail on Android's volatile temp dirs.
         for (i, (name, path)) in images.iter().enumerate() {
+            // T36: user cancellation — stop before starting the next
+            // partition (chunk-level aborts happen inside
+            // hash_and_compress_file_to_writer_with_progress).
+            if crate::cancel_requested() {
+                return Err(crate::CANCEL_SENTINEL.to_string());
+            }
             log::info!(
                 "[{}/{}] Compressing {} ({})",
                 i + 1,

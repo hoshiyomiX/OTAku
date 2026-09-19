@@ -20,6 +20,14 @@ data class OTAResult(
     val exitCode: Int = 0,
     val durationMs: Long = 0
 ) {
+    /**
+     * T36: true when this result represents a deliberate user cancellation
+     * (native sentinel "cancelled by user", or the coroutine-cancellation
+     * path which reuses the word). Callers show a neutral banner instead
+     * of an ERROR one.
+     */
+    val isCancelled: Boolean
+        get() = error?.contains("cancel", ignoreCase = true) == true
 
     companion object {
         fun error(message: String, durationMs: Long = 0) = OTAResult(

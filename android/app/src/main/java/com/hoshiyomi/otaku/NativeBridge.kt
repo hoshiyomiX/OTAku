@@ -748,4 +748,56 @@ object NativeBridge {
     // Payload.bin self-verification (prototype)
     // Rust signature: nativeVerifyPayload(path) -> jstring (JSON)
     private external fun nativeVerifyPayload(path: String): String
+
+    // Cancellation flag (T36)
+    // Rust signatures: nativeCancelBuild() / nativeResetCancel() — void,
+    // fire-and-forget; see lib.rs CANCEL_REQUESTED / CANCEL_SENTINEL.
+    private external fun nativeCancelBuild()
+    private external fun nativeResetCancel()
+
+    // ── Cancellation (T36) — Kotlin mirror + request/reset wrappers ──
+
+    /**
+     * Kotlin mirror of the native cancellation flag. Lets the extract
+     * batch loop skip remaining partitions without an extra JNI
+     * round-trip; kept in lockstep with the native flag by
+     * [requestCancel]/[resetCancel], which always set BOTH.
+     */
+    @Volatile
+    var cancelRequested: Boolean = false
+        private set
+
+    /**
+     * Request cancellation of the running native operation (DD build /
+     * payload build / payload extract). Fire-and-forget: the Rust loop
+     * aborts at its next 4MB chunk checkpoint and returns the
+     * "cancelled by user" sentinel, which the result layer maps to a
+     * neutral "cancelled" banner instead of an ERROR one.
+     */
+    fun requestCancel() {
+        cancelRequested = true
+        if (isLoaded) {
+            try {
+                nativeCancelBuild()
+            } catch (e: UnsatisfiedLinkError) {
+                Log.w(TAG, "nativeCancelBuild unavailable: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Arm a fresh operation: clear both the Kotlin mirror and the native
+     * flag so a stale cancel request cannot poison the next run. Called at
+     * the start of every long-running operation.
+     */
+    fun resetCancel() {
+        cancelRequested = false
+        if (isLoaded) {
+            try {
+                nativeResetCancel()
+            } catch (e: UnsatisfiedLinkError) {
+                Log.w(TAG, "nativeResetCancel unavailable: ${e.message}")
+            }
+        }
+    }
 }

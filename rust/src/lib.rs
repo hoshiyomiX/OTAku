@@ -24,6 +24,7 @@ use jni::objects::JString;
 use jni::sys::{jboolean, jint, jstring};
 use jni::JNIEnv;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // JNI ABI note (AUDIT-T9 cosmetic #1): every Kotlin `external fun` below
 // lives in `object NativeBridge` — a static context — so the 2nd JNI
@@ -129,6 +130,66 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCheckDeps(
         log_panic("nativeCheckDeps", &format!("{:?}", panic_info));
         null_jstring()
     })
+}
+
+// ---------------------------------------------------------------------------
+//  JNI: nativeCancelBuild / nativeResetCancel (T36)
+// ---------------------------------------------------------------------------
+
+/// Global cancellation flag shared by every long-running native operation
+/// (DD build / payload build / payload extract).
+///
+/// Kotlin's progress pop-up gained a red Cancel button (T36); confirming it
+/// calls `nativeCancelBuild`, which sets this flag. The compression loops
+/// (hash_and_compress_file_to_writer_with_progress) and the extraction
+/// writer (ProgressSidecarWriter) check it at every 4MB chunk boundary and
+/// abort with the [CANCEL_SENTINEL] error string. Kotlin matches that
+/// sentinel (case-insensitive "cancel") to show a neutral "cancelled"
+/// banner instead of a scary ERROR one.
+///
+/// The flag is deliberately NOT auto-cleared at operation end: a cancel
+/// request must survive across the per-partition JNI calls of an extract
+/// batch. Kotlin explicitly resets it (`nativeResetCancel`) at the START of
+/// each of the three operations.
+static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Error string returned by aborted operations. The Kotlin side pattern-
+/// matches on "cancel" (case-insensitive) to tell a deliberate user
+/// cancellation apart from a genuine failure — keep the wording stable.
+pub(crate) const CANCEL_SENTINEL: &str = "cancelled by user";
+
+/// Whether the user requested cancellation of the running operation.
+pub(crate) fn cancel_requested() -> bool {
+    CANCEL_REQUESTED.load(Ordering::SeqCst)
+}
+
+/// Kotlin: `external fun nativeCancelBuild()` — request cancellation.
+///
+/// Returns nothing (fire-and-forget): the running operation observes the
+/// flag at its next chunk checkpoint and returns the sentinel error.
+#[no_mangle]
+pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCancelBuild(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        log::info!("cancellation requested by user — aborting at next checkpoint");
+    }));
+}
+
+/// Kotlin: `external fun nativeResetCancel()` — arm a fresh operation.
+///
+/// Called at the start of every DD build / payload build / payload extract
+/// so a stale cancel request from a previous operation cannot poison it.
+#[no_mangle]
+pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeResetCancel(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    }));
 }
 
 // ---------------------------------------------------------------------------

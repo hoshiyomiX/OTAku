@@ -111,5 +111,16 @@
     <string name="progress_title_payload">Building payload…</string>
     <string name="progress_title_extract">Extracting payload…</string>
     <string name="progress_hide">Hide</string>
+
+    <!-- T36: real cancellation of the running native operation (DD build /
+         payload build / payload extract) — red button + confirmation dialog.
+         The native side aborts at its next 4MB chunk checkpoint and returns
+         the "cancelled by user" sentinel. -->
+    <string name="progress_cancel">Cancel</string>
+    <string name="progress_cancelling">Cancelling…</string>
+    <string name="cancel_confirm_title">Cancel operation?</string>
+    <string name="cancel_confirm_message">The operation stops at its next checkpoint (within seconds). Partial output is discarded automatically.</string>
+    <string name="cancel_confirm_yes">Cancel operation</string>
+    <string name="cancel_confirm_no">Keep going</string>
     <string name="cd_progress_overall">Overall progress</string>
 </resources>

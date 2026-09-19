@@ -592,6 +592,12 @@ impl<W: std::io::Write> ProgressSidecarWriter<W> {
 
 impl<W: std::io::Write> std::io::Write for ProgressSidecarWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // T36: user cancellation — abort the streaming extraction at this
+        // chunk boundary. The io::Error carries CANCEL_SENTINEL, which the
+        // JNI layer forwards to Kotlin inside the extract error JSON.
+        if crate::cancel_requested() {
+            return Err(std::io::Error::other(crate::CANCEL_SENTINEL));
+        }
         let n = self.inner.write(buf)?;
         self.bytes_written += n as u64;
         self.note_progress();
@@ -605,6 +611,11 @@ impl<W: std::io::Write> std::io::Write for ProgressSidecarWriter<W> {
         // the poller would see 0% → 100% jumps per operation.
         let mut off = 0;
         while off < buf.len() {
+            // T36: user cancellation — checked per ≤4MB slice, matching the
+            // DD build's chunk cadence (see write() above for the sentinel).
+            if crate::cancel_requested() {
+                return Err(std::io::Error::other(crate::CANCEL_SENTINEL));
+            }
             let end = (off + PROGRESS_CHUNK).min(buf.len());
             self.inner.write_all(&buf[off..end])?;
             self.bytes_written += (end - off) as u64;
@@ -804,6 +815,20 @@ fn write_payload_inner(
     let blobs_tmp_path_str = blobs_tmp_path.to_string_lossy().to_string();
 
     for (idx, part) in partitions_data.iter().enumerate() {
+        // T36: user cancellation — stop before starting the next partition
+        // (chunk-level aborts happen inside the compression helper).
+        if crate::cancel_requested() {
+            let _ = std::fs::remove_file(&blobs_tmp_path);
+            return WritePayloadResult {
+                success: false,
+                output: crate::CANCEL_SENTINEL.to_string(),
+                output_path: None,
+                file_size: None,
+                partitions: partition_summaries,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(crate::CANCEL_SENTINEL.to_string()),
+            };
+        }
         let name = &part.name;
         let image_path = &part.image_path;
         let alg = &part.compress;
@@ -887,14 +912,21 @@ fn write_payload_inner(
                 Ok(r) => r,
                 Err(e) => {
                     let _ = std::fs::remove_file(&blobs_tmp_path);
+                    // T36: a deliberate cancellation keeps its clean sentinel
+                    // message — not wrapped in "Compression failed" noise.
+                    let msg = if e == crate::CANCEL_SENTINEL {
+                        e
+                    } else {
+                        format!("Compression failed for {}: {}", name, e)
+                    };
                     return WritePayloadResult {
                         success: false,
-                        output: format!("Compression failed for {}: {}", name, e),
+                        output: msg.clone(),
                         output_path: None,
                         file_size: None,
                         partitions: partition_summaries,
                         duration_ms: start.elapsed().as_millis() as u64,
-                        error: Some(format!("Compression failed for {}: {}", name, e)),
+                        error: Some(msg),
                     };
                 }
             };

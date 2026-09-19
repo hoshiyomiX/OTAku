@@ -14,9 +14,15 @@
     against the material 1.12.0 AAR. Indicator + track follow the ACTIVE
     theme palette via ?attr (Material You on API 31+, Suisei Blue below).
 
-    Non-cancelable by design: builds cannot be aborted (no Rust-side cancel
-    plumbing exists); the "Hide" button dismisses the VIEW only — the build
-    keeps running, tracked by the notification and the log card.
+    Cancel support (T36): the dialog offers "Hide" (dismisses the VIEW only
+    — the operation keeps running, tracked by the notification and the log
+    card) and a red "Cancel" button that REALLY aborts the running Rust
+    operation at its next 4MB chunk checkpoint (with a confirmation step —
+    see MainActivity.requestCancelWithConfirm). Back-gesture/outside-tap
+    dismissal stays disabled so the progress surface is never lost by
+    accident. The window blurs the main UI behind it on API 31+ via
+    FLAG_BLUR_BEHIND and deepens the dim below 31 (Suisei fallback
+    convention).
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
