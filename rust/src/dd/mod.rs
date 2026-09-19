@@ -316,6 +316,13 @@ fn build_flash_info(
     if !device.is_empty() {
         lines.push(format!("Target device: {}", device));
     }
+    // Recovery requirement (T30): stated up-front so a user who sideloads this
+    // ZIP into stock OEM recovery knows WHY it was rejected before guessing.
+    // Stock recovery verifies package signatures (CERT.RSA/.SF/MANIFEST.MF)
+    // before update-binary ever runs; OTAku ZIPs are unsigned by OEM keys, and
+    // stock ramdisks lack the toolbox commands + lptools the flasher needs.
+    lines.push("Requires: TWRP/OrangeFox recovery (or fastbootd)".to_string());
+    lines.push("Note: stock OEM recovery cannot flash this ZIP (unsigned, missing tools)".to_string());
     lines.push(String::new());
 
     for p in partitions_meta {

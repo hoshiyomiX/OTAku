@@ -376,12 +376,20 @@ Rust Native Thread (in-process, called from Kotlin Dispatchers.IO)
 
 The generated `META-INF/com/google/android/update-binary` is a POSIX `sh` script invoked by TWRP/OrangeFox with `update-binary 3 <fd> <zip>`. It runs these steps in order:
 
+> **Recovery scope — custom recovery only.** These ZIPs target TWRP/OrangeFox
+> (or `fastbootd`); a stock OEM recovery rejects them at its signature gate
+> because the ZIP carries no `META-INF/CERT.RSA`/`.SF`/`MANIFEST.MF` block
+> (OTAku is not an OEM signer). Stock ramdisks additionally lack the command
+> set the script requires (`od`, `awk`, `readlink`, `blockdev`, `mkfifo`,
+> `sha256sum`, …) and never ship `lptools`. This is a deliberate constraint
+> of the format, not a compatibility defect.
+
 | Step | Phase | Action |
 |------|-------|--------|
-| 0 | Extract | Extract `otaku.bin` from ZIP to `/tmp/`; verify size against ZIP central directory listing |
+| 0 | Open payload | Direct ZIP read (dd at computed local-file-header offset — `otaku.bin` is ZIP-Stored); fallback: extract to `/tmp/` + size verify against ZIP central directory listing |
 | 1 | Pre-flash verify | Validate partition table: offset bounds, hash format (64 hex chars), unc_size > 0, 4096 alignment |
 | 2 | Integrity + decompressor | Verify DDBU magic, version, compress_id, num_parts, header_size; check decompressor binary exists |
-| 3 | Device check (optional) | Compare `TARGET_DEVICE` against `getprop` + `build.prop` + `/proc/cmdline`; interactive confirm on mismatch |
+| 3 | Device check (optional) | Compare `TARGET_DEVICE` against `getprop` + `/vendor/build.prop` fallbacks; detected mismatch aborts, undetectable codename warns and proceeds (no interactivity — `read`/`choose` are unusable in the update-binary protocol pipe) |
 | 4 | Slot detection | Read `androidboot.slot_suffix` from `/proc/cmdline` and `getprop` |
 | 5 | Partition validation | Check each block device exists, is a block device, is unmounted; collect resize list |
 | 6 | Resize dynamic partitions | Use `lptools resize` (fallback: `lptools remove`+`create`); track original sizes for rollback |
