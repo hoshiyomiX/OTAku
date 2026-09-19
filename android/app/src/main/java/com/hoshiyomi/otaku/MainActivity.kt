@@ -3610,7 +3610,7 @@ class MainActivity : AppCompatActivity() {
         }
         progressDialogPercentText?.text = "$seedPercent%"
         progressDialogStatusText?.text = seedMessage
-        progressDialog = MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(title)
             .setView(view)
             // Non-cancelable (back gesture / outside tap): an accidental
@@ -3623,9 +3623,13 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton(R.string.progress_hide) { _, _ -> dismissBuildProgressDialog() }
             .setPositiveButton(R.string.progress_cancel) { _, _ -> requestCancelWithConfirm() }
             .show()
+        // Track in the mutable field for the update/dismiss paths, but talk
+        // to the LOCAL val below — getButton() is AlertDialog API and the
+        // mutable property cannot be smart-cast (K2 rejects it).
+        progressDialog = dialog
         // Destructive action — error-red per MD3 (T36).
         resolveThemeColorAttr(com.google.android.material.R.attr.colorError)?.let { err ->
-            progressDialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(err)
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(err)
         }
         // T36: blur the main UI behind the pop-up (API 31+), deep dim below.
         applyProgressDialogWindowEffects()
