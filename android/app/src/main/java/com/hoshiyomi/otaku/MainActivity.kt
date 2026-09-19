@@ -2500,7 +2500,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val algorithms = OTABridge.COMPRESSION_ALGORITHMS.toTypedArray()
+        // T34 follow-up (CI compile fix): COMPRESSION_ALGORITHMS is already a
+        // List<String>; the old .toTypedArray() fed ArrayAdapter's T[] overload
+        // (pre-NoFilterArrayAdapter era) and now clashes with List<T>-only
+        // NoFilterArrayAdapter. List indexing/indexPath APIs are unchanged.
+        val algorithms = OTABridge.COMPRESSION_ALGORITHMS
         val checkedIdx = algorithms.indexOf(selectedCompression).coerceAtLeast(0)
 
         // Fixed-value dropdowns — every AutoCompleteTextView is
