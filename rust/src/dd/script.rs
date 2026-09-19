@@ -1621,7 +1621,14 @@ else
                             if [ $CREATE_RC -ne 0 ]; then
                                 ui_print "    ! remove+create also failed for $pname"
                                 RESIZE_OK=0
-                                RESIZED_ORIGINAL=$(echo "$RESIZED_ORIGINAL" | sed "s/ $pname:[0-9]*//")
+                                # F-H fix (T33): KEEP the rollback entry — the
+                                # old code stripped it here, leaving NO rollback
+                                # for this partition. The cleanup trap handles
+                                # every state this branch can leave: entry
+                                # deleted by remove → its remove+create fallback
+                                # re-creates the partition at the original size;
+                                # still present (at new or original size) →
+                                # resize restores the original (no-op if equal).
                                 continue
                             fi
                             ui_print "    ! remove+create fallback succeeded (by-name symlink may be stale — using mapper path)"
@@ -1636,7 +1643,14 @@ else
                     if [ $CREATE_RC -ne 0 ]; then
                         ui_print "    ! remove+create also failed for $pname"
                         RESIZE_OK=0
-                        RESIZED_ORIGINAL=$(echo "$RESIZED_ORIGINAL" | sed "s/ $pname:[0-9]*//")
+                        # F-H fix (T33): KEEP the rollback entry — the
+                        # old code stripped it here, leaving NO rollback
+                        # for this partition. The cleanup trap handles
+                        # every state this branch can leave: entry
+                        # deleted by remove → its remove+create fallback
+                        # re-creates the partition at the original size;
+                        # still present (at new or original size) →
+                        # resize restores the original (no-op if equal).
                         continue
                     fi
                     ui_print "    ! remove+create fallback succeeded (by-name symlink may be stale — using mapper path)"

@@ -335,15 +335,20 @@ use super::*;
         let hexstr: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hexstr,
-            // Golden updated in the same commit as the T30 flasher fixes:
-            //   F-A — Step 7 free-space Method 1 became informational-only
-            //         (post-resize LP_FREE vs pre-resize RESIZE_TOTAL was a
-            //         false-abort; authoritative gate stays in the resize step)
-            //   F-B — resize loop maps an unmapped dm-linear BEFORE capturing
-            //         the original size, so the cleanup trap can always roll
-            //         the resize back (loud warning when it still cannot)
-            // Previous golden: 8ff5dc1c8ce089a6767772e4ee2e03618d648b641c1f81c0ec6d40084d471c75
-            "7e19fe173170bd5782bede40a6c48698deb9debdda36e68e9a17fadb946ffb6f",
+            // Golden updated in the same commits as the flasher fixes:
+            //   T30 F-A — Step 7 free-space Method 1 became informational-only
+            //             (post-resize LP_FREE vs pre-resize RESIZE_TOTAL was a
+            //             false-abort; authoritative gate stays in the resize step)
+            //   T30 F-B — resize loop maps an unmapped dm-linear BEFORE capturing
+            //             the original size, so the cleanup trap can always roll
+            //             the resize back (loud warning when it still cannot)
+            //   T33 F-H — remove+create fallback failure branches no longer
+            //             strip the rollback entry from RESIZED_ORIGINAL; the
+            //             cleanup trap restores every state (re-creates a
+            //             deleted entry at the original size, resizes back a
+            //             present one — no-op when already original)
+            // Previous golden: 7e19fe173170bd5782bede40a6c48698deb9debdda36e68e9a17fadb946ffb6f
+            "dcb3ebd659a55edf63a2651c55b6ac9b2f0926011b7627934cf318e7ce0cdd2f",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
