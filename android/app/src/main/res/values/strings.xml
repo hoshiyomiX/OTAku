@@ -128,4 +128,12 @@
     <string name="cancel_confirm_yes">Cancel operation</string>
     <string name="cancel_confirm_no">Keep going</string>
     <string name="cd_progress_overall">Overall progress</string>
+
+    <!-- T41: completed-state controls for the progress pop-up — when the
+         operation ends the pop-up is held open showing the result (success
+         checkmark centered in the ring / cancellation or error status line)
+         and the Hide+Cancel pair collapses to a single Close button.
+         EN-only per the payload-strings convention (values-id/-ja partial). -->
+    <string name="progress_close">Close</string>
+    <string name="cd_progress_done">Completed</string>
 </resources>

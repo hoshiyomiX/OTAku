@@ -1,0 +1,27 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?attr/colorPrimary">
+
+    <!--
+        check — official Material Icons Round from Google Fonts.
+        Source: https://fonts.gstatic.com/s/i/materialiconsround/check/v1/24px.svg
+
+        T41: the success checkmark shown at the center of the progress
+        pop-up's circular indicator once a long-running operation finishes.
+        Fill uses ?attr/colorPrimary (theme-aware): the ring it sits inside
+        is also colorPrimary, so the completed state reads as one coherent
+        MD3 glyph — Suisei Blue or Material You, whichever is active.
+
+        Downloaded and converted verbatim from Google's official SVG —
+        no hand-editing of pathData (same convention as ic_close.xml).
+        The source's empty bounds path (fill="none" M0 0h24v24H0V0z) is
+        dropped, as in the other icons.
+    -->
+    <path
+        android:fillColor="?attr/colorPrimary"
+        android:pathData="M9 16.17L5.53 12.7c-.39-.39-1.02-.39-1.41 0-.39.39-.39 1.02 0 1.41l4.18 4.18c.39.39 1.02.39 1.41 0L20.29 7.71c.39-.39.39-1.02 0-1.41-.39-.39-1.02-.39-1.41 0L9 16.17z" />
+
+</vector>

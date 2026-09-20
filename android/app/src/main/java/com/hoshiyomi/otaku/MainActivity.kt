@@ -354,8 +354,10 @@ class MainActivity : AppCompatActivity() {
          *   - Stops the foreground service
          *
          * Conditionally runs (if Activity is alive):
-         *   - setUIExecuting(false) — dismisses the progress pop-up +
-         *     re-enables inputs
+         *   - holdBuildProgressDialogForResult — transitions the progress
+         *     pop-up into its completed state (T41: result status + Close)
+         *   - setUIExecuting(false) — re-enables inputs (the held pop-up
+         *     stays on screen until the user presses Close)
          *   - Sets buildResultDisplayed = true
          *
          * If Activity is dead/null (user backgrounded the app), the UI reset is
@@ -391,6 +393,22 @@ class MainActivity : AppCompatActivity() {
             val current = activityRef?.get()
             if (current != null && !current.isFinishing && !current.isDestroyed) {
                 current.runOnUiThread {
+                    // T41: hold the pop-up open in its completed state —
+                    // success checkmark at 100%, or the cancellation/error
+                    // status line; setUIExecuting(false) below re-enables
+                    // the inputs but leaves the held pop-up alone.
+                    current.holdBuildProgressDialogForResult(
+                        success = result.success,
+                        message = when {
+                            result.success -> {
+                                val d = if (result.durationMs < 60000) "${result.durationMs / 1000}s"
+                                    else "${result.durationMs / 60000}m ${result.durationMs % 60000 / 1000}s"
+                                "Build complete — finished in $d"
+                            }
+                            result.isCancelled -> "Cancelled by user"
+                            else -> result.error ?: "Unknown error"
+                        }
+                    )
                     current.isExecuting = false
                     current.setUIExecuting(false)
                     buildResultDisplayed = true
@@ -2458,6 +2476,23 @@ class MainActivity : AppCompatActivity() {
                         LogLevel.WARN
                     )
                 }
+
+                // T41: hold the pop-up open showing the outcome — checkmark
+                // at 100% on a clean finish, the status line otherwise (the
+                // log card + completion notification carry the full detail).
+                // Route through the LIVE instance: the launching instance
+                // may be gone (T23 recreate discipline).
+                val current = activityRef?.get()
+                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    current.holdBuildProgressDialogForResult(
+                        success = !cancelled && failed == 0,
+                        message = when {
+                            cancelled -> "Cancelled by user — $ok of $total partitions extracted"
+                            failed == 0 -> "Extraction done — $ok partitions, ${formatFileSize(totalExtracted)}"
+                            else -> "Extraction finished with errors — $ok ok / $failed failed"
+                        }
+                    )
+                }
             } finally {
                 // Release WakeLock + stop the foreground service on every exit
                 // path (mirrors the DD build's finally discipline).
@@ -2697,6 +2732,11 @@ class MainActivity : AppCompatActivity() {
                     onOutputLine = { line -> showLog(line, LogLevel.PLAIN) }
                 )
 
+                // T41: completed-state pop-up parameters — filled by the
+                // outcome branches below (verify lives inside the success
+                // branch, so capture its verdict into these).
+                var verifyPassed = false
+                var verifyError: String? = null
                 if (result.success) {
                     showLog(
                         "[+] payload.bin written: ${result.outputPath ?: outPath} " +
@@ -2717,6 +2757,8 @@ class MainActivity : AppCompatActivity() {
                     val verify = OTABridge.verifyPayload(outPath) { line ->
                         showLog(line, LogLevel.PLAIN)
                     }
+                    verifyPassed = verify.success
+                    verifyError = verify.error
                     if (verify.success) {
                         showLog("[+] Self-verification passed", LogLevel.SUCCESS)
                     } else {
@@ -2727,6 +2769,25 @@ class MainActivity : AppCompatActivity() {
                     showLog("═══ payload.bin build cancelled by user ═══", LogLevel.WARN)
                 } else {
                     showLog("[!] payload.bin build failed: ${result.error}", LogLevel.ERROR)
+                }
+
+                // T41: hold the pop-up open showing the outcome (same
+                // completed-state contract as the DD build path) — routed
+                // through the LIVE instance (T23 recreate discipline).
+                val current = activityRef?.get()
+                if (current != null && !current.isFinishing && !current.isDestroyed) {
+                    current.holdBuildProgressDialogForResult(
+                        success = result.success && verifyPassed,
+                        message = when {
+                            result.success && verifyPassed ->
+                                "payload.bin written — ${formatFileSize(result.fileSize)}"
+                            result.success ->
+                                "Self-verification FAILED — ${verifyError ?: "unknown error"}"
+                            result.error?.contains("cancel", ignoreCase = true) == true ->
+                                "Cancelled by user"
+                            else -> "payload.bin build failed — ${result.error ?: "Unknown error"}"
+                        }
+                    )
                 }
             } finally {
                 try { wakeLock?.release() } catch (_: Exception) {}
@@ -3609,11 +3670,23 @@ class MainActivity : AppCompatActivity() {
     //  only, mirroring showProgressNotification's (message, percent).
     // ═══════════════════════════════════════════════════════════════
 
-    /** Active progress dialog — dies with the Activity; re-shown by setUIExecuting(true). */
+    /** Active progress dialog — dies with the Activity; re-shown by setUIExecuting(true);
+     *  when the operation ends it is HELD open in its completed state (T41) until Close. */
     private var progressDialog: android.app.Dialog? = null
     private var progressDialogCircular: com.google.android.material.progressindicator.CircularProgressIndicator? = null
     private var progressDialogPercentText: android.widget.TextView? = null
     private var progressDialogStatusText: android.widget.TextView? = null
+    private var progressDialogCheckIcon: android.widget.ImageView? = null
+
+    /**
+     * T41: true while the pop-up is held open in its COMPLETED state — the
+     * operation has ended (success / cancelled / failed) and the pop-up shows
+     * the final result until the user presses Close. Guards three paths:
+     * updateBuildProgressDialog ignores late in-flight (message, percent)
+     * mirrors, setUIExecuting(false) does not tear the pop-up down, and the
+     * positive button routes to dismiss instead of cancel-with-confirm.
+     */
+    private var progressDialogHoldDone = false
 
     /**
      * Show (idempotent) the progress pop-up. Seeds the circular indicator,
@@ -3624,10 +3697,16 @@ class MainActivity : AppCompatActivity() {
     private fun showBuildProgressDialog(title: String) {
         if (isFinishing || isDestroyed) return
         if (progressDialog?.isShowing == true) return
+        // T41: a fresh pop-up always starts in the RUNNING state — the
+        // completed-hold flag belongs to the previous dialog (dismiss also
+        // clears it); reset defensively so stale state can never leak in.
+        progressDialogHoldDone = false
         val view = layoutInflater.inflate(R.layout.dialog_progress_build, null)
         progressDialogCircular = view.findViewById(R.id.progressDialogCircular)
         progressDialogPercentText = view.findViewById(R.id.progressDialogPercentText)
         progressDialogStatusText = view.findViewById(R.id.progressDialogStatusText)
+        progressDialogCheckIcon = view.findViewById(R.id.progressDialogCheckIcon)
+        progressDialogCheckIcon?.visibility = View.GONE
         val seedPercent = lastNotifPercent.coerceIn(0, 100)
         val seedMessage = lastProgressMessage.ifEmpty { title }
         progressDialogCircular?.apply {
@@ -3648,7 +3727,13 @@ class MainActivity : AppCompatActivity() {
             // the operation itself via a confirmation dialog.
             .setCancelable(false)
             .setNegativeButton(R.string.progress_hide) { _, _ -> dismissBuildProgressDialog() }
-            .setPositiveButton(R.string.progress_cancel) { _, _ -> requestCancelWithConfirm() }
+            // T41: this same button is re-labelled "Close" once the
+            // operation ends — branch on the live hold flag so the
+            // running-state confirm flow and the completed-state dismiss
+            // share one wiring (no post-show listener replacement).
+            .setPositiveButton(R.string.progress_cancel) { _, _ ->
+                if (progressDialogHoldDone) dismissBuildProgressDialog() else requestCancelWithConfirm()
+            }
             .show()
         // Track in the mutable field for the update/dismiss paths, but talk
         // to the LOCAL val below — getButton() is AlertDialog API and the
@@ -3701,7 +3786,8 @@ class MainActivity : AppCompatActivity() {
      * extraction loop abort at its next 4MB chunk checkpoint and return
      * the "cancelled by user" sentinel; partial outputs are cleaned up by
      * the existing error paths. The progress pop-up itself stays open —
-     * it dismisses via setUIExecuting(false) when the operation ends.
+     * when the operation ends it transitions to the completed-hold state
+     * (T41: outcome status + Close button) instead of being torn down.
      */
     private fun requestCancelWithConfirm() {
         if (isFinishing || isDestroyed) return
@@ -3733,9 +3819,58 @@ class MainActivity : AppCompatActivity() {
      */
     private fun updateBuildProgressDialog(percent: Int, message: String) {
         if (progressDialog?.isShowing != true) return
+        // T41: late in-flight (message, percent) mirrors queued before the
+        // operation ended must not overwrite the completed-state content.
+        if (progressDialogHoldDone) return
         progressDialogCircular?.setProgressCompat(percent, true)
         progressDialogPercentText?.text = "$percent%"
         progressDialogStatusText?.text = message
+    }
+
+    /**
+     * T41: transition the SHOWING progress pop-up into its completed state
+     * and hold it open — the operation has ended, and the user asked for
+     * the pop-up (with the final result) to stay instead of being torn down.
+     *
+     * Success: the ring animates to 100% with a colorPrimary checkmark
+     * centered inside it and the percent text reads 100%. Cancelled/failed:
+     * no checkmark, the ring stays at its last percent — the status line
+     * carries the outcome. Buttons: the red Cancel becomes "Close"
+     * (recolored colorPrimary, routes to dismiss via the builder listener's
+     * hold-flag branch); Hide disappears — Close is the single deliberate
+     * exit from a completed result.
+     *
+     * No-op when the pop-up is not showing (the user hid it mid-operation —
+     * the notification + log card carry the result) or the Activity is
+     * gone. setUIExecuting(false) runs right after this on every caller and
+     * deliberately leaves the held pop-up alone (see its T41 note).
+     */
+    private fun holdBuildProgressDialogForResult(success: Boolean, message: String) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            // Hold a LOCAL val — getButton() is AlertDialog API and the
+            // mutable property cannot be smart-cast (K2, same lesson as T36).
+            val alert = progressDialog as? AlertDialog ?: return@runOnUiThread
+            if (!alert.isShowing) return@runOnUiThread
+            progressDialogHoldDone = true
+            if (success) {
+                progressDialogCircular?.apply {
+                    max = 100
+                    isIndeterminate = false
+                    setProgressCompat(100, true)
+                }
+                progressDialogPercentText?.text = "100%"
+                progressDialogCheckIcon?.visibility = View.VISIBLE
+            }
+            progressDialogStatusText?.text = message
+            alert.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
+                setText(R.string.progress_close)
+                resolveThemeColorAttr(com.google.android.material.R.attr.colorPrimary)?.let { primary ->
+                    setTextColor(primary)
+                }
+            }
+            alert.getButton(AlertDialog.BUTTON_NEGATIVE)?.visibility = View.GONE
+        }
     }
 
     /** Dismiss + null out the pop-up (idempotent, safe from any lifecycle state). */
@@ -3745,6 +3880,10 @@ class MainActivity : AppCompatActivity() {
         progressDialogCircular = null
         progressDialogPercentText = null
         progressDialogStatusText = null
+        progressDialogCheckIcon = null
+        // T41: leaving the completed-hold state (Close pressed, or a
+        // non-hold dismissal path) — a future pop-up starts fresh.
+        progressDialogHoldDone = false
     }
 
     /**
@@ -3766,7 +3905,15 @@ class MainActivity : AppCompatActivity() {
                 // operation start or an onResume reconnect of one.
                 showBuildProgressDialog(currentOpTitle)
             } else {
-                dismissBuildProgressDialog()
+                // T41: the operation-end signal must NOT tear down a pop-up
+                // held in its COMPLETED state (checkmark + Close) — inputs
+                // re-enable underneath and the user closes the result when
+                // ready. Every non-hold path (dead-process timeout,
+                // post-recreate cleanup, exception endings) keeps today's
+                // dismiss behavior.
+                if (!(progressDialogHoldDone && progressDialog?.isShowing == true)) {
+                    dismissBuildProgressDialog()
+                }
             }
             cachedBtnAddImages?.isEnabled = !executing
             cachedBtnRemoveAll?.isEnabled = !executing

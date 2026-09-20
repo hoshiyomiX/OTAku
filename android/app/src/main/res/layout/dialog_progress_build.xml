@@ -23,6 +23,13 @@
     accident. The window blurs the main UI behind it on API 31+ via
     FLAG_BLUR_BEHIND and deepens the dim below 31 (Suisei fallback
     convention).
+
+    Completed state (T41): when the operation ends, the pop-up is NOT torn
+    down — it is held open showing the final result: on success the ring
+    snaps to 100% with a colorPrimary checkmark centered inside it and the
+    button pair collapses to a single "Close"; on cancellation/failure the
+    status line carries the outcome instead (no checkmark, ring stays at
+    its last percent). See MainActivity.holdBuildProgressDialogForResult.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -42,19 +49,43 @@
          row); 16dp vertical keeps the round indicator breathing room
          (Expressive favors generous whitespace). -->
 
-    <com.google.android.material.progressindicator.CircularProgressIndicator
-        android:id="@+id/progressDialogCircular"
-        style="@style/Widget.Material3.CircularProgressIndicator"
+    <!-- T41: FrameLayout centers the success checkmark INSIDE the ring —
+         "checkmark in the middle of the progress bar". The frame sizes to
+         the 96dp indicator (wrap_content); the 48dp glyph centers against
+         it with ~14dp clearance inside the 10dp track, matching the icon
+         grid of the other dialog elements. -->
+    <FrameLayout
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:max="100"
-        android:contentDescription="@string/cd_progress_overall"
-        app:indicatorSize="96dp"
-        app:trackThickness="10dp"
-        app:trackCornerRadius="5dp"
-        app:indicatorColor="?attr/colorPrimary"
-        app:trackColor="?attr/colorSurfaceVariant"
-        tools:progress="43" />
+        android:layout_height="wrap_content">
+
+        <com.google.android.material.progressindicator.CircularProgressIndicator
+            android:id="@+id/progressDialogCircular"
+            style="@style/Widget.Material3.CircularProgressIndicator"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:contentDescription="@string/cd_progress_overall"
+            app:indicatorSize="96dp"
+            app:trackThickness="10dp"
+            app:trackCornerRadius="5dp"
+            app:indicatorColor="?attr/colorPrimary"
+            app:trackColor="?attr/colorSurfaceVariant"
+            tools:progress="43" />
+
+        <!-- T41: gone while the operation runs; VISIBLE only in the
+             completed-hold state (success path only — cancelled/failed
+             endings keep the bare ring at its last percent). -->
+        <ImageView
+            android:id="@+id/progressDialogCheckIcon"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center"
+            android:src="@drawable/ic_progress_check"
+            android:contentDescription="@string/cd_progress_done"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+    </FrameLayout>
 
     <TextView
         android:id="@+id/progressDialogPercentText"
