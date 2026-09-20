@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ota_emphasized_decelerate.xml — OTAku (T42)
+
+    MD3 "emphasized decelerate" easing curve (path data per the Material 3
+    motion spec: cubic-bezier(0.05, 0.7, 0.1, 1)). The material library's
+    own interpolator resources are not public API, so the spec path is
+    defined locally — same geometry. Used by the dialog entrance animation
+    (Animation.OTAku.Dialog → ota_dialog_enter).
+-->
+<pathInterpolator xmlns:android="http://schemas.android.com/apk/res/android"
+    android:pathData="M0,0 C0.05,0.7 0.1,1 1,1" />

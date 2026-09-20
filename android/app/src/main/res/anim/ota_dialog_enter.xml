@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ota_dialog_enter.xml — OTAku (T42)
+
+    Dialog window ENTRANCE on the MD3 emphasized decelerate curve: fade in
+    + a short rise from 8% below the resting position over 320ms (the
+    Expressive "settling into place" feel). Applied to every
+    MaterialAlertDialog via ThemeOverlay.OTAku.MaterialAlertDialog →
+    Animation.OTAku.Dialog (progress pop-up incl. its T41 completed-hold
+    state, cancel confirmation, payload build dialog).
+
+    Durations + interpolators are repeated on each child on purpose —
+    AnimationSet children only inherit the set's duration reliably when
+    they don't set their own, and being explicit keeps this bulletproof
+    across API levels.
+-->
+<set xmlns:android="http://schemas.android.com/apk/res/android">
+    <translate
+        android:duration="320"
+        android:interpolator="@interpolator/ota_emphasized_decelerate"
+        android:fromYDelta="8%"
+        android:toYDelta="0%" />
+    <alpha
+        android:duration="320"
+        android:interpolator="@interpolator/ota_emphasized_decelerate"
+        android:fromAlpha="0.0"
+        android:toAlpha="1.0" />
+</set>

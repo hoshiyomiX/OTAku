@@ -207,7 +207,7 @@
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Suisei surface-container ramp (T34 audit E1)                  -->
     <!--                                                               -->
-    <!-- M3 surface-container roles. The material 1.12.0 AAR resolves   -->
+    <!-- M3 surface-container roles. The material AAR resolves          -->
     <!-- dialog/menu/popup surfaces via colorSurfaceContainerHigh       -->
     <!-- (m3_comp_dialog_container_color); without these overrides the  -->
     <!-- app fell back to baseline M3 neutral GRAY on API 26-30 (no     -->
@@ -215,17 +215,22 @@
     <!-- Hand-derived tonal ramp anchored to the existing Suisei        -->
     <!-- surface (#FDFCFF / #1A1C1E) and surfaceVariant (#DFE2EB /      -->
     <!-- #43474E); API 31+ stays fully DynamicColors-driven.            -->
+    <!-- T42 (MD3 Expressive "tonal +"): the five-step ramp leans       -->
+    <!-- further into the Suisei hue — MD3 Expressive prefers chromatic  -->
+    <!-- surfaces over neutral grays, and colorSurfaceContainerHigh is   -->
+    <!-- the dialog surface, so this is the most visible tonal change.   -->
+    <!-- Lightness steps stay monotonic and anchored to the same bases.  -->
     <!-- ═══════════════════════════════════════════════════════════════ -->
 
     <color name="suisei_light_surfaceContainerLowest">#FFFFFF</color>
-    <color name="suisei_light_surfaceContainerLow">#F5F7FB</color>
-    <color name="suisei_light_surfaceContainer">#EFF1F6</color>
-    <color name="suisei_light_surfaceContainerHigh">#E8EBF1</color>
-    <color name="suisei_light_surfaceContainerHighest">#E1E4EB</color>
+    <color name="suisei_light_surfaceContainerLow">#F2F7FC</color>
+    <color name="suisei_light_surfaceContainer">#ECF2F8</color>
+    <color name="suisei_light_surfaceContainerHigh">#E3EBF4</color>
+    <color name="suisei_light_surfaceContainerHighest">#DAE4F0</color>
 
-    <color name="suisei_dark_surfaceContainerLowest">#0F1114</color>
-    <color name="suisei_dark_surfaceContainerLow">#171A1D</color>
-    <color name="suisei_dark_surfaceContainer">#1E2125</color>
-    <color name="suisei_dark_surfaceContainerHigh">#282B30</color>
-    <color name="suisei_dark_surfaceContainerHighest">#33363C</color>
+    <color name="suisei_dark_surfaceContainerLowest">#0E1117</color>
+    <color name="suisei_dark_surfaceContainerLow">#161A21</color>
+    <color name="suisei_dark_surfaceContainer">#1D222B</color>
+    <color name="suisei_dark_surfaceContainerHigh">#272D37</color>
+    <color name="suisei_dark_surfaceContainerHighest">#323A46</color>
 </resources>

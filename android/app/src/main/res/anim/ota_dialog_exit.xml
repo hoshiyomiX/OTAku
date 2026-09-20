@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ota_dialog_exit.xml — OTAku (T42)
+
+    Dialog window EXIT on the MD3 emphasized accelerate curve: fade out +
+    a slight 4% sink over 200ms — quick to dismiss, never sluggish.
+    Applied via ThemeOverlay.OTAku.MaterialAlertDialog →
+    Animation.OTAku.Dialog (see ota_dialog_enter for scope).
+-->
+<set xmlns:android="http://schemas.android.com/apk/res/android">
+    <translate
+        android:duration="200"
+        android:interpolator="@interpolator/ota_emphasized_accelerate"
+        android:fromYDelta="0%"
+        android:toYDelta="4%" />
+    <alpha
+        android:duration="200"
+        android:interpolator="@interpolator/ota_emphasized_accelerate"
+        android:fromAlpha="1.0"
+        android:toAlpha="0.0" />
+</set>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ota_emphasized_accelerate.xml — OTAku (T42)
+
+    MD3 "emphasized accelerate" easing curve (path data per the Material 3
+    motion spec: cubic-bezier(0.3, 0, 0.8, 0.15)). Defined locally because
+    the material library's interpolator resources are not public API —
+    same geometry. Used by the dialog exit animation
+    (Animation.OTAku.Dialog → ota_dialog_exit).
+-->
+<pathInterpolator xmlns:android="http://schemas.android.com/apk/res/android"
+    android:pathData="M0,0 C0.3,0 0.8,0.15 1,1" />

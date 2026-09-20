@@ -261,7 +261,6 @@
                                 android:tooltipText="@string/button_auto_detect"
                                 android:minWidth="0dp"
                                 android:paddingHorizontal="24dp"
-                                app:cornerRadius="12dp"
                                 app:icon="@drawable/ic_auto_detect"
                                 app:iconSize="16dp"
                                 app:iconGravity="textStart"
@@ -322,7 +321,6 @@
                                 android:minWidth="0dp"
                                 android:paddingHorizontal="24dp"
                                 style="@style/Widget.OTAku.Button.Tonal"
-                                app:cornerRadius="12dp"
                                 app:icon="@drawable/ic_add"
                                 app:iconSize="16dp"
                                 app:iconGravity="textStart"
@@ -337,7 +335,6 @@
                                 
                                 android:minWidth="0dp"
                                 android:paddingHorizontal="24dp"
-                                app:cornerRadius="12dp"
                                 android:visibility="gone"
                                 android:layout_marginStart="8dp" />
 
@@ -575,7 +572,6 @@
                                 
                                 android:minWidth="0dp"
                                 android:paddingHorizontal="24dp"
-                                app:cornerRadius="12dp"
                                 app:icon="@drawable/ic_folder_open"
                                 app:iconSize="16dp"
                                 app:iconGravity="textStart"

@@ -92,8 +92,13 @@
     <!-- Used on Android 8.0-11 (API 26-30) when Material You is not    -->
     <!-- available, or when the user has explicitly disabled dynamic    -->
     <!-- color. Base color #00B0F0 (Hoshimachi Suisei signature blue).  -->
+    <!-- T42 (MD3 Expressive): parent switched to the Expressive base    -->
+    <!-- theme — brings the expressive component defaults (morphing      -->
+    <!-- buttons, expressive alert dialog overlay, spring motion styles, -->
+    <!-- expressive FAB/dialog color wiring) while keeping the Suisei    -->
+    <!-- palette and every existing override intact.                     -->
     <!-- ═══════════════════════════════════════════════════════════════ -->
-    <style name="Theme.OTAku.Suisei" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.OTAku.Suisei" parent="Theme.Material3Expressive.DayNight.NoActionBar">
         <item name="colorPrimary">@color/suisei_light_primary</item>
         <item name="colorOnPrimary">@color/suisei_light_onPrimary</item>
         <item name="colorPrimaryContainer">@color/suisei_light_primaryContainer</item>
@@ -141,9 +146,17 @@
         <item name="android:textColorPrimary">@color/suisei_light_onSurface</item>
         <item name="android:textColorSecondary">@color/suisei_light_onSurfaceVariant</item>
 
+        <!-- Material components -->
         <item name="toolbarStyle">@style/Widget.OTAku.Toolbar</item>
         <item name="materialButtonStyle">@style/Widget.OTAku.Button</item>
 
+        <!-- T42 (MD3 Expressive): dialogs ride the expressive overlay
+             (bigger title panel, expressive dialog buttons) tuned to the
+             MODERATE corner choice — 24dp instead of the expressive 28dp
+             default — plus an emphasized-curve entrance animation. -->
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.OTAku.MaterialAlertDialog</item>
+
+        <!-- Toolbar icon tinting -->
         <item name="colorControlNormal">@color/suisei_light_onSurface</item>
     </style>
 
@@ -221,7 +234,13 @@
          container color (M3-2023 app bar spec), zero elevation (the old
          2dp shadow was an M2-ism; separation comes from the tonal step,
          which E1's container ramp now provides). -->
+    <!-- T42: expressive top app bar typography — the title steps up to a
+         TitleLarge-based 24sp/500 (MD3 Expressive favors larger, more
+         present app bar titles). The Widget.Material3Expressive.Toolbar
+         style itself is NOT public in the 1.14.0 AAR, so the typography
+         override is applied on top of the M3 Surface base instead. -->
     <style name="Widget.OTAku.Toolbar" parent="Widget.Material3.Toolbar.Surface">
+        <item name="titleTextAppearance">@style/TextAppearance.OTAku.ToolbarTitle</item>
         <item name="titleTextColor">?attr/colorOnSurface</item>
         <item name="subtitleTextColor">?attr/colorOnSurfaceVariant</item>
         <item name="android:background">?attr/colorSurfaceContainer</item>
@@ -231,26 +250,30 @@
     <!-- T34 audit E3: cornerRadius 12dp -> 20dp — M3 canonical full-round
          pill for the 40dp-tall default button (Expressive favors rounder
          shapes; 12dp was the pre-M3 app standard). -->
-    <style name="Widget.OTAku.Button" parent="Widget.Material3.Button">
-        <item name="cornerRadius">20dp</item>
+    <!-- T42 (MD3 Expressive): re-parented onto Widget.Material3Expressive.Button
+         — the shape is now the expressive shape-STATE-LIST (corners morph
+         toward a full pill while pressed). The manual cornerRadius item is
+         REMOVED on purpose: MaterialButton.cornerRadius would flatten the
+         state-list back to a static shape and kill the morph. Label
+         tweaks (caps/spacing/size) ride on top of the expressive label
+         appearance and stay. -->
+    <style name="Widget.OTAku.Button" parent="Widget.Material3Expressive.Button">
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.05</item>
         <item name="android:textSize">14sp</item>
     </style>
 
-    <!-- Tonal button variant — 20dp pill (T34 audit E3, matches the filled
-         and outlined variants; M3 canonical button shape). -->
-    <style name="Widget.OTAku.Button.Tonal" parent="Widget.Material3.Button.TonalButton">
-        <item name="cornerRadius">20dp</item>
+    <!-- Tonal button variant (T34 audit E3 sibling) — T42: expressive
+         parent + morphing shape (manual cornerRadius removed, see above). -->
+    <style name="Widget.OTAku.Button.Tonal" parent="Widget.Material3Expressive.Button.TonalButton">
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.05</item>
         <item name="android:textSize">14sp</item>
     </style>
 
-    <!-- Outlined button variant — 20dp pill (T34 audit E3, matches the
-         filled and tonal variants; M3 canonical button shape). -->
-    <style name="Widget.OTAku.Button.Outlined" parent="Widget.Material3.Button.OutlinedButton">
-        <item name="cornerRadius">20dp</item>
+    <!-- Outlined button variant (T34 audit E3 sibling) — T42: expressive
+         parent + morphing shape (manual cornerRadius removed, see above). -->
+    <style name="Widget.OTAku.Button.Outlined" parent="Widget.Material3Expressive.Button.OutlinedButton">
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.05</item>
         <item name="android:textSize">14sp</item>
@@ -258,10 +281,54 @@
 
     <!-- Text button variant — for inline/minimal buttons (no stroke, no fill).
          T34 audit E3: 24dp = full pill for the 48dp-tall log-header buttons
-         (M3 text buttons are fully rounded; 24dp = half of the 48dp height). -->
-    <style name="Widget.OTAku.Button.Text" parent="Widget.Material3.Button.TextButton">
-        <item name="cornerRadius">24dp</item>
+         (M3 text buttons are fully rounded; 24dp = half of the 48dp height).
+         T42: expressive parent; its text style is a full pill at rest, so
+         the manual cornerRadius became redundant and is dropped. -->
+    <style name="Widget.OTAku.Button.Text" parent="Widget.Material3Expressive.Button.TextButton">
         <item name="android:textAllCaps">false</item>
+    </style>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- T42 — MD3 Expressive overlays & supporting styles            -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+
+    <!-- Expressive alert dialogs, tuned to the MODERATE corner choice.
+         Pattern is the documented Material dialog-shape override: setting
+         shapeAppearance (+ nulling shapeAppearanceOverlay) on the dialog
+         theme overlay wins over the library default (expressive 28dp).
+         The emphasized entrance/exit animation rides on the same overlay
+         via windowAnimationStyle. Applies to every MaterialAlertDialog:
+         the progress pop-up (incl. its T41 completed-hold state), the
+         cancel confirmation, and the payload build dialog. -->
+    <style name="ThemeOverlay.OTAku.MaterialAlertDialog" parent="ThemeOverlay.Material3Expressive.MaterialAlertDialog">
+        <item name="shapeAppearance">@style/ShapeAppearance.OTAku.MaterialAlertDialog</item>
+        <item name="shapeAppearanceOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@style/Animation.OTAku.Dialog</item>
+    </style>
+
+    <!-- 24dp dialog corners (user's "moderat" pick: dialog 24dp vs the
+         expressive default 28dp; cards already sit at 16dp in the layouts). -->
+    <style name="ShapeAppearance.OTAku.MaterialAlertDialog">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">24dp</item>
+    </style>
+
+    <!-- Dialog window animations on the MD3 emphasized curves (the mdc
+         interpolator resources are not public, so the path data is defined
+         locally — same MD3 spec paths). Enter: emphasized DECELERATE
+         ("M 0.05 0.7 0.1 1"); exit: emphasized ACCELERATE
+         ("M 0.3 0 0.8 0.15"). -->
+    <style name="Animation.OTAku.Dialog" parent="@android:style/Animation.Dialog">
+        <item name="android:windowEnterAnimation">@anim/ota_dialog_enter</item>
+        <item name="android:windowExitAnimation">@anim/ota_dialog_exit</item>
+    </style>
+
+    <!-- Expressive top app bar title: TitleLarge stepped up to 24sp / weight
+         500 (fontWeight resolves on API 28+; API 26-27 fall back to regular —
+         graceful). Subtitle stays stock. -->
+    <style name="TextAppearance.OTAku.ToolbarTitle" parent="TextAppearance.Material3.TitleLarge">
+        <item name="android:textSize">24sp</item>
+        <item name="android:fontWeight">500</item>
     </style>
 
     <!-- Log output text view style -->
@@ -278,7 +345,9 @@
     </style>
 
     <!-- Section title style -->
-    <style name="TextAppearance.OTAku.SectionTitle" parent="TextAppearance.Material3.TitleSmall">
+    <!-- T42: TitleSmall -> TitleMedium — the MD3 Expressive type scale
+         favors more present section headers (14sp -> 16sp, weight 500). -->
+    <style name="TextAppearance.OTAku.SectionTitle" parent="TextAppearance.Material3.TitleMedium">
         <item name="android:textColor">?attr/colorPrimary</item>
         <item name="android:textAllCaps">true</item>
         <item name="android:letterSpacing">0.08</item>

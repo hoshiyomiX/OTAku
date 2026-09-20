@@ -152,14 +152,14 @@ jobs:
       - name: Build release APK
         working-directory: android
         run: |
-          wget -q https://services.gradle.org/distributions/gradle-8.6-bin.zip
-          unzip -qo gradle-8.6-bin.zip
-          ./gradle-8.6/bin/gradle :app:assemble${{ matrix.target.flavor }}Release --no-daemon --stacktrace
+          wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip
+          unzip -qo gradle-8.9-bin.zip
+          ./gradle-8.9/bin/gradle :app:assemble${{ matrix.target.flavor }}Release --no-daemon --stacktrace
 
       - name: Build debug APK
         working-directory: android
         run: |
-          ./gradle-8.6/bin/gradle :app:assemble${{ matrix.target.flavor }}Debug --no-daemon --stacktrace
+          ./gradle-8.9/bin/gradle :app:assemble${{ matrix.target.flavor }}Debug --no-daemon --stacktrace
 
       - name: Verify APK contains native lib
         working-directory: android

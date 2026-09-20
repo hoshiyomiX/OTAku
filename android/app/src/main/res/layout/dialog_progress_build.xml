@@ -11,8 +11,19 @@
 
     MD3 CircularProgressIndicator (determinate) — the migration target of
     the old LinearProgressIndicator split row. Style + attrs verified
-    against the material 1.12.0 AAR. Indicator + track follow the ACTIVE
-    theme palette via ?attr (Material You on API 31+, Suisei Blue below).
+    against the material AAR (wave attrs verified against 1.14.0
+    public.txt). Indicator + track follow the ACTIVE theme palette via
+    ?attr (Material You on API 31+, Suisei Blue below).
+
+    T42 (MD3 Expressive): the ring is now WAVY — the signature Expressive
+    progress look. Activated through the public waveAmplitude/wavelength
+    attrs on the stock indicator style (the .Wavy styles are not public
+    API in 1.14.0, but amplitude > 0 IS the activation mechanism). The
+    values scale the library's own defaults (1.6dp amplitude / 15dp
+    wavelength at the 48dp with-wave size) proportionally to this 96dp
+    ring: amplitude 4dp / wavelength 30dp. Wave reach at 4dp leaves
+    ~10dp clearance to the T41 checkmark glyph inside the ring — the
+    completed state still reads as one coherent glyph.
 
     Cancel support (T36): the dialog offers "Hide" (dismisses the VIEW only
     — the operation keeps running, tracked by the notification and the log
@@ -68,6 +79,8 @@
             app:indicatorSize="96dp"
             app:trackThickness="10dp"
             app:trackCornerRadius="5dp"
+            app:waveAmplitude="4dp"
+            app:wavelength="30dp"
             app:indicatorColor="?attr/colorPrimary"
             app:trackColor="?attr/colorSurfaceVariant"
             tools:progress="43" />
@@ -92,7 +105,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:textAppearance="?attr/textAppearanceHeadlineMedium"
+        android:textAppearance="?attr/textAppearanceHeadlineLarge"
         android:textColor="?attr/colorOnSurface"
         android:maxLines="1"
         tools:text="43%" />

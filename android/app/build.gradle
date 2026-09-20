@@ -7,7 +7,11 @@ apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
     namespace 'com.hoshiyomi.otaku'
-    compileSdk 34
+    // T42: compileSdk 34 -> 35 — material 1.14.0 pulls androidx.core 1.16.0
+    // (aar-metadata minCompileSdk=35). targetSdk stays 34 on purpose: bumping
+    // it would opt into Android 15 edge-to-edge enforcement and change system
+    // bar behavior on-device; compileSdk is build-time only.
+    compileSdk 35
 
     defaultConfig {
         applicationId 'com.hoshiyomi.otaku'
@@ -95,10 +99,16 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-    // MD3-FIX IMPL-008: 1.11.0 → 1.12.0 — final stable feature release of
-    // MDC-Android Views (library now in maintenance mode; 1.12.x brings
-    // dynamic-color + contrast fixes). Drop-in minor bump, API compatible.
-    implementation 'com.google.android.material:material:1.12.0'
+    // T42 (MD3 Expressive): 1.12.0 → 1.14.0 — stable Expressive line:
+    // Theme.Material3Expressive base themes, wavy progress indicators
+    // (public attrs waveAmplitude/wavelength), expressive button styles
+    // (shape-state morphing), spring motion styles, expressive alert
+    // dialog overlay. The old "maintenance mode / final stable" note was
+    // wrong — the 1.13/1.14 stable line shipped after it was written.
+    // Verified against the 1.14.0 AAR (public.txt) + maven POMs:
+    //   - core 1.16.0 transitively (minCompileSdk=35 — hence compileSdk 35)
+    //   - appcompat 1.7.0 (minCompileSdk=34 — satisfied)
+    implementation 'com.google.android.material:material:1.14.0'
     // Container-morph log panel: spring physics for the pill ↔ card settle
     // (M3 Expressive motion feel). Declared explicitly because
     // SpringAnimation / FloatValueHolder are referenced directly in
