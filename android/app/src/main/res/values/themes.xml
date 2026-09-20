@@ -301,14 +301,24 @@
          the progress pop-up (incl. its T41 completed-hold state), the
          cancel confirmation, and the payload build dialog. -->
     <style name="ThemeOverlay.OTAku.MaterialAlertDialog" parent="ThemeOverlay.Material3Expressive.MaterialAlertDialog">
-        <item name="shapeAppearance">@style/ShapeAppearance.OTAku.MaterialAlertDialog</item>
+        <!-- 1.14.0 channel: MaterialAlertDialog.Material3 resolves its shape
+             through the @macro/m3_comp_dialog_container_shape token, which
+             expands to ?attr/shapeAppearanceCornerExtraLarge — so overriding
+             THAT theme attribute (not the generic shapeAppearance attr, which
+             the alertDialogStyle chain shadows) is what reaches the dialog
+             background MaterialShapeDrawable. -->
+        <item name="shapeAppearanceCornerExtraLarge">@style/ShapeAppearance.OTAku.MaterialAlertDialog</item>
         <item name="shapeAppearanceOverlay">@null</item>
         <item name="android:windowAnimationStyle">@style/Animation.OTAku.Dialog</item>
     </style>
 
     <!-- 24dp dialog corners (user's "moderat" pick: dialog 24dp vs the
-         expressive default 28dp; cards already sit at 16dp in the layouts). -->
-    <style name="ShapeAppearance.OTAku.MaterialAlertDialog">
+         expressive default 28dp; cards already sit at 16dp in the layouts).
+         parent="" is required — without an explicit parent AAPT resolves the
+         implicit parent "ShapeAppearance.OTAku", which does not exist, and
+         resource linking fails (CI Build #298). Mirrors the library's own
+         pure corner styles (ShapeAppearance.Material3.Corner.* use parent=""). -->
+    <style name="ShapeAppearance.OTAku.MaterialAlertDialog" parent="">
         <item name="cornerFamily">rounded</item>
         <item name="cornerSize">24dp</item>
     </style>
