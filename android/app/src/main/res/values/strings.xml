@@ -104,6 +104,11 @@
     <string name="menu_build_ota">Build OTA ZIP</string>
     <string name="button_build_now">Build OTA Now</string>
 
+    <!-- T40: FAB label while a long-running operation is alive — tapping the
+         re-enabled FAB re-opens the minimized progress pop-up (EN-only per
+         the payload-strings convention; values-id/-ja stay partial). -->
+    <string name="fab_view_progress">View Progress</string>
+
     <!-- Progress pop-up dialog (T29: inline per-partition split bars migrated
          to an MD3 CircularProgressIndicator dialog, triggered when a build
          starts; mirrors the foreground notification's message + percent) -->

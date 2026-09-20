@@ -2784,7 +2784,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun onBuildClicked() {
         if (isBuilding) {
-            showLog("Operation already in progress. Please wait.", LogLevel.WARN)
+            // T40: the Build FAB is the re-entry point for the minimized
+            // progress pop-up — "Hide" (T36) dismisses the VIEW only while
+            // the operation keeps running in the background. The re-show
+            // seeds from the companion (message, percent) mirrors, resuming
+            // at exactly the state the notification displays. Idempotent:
+            // a no-op when already on screen (the pop-up is modal, so this
+            // tap can normally only arrive while the view is hidden).
+            showBuildProgressDialog(currentOpTitle)
             return
         }
 
@@ -3124,6 +3131,13 @@ class MainActivity : AppCompatActivity() {
      * device="" and froze the FAB state. Fixed in T22 by re-running
      * cacheViews() + updateBuildFab() at the end of onResume and making
      * this gate self-heal null caches.
+     *
+     * T40 postscript: the gate now has a SECOND enabled state — while a
+     * long-running operation is alive (isBuilding), the FAB stays clickable
+     * and re-labelled ("View Progress") as the re-entry point to the
+     * minimized progress pop-up; see the T36 "Hide" note on
+     * showBuildProgressDialog for why a deliberate dismiss leaves the
+     * operation running with no way back to its progress view.
      */
     private fun updateBuildFab() {
         // T22 self-heal: a readiness gate must never silently no-op on a null
@@ -3145,7 +3159,20 @@ class MainActivity : AppCompatActivity() {
         val device = (cachedEditDevice as? android.widget.EditText)?.text?.toString()?.trim() ?: ""
         val anyLoading = imageFiles.any { it.second.startsWith("loading:") }
         val canBuild = imageFiles.isNotEmpty() && !anyLoading && device.isNotEmpty() && !isExecuting
-        fab.isEnabled = canBuild
+        // T40: while a long-running operation (DD OTA build / payload build /
+        // payload extract) is alive, the FAB doubles as the re-entry point to
+        // the minimized progress pop-up — "Hide" (T36) dismisses the view
+        // only, so the FAB must stay clickable even though a NEW build cannot
+        // start. onBuildClicked() routes that tap to the idempotent re-show.
+        val resumeView = isBuilding
+        fab.isEnabled = canBuild || resumeView
+        // Affordance: the label must say what the tap now does. Both strings
+        // are re-set on every call so the label always tracks live state
+        // (operation start, finish, dead-process timeout, post-recreate
+        // reconnect — every path funnels back into this single gate).
+        val label = if (resumeView) R.string.fab_view_progress else R.string.button_build_now
+        fab.setText(label)
+        fab.contentDescription = getString(label)
     }
 
     private fun updateImageListUI() {
