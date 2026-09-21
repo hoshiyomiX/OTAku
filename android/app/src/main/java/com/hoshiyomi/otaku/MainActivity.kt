@@ -236,7 +236,7 @@ class MainActivity : AppCompatActivity() {
             return try {
                 val tv = android.util.TypedValue()
                 if (ctx.theme.resolveAttribute(
-                        com.google.android.material.R.attr.colorPrimary, tv, true
+                        androidx.appcompat.R.attr.colorPrimary, tv, true
                     )
                 ) {
                     if (tv.resourceId != 0) {
@@ -604,7 +604,7 @@ class MainActivity : AppCompatActivity() {
         // is destroyed, so they always match the active palette — Material
         // You on API 31+, Suisei Blue brand accent otherwise.
         notificationAccentColor =
-            resolveThemeColorAttr(com.google.android.material.R.attr.colorPrimary)
+            resolveThemeColorAttr(androidx.appcompat.R.attr.colorPrimary)
 
         setContentView(R.layout.activity_main)
         // IMPL-013: Eagerly cache all view references after inflation.
@@ -3293,7 +3293,7 @@ class MainActivity : AppCompatActivity() {
                     // resource (P1-fix C-T-03: night-qualified, always visible).
                     if (isLoading) {
                         setTextColor(
-                            resolveThemeColorAttr(com.google.android.material.R.attr.colorPrimary)
+                            resolveThemeColorAttr(androidx.appcompat.R.attr.colorPrimary)
                                 ?: androidx.core.content.ContextCompat.getColor(
                                     this@MainActivity, R.color.partition_text_loading
                                 )
@@ -3740,7 +3740,7 @@ class MainActivity : AppCompatActivity() {
         // mutable property cannot be smart-cast (K2 rejects it).
         progressDialog = dialog
         // Destructive action — error-red per MD3 (T36).
-        resolveThemeColorAttr(com.google.android.material.R.attr.colorError)?.let { err ->
+        resolveThemeColorAttr(androidx.appcompat.R.attr.colorError)?.let { err ->
             dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(err)
         }
         // T36: blur the main UI behind the pop-up (API 31+), deep dim below.
@@ -3807,7 +3807,7 @@ class MainActivity : AppCompatActivity() {
             }
             .show()
         // Destructive confirm — error-red (same convention as its trigger).
-        resolveThemeColorAttr(com.google.android.material.R.attr.colorError)?.let { err ->
+        resolveThemeColorAttr(androidx.appcompat.R.attr.colorError)?.let { err ->
             dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(err)
         }
     }
@@ -3865,7 +3865,7 @@ class MainActivity : AppCompatActivity() {
             progressDialogStatusText?.text = message
             alert.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
                 setText(R.string.progress_close)
-                resolveThemeColorAttr(com.google.android.material.R.attr.colorPrimary)?.let { primary ->
+                resolveThemeColorAttr(androidx.appcompat.R.attr.colorPrimary)?.let { primary ->
                     setTextColor(primary)
                 }
             }
@@ -3951,9 +3951,9 @@ class MainActivity : AppCompatActivity() {
     //   SUCCESS → colorSecondary      (muted secondary slot)
     enum class LogLevel(val tag: String, val themeAttr: Int, val priority: Int) {
         DEBUG("DBG ", android.R.attr.textColorSecondary, android.util.Log.VERBOSE),
-        INFO("INFO", com.google.android.material.R.attr.colorPrimary, android.util.Log.INFO),
+        INFO("INFO", androidx.appcompat.R.attr.colorPrimary, android.util.Log.INFO),
         WARN("WARN", com.google.android.material.R.attr.colorTertiary, android.util.Log.WARN),
-        ERROR("ERR ", com.google.android.material.R.attr.colorError, android.util.Log.ERROR),
+        ERROR("ERR ", androidx.appcompat.R.attr.colorError, android.util.Log.ERROR),
         SUCCESS("OK  ", com.google.android.material.R.attr.colorSecondary, android.util.Log.INFO),
         PLAIN("", 0, android.util.Log.DEBUG),
     }
