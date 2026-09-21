@@ -642,14 +642,20 @@
                      and paddingVertical re-balanced 4dp → 10dp so the pill
                      height stays exactly 56dp (36dp + 2×10dp); the glyph's
                      optical distance from the pill edge is unchanged
-                     vertically (6dp inset + 10dp pad = the old 12dp + 4dp). -->
+                     vertically (6dp inset + 10dp pad = the old 12dp + 4dp).
+                     T43: paddingHorizontal raised 12dp → 16dp — under the
+                     fully-round 28dp pill caps the "LOGS" label read as
+                     cramped against the curved edge (user feedback). 16dp
+                     is the M3 chip/pill standard; pillWidth auto-grows via
+                     measurePillGeometry (WRAP_CONTENT measure), so no fixed
+                     width anywhere needs touching. -->
                 <LinearLayout
                     android:id="@+id/logHeaderBar"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
-                    android:paddingHorizontal="12dp"
+                    android:paddingHorizontal="16dp"
                     android:paddingVertical="10dp"
                     android:clickable="true"
                     android:focusable="true"

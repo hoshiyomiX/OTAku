@@ -118,7 +118,11 @@
     <color name="status_error">#BA1A1A</color>
 
     <!-- Launcher icon background -->
-    <color name="ic_launcher_background">#000000</color>
+    <!-- T43: MD3 Expressive logo rebrand — light Suisei container tone
+         behind the OTAku wordmark (was #000000 for the old red/white
+         sticker logo). Mirrors the in-app pill pairing:
+         colorPrimaryContainer surface + colorPrimary ink. -->
+    <color name="ic_launcher_background">#D1E4FF</color>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
     <!-- Suisei Blue fallback palette                                  -->
