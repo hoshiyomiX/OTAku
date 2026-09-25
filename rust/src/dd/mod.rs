@@ -410,7 +410,6 @@ Reinstall the current OTAku app — every flashable ZIP needs the helper.",
 // building, flash_info). Grouping into a DdBuildArgs struct would just
 // shift the boilerplate to lib.rs (which would still receive the JNI
 // args + have to construct the struct). Allow clippy::too_many_arguments.
-
 #[allow(clippy::too_many_arguments)]
 pub fn run_dd_build(
     images: &[(String, String)], // (partition_name, image_path)
