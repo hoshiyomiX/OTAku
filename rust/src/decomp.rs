@@ -303,7 +303,7 @@ mod tests {
             out_path.to_str().unwrap(),
         )
         .expect("unzip_entry");
-        assert_eq!(n, 21);
+        assert_eq!(n, b"ddbu-fake-payload-bytes".len() as u64);
         let content = std::fs::read(&out_path).unwrap();
         assert_eq!(content, b"ddbu-fake-payload-bytes");
         // Missing entry must be a clean error, not a panic.

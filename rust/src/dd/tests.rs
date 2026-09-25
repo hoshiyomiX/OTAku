@@ -379,10 +379,10 @@ use super::*;
             //             deleted entry at the original size, resizes back a
             //             present one — no-op when already original)
             // Previous golden: dcb3ebd659a55edf63a2651c55b6ac9b2f0926011b7627934cf318e7ce0cdd2f (T33 F-H)
-            // T49 PLACEHOLDER — local toolchain absent (CI = sole compiler);
-            // first CI run reveals the real hash in the assertion diff,
-            // then this line gets the actual value in the same push series.
-            "000000000000000000000000000000000000000000000000000000000000t49",
+            // T49: revealed by CI (no local toolchain) — bundled decompressor
+            // rework: helper extraction/verification/self-test in Step 0,
+            // helper-only wiring, listing/unzip/MT/fallback machinery removed.
+            "c3de53a11c1b384340ba2e61162a112c4c9bffe3d3e07f96395f672c534bf8d3",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
@@ -531,7 +531,8 @@ use super::*;
         assert!(script.contains("PART_0_NAME=\"boot\""));
         assert!(script.contains("PART_0_HASH=\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\""));
         assert!(script.contains("PART_0_COMP_HASH=\"testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345\""));
-        assert!(script.contains("check_decompressor \"gzip\""));
+        // T49: decompressor = bundled helper, no recovery-binary probe
+        assert!(script.contains("$HELPER -a gzip"));
         assert!(script.contains("sha256sum"));
         assert!(script.contains("$PNAME verified"));
         assert!(script.contains("exit 0"));
@@ -696,14 +697,16 @@ use super::*;
             );
         }
 
-        // Assert: fix is present (refactored to try_zip_listing helper).
+        // T49: the whole listing machinery is gone — extraction goes through
+        // the bundled helper's --unzip-entry (CRC-checked by the zip crate),
+        // so the broken-regex bug class is dead by construction.
         assert!(
-            script.contains("try_zip_listing"),
-            "REGRESSION: try_zip_listing helper not defined (Bug #2 refactor)"
+            !script.contains("try_zip_listing"),
+            "REGRESSION: legacy try_zip_listing leaked back in (T49 removed it)"
         );
         assert!(
-            script.contains("otaku[.]bin"),
-            "REGRESSION: fixed regex pattern (otaku[.]bin) not found (Bug #2)"
+            script.contains("--unzip-entry"),
+            "REGRESSION: bundled helper unzip-entry extraction missing"
         );
     }
 
@@ -1132,10 +1135,10 @@ use super::*;
             "REGRESSION: old separate 'Decompressor availability' step still present (should be merged)"
         );
 
-        // Both check_decompressor function and HDR_MAGIC check should be in same step
+        // T49: helper wiring and HDR_MAGIC check are in the same step
         assert!(
-            script.contains("check_decompressor") && script.contains("HDR_MAGIC"),
-            "REGRESSION: decompressor and bundle integrity not in same step"
+            script.contains("$HELPER -a") && script.contains("HDR_MAGIC"),
+            "REGRESSION: decompressor wiring and bundle integrity not in same step"
         );
     }
 
@@ -1386,11 +1389,17 @@ use super::*;
             "REGRESSION: BUNDLE_SIZE should be pre-computed from Step 0, not from wc -c"
         );
 
-        // BUNDLE_SIZE uses EXPECTED_BUNDLE_SIZE when ZIP listing is available
-        // (fixes size mismatch caused by ZIP central directory trailer bytes)
+        // T49: the ZIP listing machinery is gone (no recovery unzip) —
+        // direct-read BUNDLE_SIZE is the informational overestimate
+        // ZIP_FILE_SIZE - ZIP_DATA_OFFSET (trailer included); exact sizes
+        // stay per-partition gates (T25 F2 policy).
         assert!(
-            script.contains("BUNDLE_SIZE=$EXPECTED_BUNDLE_SIZE"),
-            "REGRESSION: BUNDLE_SIZE should use EXPECTED_BUNDLE_SIZE when ZIP_LIST_OK=1 (fixes size mismatch from ZIP trailer)"
+            script.contains("BUNDLE_SIZE=$(( ZIP_FILE_SIZE - ZIP_DATA_OFFSET ))"),
+            "REGRESSION: direct-read BUNDLE_SIZE computation missing"
+        );
+        assert!(
+            !script.contains("EXPECTED_BUNDLE_SIZE"),
+            "REGRESSION: legacy EXPECTED_BUNDLE_SIZE listing machinery leaked back in"
         );
     }
 
@@ -1471,22 +1480,26 @@ use super::*;
             script.contains("Bundle:"),
             "Bundle diagnostic info missing"
         );
-        // Fallback decompressor list
+        // T49: NO fallback decompressor list — helper-only by design
         assert!(
-            script.contains("gzip -dc"),
-            "Fallback 'gzip -dc' missing"
+            !script.contains("gzip -dc"),
+            "REGRESSION: legacy recovery fallback 'gzip -dc' leaked back in"
         );
         assert!(
-            script.contains("gunzip -c"),
-            "Fallback 'gunzip -c' missing"
+            !script.contains("gunzip -c"),
+            "REGRESSION: legacy recovery fallback 'gunzip -c' leaked back in"
         );
         assert!(
-            script.contains("zcat"),
-            "Fallback 'zcat' missing"
+            !script.contains("zcat"),
+            "REGRESSION: legacy recovery fallback 'zcat' leaked back in"
         );
         assert!(
-            script.contains("busybox gzip -dc"),
-            "Fallback 'busybox gzip -dc' missing"
+            !script.contains("busybox gzip -dc"),
+            "REGRESSION: legacy recovery fallback 'busybox gzip -dc' leaked back in"
+        );
+        assert!(
+            script.contains("no alternative decompressor exists (T49 bundled-only)"),
+            "T49 abort message missing on decompression failure"
         );
     }
 
@@ -1859,48 +1872,37 @@ use super::*;
             "REGRESSION: lz4 compress_id should be 5"
         );
 
-        // 2. Primary decompressor is "lz4"
+        // 2. T49: bundled helper pipes lz4
         assert!(
-            script.contains("check_decompressor \"lz4\""),
-            "REGRESSION: lz4 decompressor check missing"
+            script.contains("$HELPER -a lz4"),
+            "REGRESSION: lz4 helper wiring missing"
         );
 
-        // 3. Multi-threaded upgrade for lz4 (lz4 -T0)
+        // 3. T49: no recovery MT upgrade branches (helper-only)
         assert!(
-            script.contains("lz4 -dc -T0"),
-            "REGRESSION: lz4 multi-threaded upgrade (-T0) missing"
-        );
-        assert!(
-            script.contains("5) # lz4"),
-            "REGRESSION: lz4 case in MT upgrade switch missing"
+            !script.contains("lz4 -dc -T0"),
+            "REGRESSION: legacy lz4 MT branch leaked back in"
         );
 
-        // 4. Fallback decompressor chain includes lz4 variants
+        // 4. T49: no lz4 fallback chain — abort message instead
         assert!(
-            script.contains("\"lz4 -dc\""),
-            "REGRESSION: lz4 fallback 'lz4 -dc' missing"
-        );
-        assert!(
-            script.contains("\"lz4 -d\""),
-            "REGRESSION: lz4 fallback 'lz4 -d' missing"
-        );
-        assert!(
-            script.contains("\"busybox lz4 -dc\""),
-            "REGRESSION: lz4 fallback 'busybox lz4 -dc' missing"
+            !script.contains("\"lz4 -dc\"") && !script.contains("\"busybox lz4 -dc\""),
+            "REGRESSION: legacy lz4 fallback chain leaked back in"
         );
 
-        // 5. Recommended compression hint includes lz4
+        // 5. T49: the old "rebuild with --compress lz4" hint died with the
+        // recovery-decompressor chains — the bundled helper flashes lz4
+        // everywhere; no recommendation is needed.
         assert!(
-            script.contains("--compress lz4 (fastest)"),
-            "REGRESSION: lz4 recommendation missing from error message"
+            script.contains("$HELPER -a lz4"),
+            "REGRESSION: lz4 helper wiring missing"
         );
 
-        // 6. BUG FIX: Primary DECOMP_PIPE for lz4 must use -dc (not just -d)
-        // lz4 requires explicit -c for stdout output when piped; gzip/bzip2/xz
-        // auto-detect pipe, but lz4 does not (especially older/busybox versions).
+        // 6. T49: per-algorithm flag overrides are dead — the F3 gate still
+        // accepts lz4 (id 5) and the helper takes a uniform -a flag.
         assert!(
-            script.contains("COMPRESS_ID = \"5\"") || script.contains("COMPRESS_ID\" = \"5\"") || script.contains(r#"$COMPRESS_ID" = "5"#) || script.contains("COMPRESS_ID = 5"),
-            "REGRESSION: lz4 compress_id=5 check for -dc flag missing"
+            script.contains("0|1|2|3|5|6"),
+            "REGRESSION: F3 compression-id gate no longer accepts lz4 (id 5)"
         );
     }
 
@@ -1920,14 +1922,15 @@ use super::*;
         let script = build_update_script(1, 5, "lz4", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
         );
-        // The lz4-specific override must be present in the generated script
+        // T49: the lz4 -dc stdout-flag quirk is dead — the bundled helper
+        // has a uniform CLI (-a lz4); no per-algorithm flag overrides exist.
         assert!(
-            script.contains(r#"if [ "$COMPRESS_ID" = "5" ]; then"#),
-            "REGRESSION: lz4 compress_id=5 override for -dc flag missing"
+            script.contains("$HELPER -a lz4"),
+            "REGRESSION: lz4 helper wiring missing"
         );
         assert!(
-            script.contains("DECOMP_PIPE=\"$DECOMP_CMD -dc\""),
-            "REGRESSION: lz4 DECOMP_PIPE -dc override missing"
+            !script.contains(r#"if [ "$COMPRESS_ID" = "5" ]; then"#),
+            "REGRESSION: legacy per-algorithm -dc override leaked back in"
         );
     }
 
@@ -1948,98 +1951,28 @@ use super::*;
             comp_hash_hex: "b".repeat(64),
         }];
 
-        // gzip — NO MT upgrade (pigz removed, never available on OrangeFox)
-        let gzip_script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
-            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
-        );
-        // pigz should NOT appear as an executable command (in a case branch, fallback, or pipe)
-        // It MAY appear in comments (e.g. "pigz REMOVED") — that's fine.
-        assert!(
-            !gzip_script.contains("pigz -dc") && !gzip_script.contains("pigz -d"),
-            "REGRESSION: pigz command should be removed from generated script"
-        );
-        // gzip fallback chain should NOT contain pigz
-        assert!(
-            !gzip_script.contains("\"pigz -dc\""),
-            "REGRESSION: pigz should not be in gzip fallback chain"
-        );
-
-        // bzip2 — NO MT upgrade (pbzip2 removed, never available on OrangeFox)
-        let bzip2_script = build_update_script(1, 2, "bzip2", &meta, 0, "", false,
-            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
-        );
-        // pbzip2 should NOT appear as an executable command
-        // It MAY appear in comments (e.g. "pbzip2 REMOVED") — that's fine.
-        assert!(
-            !bzip2_script.contains("pbzip2 -dc") && !bzip2_script.contains("pbzip2 -d"),
-            "REGRESSION: pbzip2. command should be removed from generated script"
-        );
-        assert!(
-            !bzip2_script.contains("\"pbzip2 -dc\""),
-            "REGRESSION: pbzip2 should not be in bzip2 fallback chain"
-        );
-
-        // xz → xz -T0
-        let xz_script = build_update_script(1, 3, "xz", &meta, 0, "", false,
-            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
-        );
-        assert!(
-            xz_script.contains("3) # xz → try xz -T0"),
-            "REGRESSION: xz MT case label missing"
-        );
-        assert!(
-            xz_script.contains("xz -T0 -dc"),
-            "REGRESSION: xz MT command missing"
-        );
-        assert!(
-            xz_script.contains("\"xz -T0 -dc\""),
-            "REGRESSION: xz -T0 not in xz fallback chain"
-        );
-
-        // lz4 → lz4 -T0
-        let lz4_script = build_update_script(1, 5, "lz4", &meta, 0, "", false,
-            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
-        );
-        assert!(
-            lz4_script.contains("5) # lz4"),
-            "REGRESSION: lz4 MT case label missing"
-        );
-        assert!(
-            lz4_script.contains("lz4 -dc -T0"),
-            "REGRESSION: lz4 MT command missing"
-        );
-
-        // NPROC detection is present
-        assert!(
-            gzip_script.contains("NPROC=$(nproc"),
-            "REGRESSION: nproc detection for MT decompressors missing"
-        );
-
-        // zstd → zstd -T0
-        let zstd_script = build_update_script(1, 6, "zstd", &meta, 0, "", false,
-            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
-        );
-        assert!(
-            zstd_script.contains("6) # zstd"),
-            "REGRESSION: zstd MT case label missing"
-        );
-        assert!(
-            zstd_script.contains("zstd -dc -T0"),
-            "REGRESSION: zstd MT command missing"
-        );
-        assert!(
-            zstd_script.contains("\"zstd -dc\""),
-            "REGRESSION: zstd -dc not in zstd fallback chain"
-        );
-        assert!(
-            zstd_script.contains("\"zstdcat\""),
-            "REGRESSION: zstdcat not in zstd fallback chain"
-        );
-        // ZSTD requires -dc (like lz4) — test that DECOMP_PIPE override is present
-        assert!(
-            zstd_script.contains("COMPRESS_ID\" = \"6\""),
-            "REGRESSION: ZSTD COMPRESS_ID=6 -dc override missing"
-        );
+        // T49 rewrite: every algorithm is piped through the BUNDLED
+        // otaku-decomp helper; ALL recovery-side MT machinery (xz/lz4/zstd
+        // -T0 probes, NPROC detection) and fallback chains are gone.
+        // (Historical note: pigz/pbzip2/brotli MT paths were already dead
+        // code on OrangeFox and were removed pre-T49.)
+        for (cid, alg) in [(1u16, "gzip"), (2u16, "bzip2"), (3u16, "xz"), (5u16, "lz4"), (6u16, "zstd")] {
+            let script = build_update_script(1, cid, alg, &meta, 0, "", false,
+                T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+            );
+            assert!(
+                script.contains(&format!("$HELPER -a {}", alg)),
+                "REGRESSION: {} helper wiring missing", alg
+            );
+            assert!(
+                !script.contains("NPROC"),
+                "REGRESSION: legacy NPROC/MT machinery leaked back in ({})", alg
+            );
+            assert!(
+                !script.contains("-T0 -dc"),
+                "REGRESSION: legacy recovery -T0 MT branch leaked back in ({})", alg
+            );
+        }
     }
 
     /// Verify that MT decompressor upgrade only activates when NPROC > 1.
@@ -2056,11 +1989,13 @@ use super::*;
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
         );
-        // The MT upgrade block should be guarded by NPROC > 1
+        // T49: the MT upgrade block no longer exists — the bundled helper
+        // replaces every recovery decompressor; no NPROC guard may remain.
         assert!(
-            script.contains("if [ \"$NPROC\" -gt 1 ]; then"),
-            "REGRESSION: NPROC > 1 guard for MT decompressor missing"
+            !script.contains("NPROC"),
+            "REGRESSION: legacy NPROC/MT machinery leaked back in"
         );
+        assert!(script.contains("$HELPER -a gzip"));
     }
 
     // ── Bug #13 regression: verify_trim() {{ raw string escaping ──
