@@ -97,10 +97,15 @@ jobs:
           # Same crate/codecs as the cdylib — a second [[bin]] target.
           # Output lands in target/<triple>/release/otaku-decomp (release
           # profile already strips + LTOs).
+          # -o points cargo-ndk's artifact-copy dir somewhere disposable:
+          # it insists on creating the dir itself (mkdir fails on the
+          # pre-existing /dev/null FILE). The real artifacts stay in
+          # target/<triple>/release/otaku-decomp.
+          rm -rf /tmp/t49-ndk-bin-out
           cargo ndk \
             -t arm64-v8a \
             -t armeabi-v7a \
-            -o /dev/null \
+            -o /tmp/t49-ndk-bin-out \
             build --release --bin otaku-decomp
 
           mkdir -p ../android/app/src/main/assets/tools/otaku-decomp/arm64-v8a \
