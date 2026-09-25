@@ -562,6 +562,19 @@ fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, String> {
 //  ZSTD implementation (zstd / libzstd-sys)
 // ---------------------------------------------------------------------------
 
+/// Number of libzstd compression worker threads for the zstd encoder (T50).
+///
+/// `available_parallelism()` is adaptive (respects CPU affinity on Android)
+/// and capped at 6: big.LITTLE devices rarely benefit from more workers
+/// (thermal throttling + per-worker window RAM at high levels), and the cap
+/// keeps peak memory predictable on armv7 (~3 GB address space). Decode is
+/// unaffected — single-frame zstd decompression is inherently single-thread.
+pub(crate) fn mt_workers() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(6))
+        .unwrap_or(1) as u32
+}
+
 #[cfg(test)]
 fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     // zstd crate Encoder wraps Facebook's libzstd C library.
@@ -575,6 +588,12 @@ fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     {
         let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
             .map_err(|e| format!("zstd encoder init error: {}", e))?;
+        // T50: engage the libzstd worker pool (zstdmt feature, compiled since
+        // T49) — must be set before the first write. In-app build speedup;
+        // flash-side decode contract unchanged.
+        encoder
+            .multithread(mt_workers())
+            .map_err(|e| format!("zstd encoder mt init error: {}", e))?;
         encoder.write_all(data)
             .map_err(|e| format!("zstd compress write error: {}", e))?;
         encoder.finish()
@@ -750,6 +769,10 @@ pub fn compress_streaming(
         {
             let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
                 .map_err(|e| format!("zstd encoder init error: {}", e))?;
+            // T50: libzstd worker pool (see mt_workers).
+            encoder
+                .multithread(mt_workers())
+                .map_err(|e| format!("zstd encoder mt init error: {}", e))?;
             let mut offset: usize = 0;
             while offset < data.len() {
                 let end = (offset + effective_chunk).min(data.len());
@@ -958,6 +981,10 @@ pub fn hash_and_compress_file(
         {
             let mut encoder = zstd::Encoder::new(&mut result, level_clamped)
                 .map_err(|e| format!("zstd encoder init error: {}", e))?;
+            // T50: libzstd worker pool (see mt_workers).
+            encoder
+                .multithread(mt_workers())
+                .map_err(|e| format!("zstd encoder mt init error: {}", e))?;
             loop {
                 let n = file
                     .read(&mut buf)
@@ -1267,6 +1294,10 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
         let level_clamped = resolved_level.clamp(1, 22);
         let mut encoder = zstd::Encoder::new(&mut counting, level_clamped)
             .map_err(|e| format!("zstd encoder init error: {}", e))?;
+        // T50: libzstd worker pool (see mt_workers).
+        encoder
+            .multithread(mt_workers())
+            .map_err(|e| format!("zstd encoder mt init error: {}", e))?;
         loop {
             let n = file
                 .read(&mut buf)
@@ -1562,6 +1593,10 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         let level_clamped = resolved_level.clamp(1, 22);
         let mut encoder = zstd::Encoder::new(&mut counting, level_clamped)
             .map_err(|e| format!("zstd encoder init error: {}", e))?;
+        // T50: libzstd worker pool (see mt_workers).
+        encoder
+            .multithread(mt_workers())
+            .map_err(|e| format!("zstd encoder mt init error: {}", e))?;
         loop {
             // T36: user cancellation — abort at the next 4MB chunk boundary.
             if crate::cancel_requested() {
@@ -1841,6 +1876,29 @@ mod tests {
         assert_eq!(compress_id("zstd"), 6);
         assert_eq!(compress_id("ZSTD"), 6);
         assert_eq!(compress_id("zs"), 6);
+    }
+
+    /// T50: the worker count must stay within the designed envelope.
+    #[test]
+    fn test_mt_workers_sane() {
+        let n = mt_workers();
+        assert!((1..=6).contains(&n), "mt_workers must be 1..=6, got {}", n);
+    }
+
+    /// T50: MT-engaged zstd encode must round-trip at a fast and an ultra
+    /// level (exercises Encoder::multithread + the real decode path).
+    #[test]
+    fn test_zstd_multithread_roundtrip() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 241) as u8).collect();
+        for level in [3i32, 19] {
+            let mut result = Vec::new();
+            let mut encoder = zstd::Encoder::new(&mut result, level).unwrap();
+            encoder.multithread(mt_workers()).expect("multithread init");
+            encoder.write_all(&data).unwrap();
+            encoder.finish().unwrap();
+            let decompressed = decompress_zstd(&result).unwrap();
+            assert_eq!(decompressed, data, "level {} MT round-trip mismatch", level);
+        }
     }
 
     /// Regression: decompress_lz4() must have .take() zip-bomb protection
