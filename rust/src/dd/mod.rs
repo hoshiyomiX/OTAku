@@ -349,31 +349,6 @@ fn build_flash_info(
     lines.join("\n")
 }
 
-// ---------------------------------------------------------------------------
-//  Public API: run_dd_build
-// ---------------------------------------------------------------------------
-
-/// Generate an otaku-format flashable ZIP from partition images.
-///
-/// # Arguments
-/// * `images` - List of (partition_name, image_path) pairs
-/// * `compression` - Compression algorithm: "zstd", "xz", "bzip2", "gzip", "lz4"
-/// * `level` - Compression level (0 = default per algorithm)
-/// * `output_path` - Absolute path for output .zip file
-/// * `device` - Device codename(s), comma-separated (empty = no device check)
-/// * `skip_verify` - Skip post-flash SHA-256 verification
-/// * `rom_name` - Cosmetic: ROM name shown in flash_info.txt + flasher banner
-/// * `maker` - Cosmetic: ROM maker shown in flash_info.txt + flasher banner
-///
-/// # Returns
-/// DdBuildResult with success/error, paths, sizes, and log output.
-//
-// 8 args matches the JNI bridge signature 1:1. Each arg is used in a
-// distinct phase (validation, compression, script building, flash_info).
-// Grouping into a DdBuildArgs struct would just shift the boilerplate to
-// lib.rs (which would still receive 8 JNI args + have to construct the
-// struct). Allow clippy::too_many_arguments.
-#[allow(clippy::too_many_arguments)]
 /// T49: read the bundled decompressor bytes out of the installed APK.
 ///
 /// The APK is itself a ZIP — open it with the same `zip` crate that builds
@@ -405,6 +380,38 @@ Reinstall the current OTAku app — every flashable ZIP needs the helper.",
     Ok(bytes)
 }
 
+// ---------------------------------------------------------------------------
+//  Public API: run_dd_build
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+//  Public API: run_dd_build
+// ---------------------------------------------------------------------------
+
+/// Generate an otaku-format flashable ZIP from partition images.
+///
+/// # Arguments
+/// * `images` - List of (partition_name, image_path) pairs
+/// * `compression` - Compression algorithm: "zstd", "xz", "bzip2", "gzip", "lz4"
+/// * `level` - Compression level (0 = default per algorithm)
+/// * `output_path` - Absolute path for output .zip file
+/// * `device` - Device codename(s), comma-separated (empty = no device check)
+/// * `skip_verify` - Skip post-flash SHA-256 verification
+/// * `rom_name` - Cosmetic: ROM name shown in flash_info.txt + flasher banner
+/// * `maker` - Cosmetic: ROM maker shown in flash_info.txt + flasher banner
+/// * `helper_apk_path` - T49: installed APK path — source of the bundled decompressor asset
+/// * `helper_asset` - T49: APK asset entry of otaku-decomp for this device's ABI
+///
+/// # Returns
+/// DdBuildResult with success/error, paths, sizes, and log output.
+//
+// T49: now 10 args (helper apk path + asset appended). Each arg is used
+// in a distinct phase (validation, helper load, compression, script
+// building, flash_info). Grouping into a DdBuildArgs struct would just
+// shift the boilerplate to lib.rs (which would still receive the JNI
+// args + have to construct the struct). Allow clippy::too_many_arguments.
+
+#[allow(clippy::too_many_arguments)]
 pub fn run_dd_build(
     images: &[(String, String)], // (partition_name, image_path)
     compression: &str,

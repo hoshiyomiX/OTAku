@@ -23,6 +23,7 @@ const SCRIPT_VERSION: &str = "Custom Payload Maker";
 /// 5. Detects A/B slot
 /// 6. Validates partition block devices (size check, unmount)
 /// 7. Flashes each partition (direct read → decompress → dd write → optional verify)
+#[allow(clippy::too_many_arguments)] // T49: +helper size/sha/asset (10 args)
 pub(super) fn build_update_script(
     num_parts: usize,
     compress_id: u16,
