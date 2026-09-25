@@ -595,7 +595,9 @@ use super::*;
 
     #[test]
     fn test_run_dd_build_no_images() {
-        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false, "", "");
+        // T49: last two args = helper apk/asset (unused here — both tests fail
+        // validation before the helper is ever loaded).
+        let result = run_dd_build(&[], "gzip", 6, "/tmp/test.zip", "", false, "", "", "", "");
         assert!(!result.success);
         assert!(result.error.unwrap().contains("no images specified"));
     }
@@ -609,6 +611,8 @@ use super::*;
             "/tmp/test.zip",
             "",
             false,
+            "",
+            "",
             "",
             "",
         );
