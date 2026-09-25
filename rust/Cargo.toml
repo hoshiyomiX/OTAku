@@ -6,7 +6,11 @@ description = "OTAku native backend — Rust + JNI for Android"
 
 [lib]
 name = "otaku_native"
-crate-type = ["cdylib"]
+# cdylib = libotaku_native.so untuk Android (JNI).
+# rlib   = T49: agar [[bin]] otaku-decomp di paket yang sama bisa
+#          `use otaku_native::decomp` (cdylib saja tidak dilinkable ke bin).
+#          .so output untuk Android tidak berubah.
+crate-type = ["cdylib", "rlib"]
 
 # T49: bundled universal decompressor shipped inside every flashable ZIP.
 # Same crate, same codecs (flate2/bzip2/xz2/lz4_flex/zstd) — zero new deps;

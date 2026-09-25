@@ -513,6 +513,33 @@ pub fn run_dd_build(
     }
 
     // ── Run the build pipeline ──
+    // ── T49: load the bundled decompressor from the APK asset ──
+    // Fail fast: a missing/corrupt helper aborts BEFORE spending minutes
+    // compressing partitions — every flashable ZIP needs the helper
+    // (helper-only design, no recovery fallback). Reading straight from
+    // the installed APK keeps it always-fresh with zero extra files.
+    let helper_bytes = match read_helper_from_apk(helper_apk_path, helper_asset) {
+        Ok(b) => b,
+        Err(e) => {
+            return DdBuildResult {
+                success: false,
+                output: format!("[!] Error: {}", e),
+                zip_path: None,
+                zip_size: None,
+                bundle_size: None,
+                total_unc_size: None,
+                error: Some(e),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+    let helper_size = helper_bytes.len() as u64;
+    let helper_sha256 = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(&helper_bytes);
+        digest.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    };
+
     let result: Result<DdBuildResult, String> = (|| {
         let num_parts = images.len();
         // Resolve effective level: 0 = algorithm default (zstd→3, gzip→6, etc.)
@@ -807,32 +834,8 @@ pub fn run_dd_build(
             100, // all partitions done
         );
 
-        // ── T49: load the bundled decompressor from the APK asset ──
-        // The helper is embedded into EVERY flashable ZIP (entry #1) so the
-        // flasher never depends on recovery-provided gzip/bzip2/xz/lz4/zstd
-        // or unzip binaries. Read from the installed APK directly — always
-        // fresh, zero filesystem mutation outside the output ZIP.
-        let helper_bytes = match read_helper_from_apk(helper_apk_path, helper_asset) {
-            Ok(b) => b,
-            Err(e) => {
-                return DdBuildResult {
-                    success: false,
-                    output: format!("[!] Error: {}", e),
-                    zip_path: None,
-                    zip_size: None,
-                    bundle_size: None,
-                    total_unc_size: None,
-                    error: Some(e),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                };
-            }
-        };
-        let helper_size = helper_bytes.len() as u64;
-        let helper_sha256 = {
-            use sha2::{Digest, Sha256};
-            let digest = Sha256::digest(&helper_bytes);
-            digest.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-        };
+        // T49: report the bundled decompressor facts (loaded + verified
+        // before the build closure — see run_dd_build prologue).
         lines.push(format!(
             "  otaku-decomp : {} bytes (SHA-256 {}…)",
             helper_size,
