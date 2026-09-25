@@ -138,8 +138,9 @@ jobs:
           done
 
           # T49: bundled decompressor must exist, be non-trivial, and be a
-          # valid ELF of the right class per ABI.
-          for abi in arm64-v8a:2 armeabi-v7a:1; do
+          # valid ELF of the right class per ABI. e_ident[EI_CLASS] is the
+          # 5th byte: 01 = 32-bit (ELF32), 02 = 64-bit (ELF64).
+          for abi in arm64-v8a:02 armeabi-v7a:01; do
             ABI="${abi%%:*}"
             WANT_CLASS="${abi##*:}"
             HELPER="android/app/src/main/assets/tools/otaku-decomp/$ABI/otaku-decomp"
@@ -152,13 +153,12 @@ jobs:
               echo "ERROR: $HELPER suspiciously small ($SIZE bytes)"
               exit 1
             fi
-            ELF_CLASS=$(od -A n -t x1 -N 5 "$HELPER" | awk '{print $2}')
-            if [ "$ELF_CLASS" != "0$(printf %o $WANT_CLASS)" ]; then
-              # ELF byte 5 (e_ident[EI_CLASS]): 01=32-bit, 02=64-bit
-              echo "ERROR: $HELPER wrong ELF class (byte=$ELF_CLASS, want 0$WANT_CLASS)"
+            ELF_CLASS=$(od -A n -t x1 -N 5 "$HELPER" | awk '{print $5}')
+            if [ "$ELF_CLASS" != "$WANT_CLASS" ]; then
+              echo "ERROR: $HELPER wrong ELF class (byte=$ELF_CLASS, want $WANT_CLASS)"
               exit 1
             fi
-            echo "[OK] $HELPER: $(numfmt --to=iec $SIZE) (ELF class ok)"
+            echo "[OK] $HELPER: $(numfmt --to=iec $SIZE) (ELF class $WANT_CLASS)"
           done
 
       - name: Upload Rust native libs + bundled decompressor

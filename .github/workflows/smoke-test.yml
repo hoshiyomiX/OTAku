@@ -214,13 +214,18 @@ jobs:
               "validation_step", "resize_step", "flash_step_offset",
               "num_parts_minus_1", "total_steps", "verify_block",
               "device_check_step", "escaped_device", "decomp_cmd",
-              "fallback_decompressors", "free_space_step", "skip_verify_flag",
+              "free_space_step", "skip_verify_flag",
               "total_unc_size",
+              # T49: baked bundled-decompressor facts (replaces the removed
+              # fallback_decompressors arg — helper-only design)
+              "helper_size", "helper_sha256", "helper_asset",
           ]
-          # Verify zstd plumbing is present in the generated script
+          # Verify T49 helper plumbing is present in the dd module
           zstd_checks = [
-              ("zstd", "zstd DECOMP_PIPE"),
-              ("zstdcat", "zstdcat fallback"),
+              ("otaku-decomp", "bundled decompressor entry"),
+              ("--selftest", "helper self-test invocation"),
+              ("--unzip-entry", "helper zip-entry extraction"),
+              ("zstd", "zstd codec wiring"),
               ("COMPRESS_ID", "COMPRESS_ID mapping"),
           ]
           for check, desc in zstd_checks:
@@ -252,6 +257,7 @@ jobs:
 
           # All expected ZIP entries that run_dd_build must create
           required_entries = [
+              ("otaku-decomp", "T49 bundled decompressor (entry #1)"),
               ("otaku.bin", "bundle binary"),
               ("flash_info.txt", "human-readable metadata"),
               ("META-INF/com/google/android/update-binary", "TWRP/OrangeFox flasher script"),
