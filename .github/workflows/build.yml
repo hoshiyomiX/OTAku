@@ -42,7 +42,7 @@ jobs:
 
       - name: Run cargo clippy (lint)
         working-directory: rust
-        run: cargo clippy --lib -- -D warnings 2>&1
+        run: cargo clippy --lib --bins -- -D warnings 2>&1
 
       - name: Run cargo tests
         working-directory: rust
@@ -88,7 +88,29 @@ jobs:
             -o ../android/app/src/main/jniLibs \
             build --release
 
-      - name: Verify .so outputs
+      - name: Build bundled decompressor (otaku-decomp, all ABIs)
+        working-directory: rust
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          # T49: universal decompressor shipped inside every flashable ZIP.
+          # Same crate/codecs as the cdylib — a second [[bin]] target.
+          # Output lands in target/<triple>/release/otaku-decomp (release
+          # profile already strips + LTOs).
+          cargo ndk \
+            -t arm64-v8a \
+            -t armeabi-v7a \
+            -o /dev/null \
+            build --release --bin otaku-decomp
+
+          mkdir -p ../android/app/src/main/assets/tools/otaku-decomp/arm64-v8a \
+                   ../android/app/src/main/assets/tools/otaku-decomp/armeabi-v7a
+          cp target/aarch64-linux-android/release/otaku-decomp \
+             ../android/app/src/main/assets/tools/otaku-decomp/arm64-v8a/otaku-decomp
+          cp target/armv7-linux-androideabi/release/otaku-decomp \
+             ../android/app/src/main/assets/tools/otaku-decomp/armeabi-v7a/otaku-decomp
+
+      - name: Verify .so + bundled decompressor outputs
         run: |
           echo "=== arm64-v8a ==="
           ls -lh android/app/src/main/jniLibs/arm64-v8a/ || echo "MISSING"
@@ -110,11 +132,37 @@ jobs:
             fi
           done
 
-      - name: Upload Rust native libs
+          # T49: bundled decompressor must exist, be non-trivial, and be a
+          # valid ELF of the right class per ABI.
+          for abi in arm64-v8a:2 armeabi-v7a:1; do
+            ABI="${abi%%:*}"
+            WANT_CLASS="${abi##*:}"
+            HELPER="android/app/src/main/assets/tools/otaku-decomp/$ABI/otaku-decomp"
+            if [ ! -f "$HELPER" ]; then
+              echo "ERROR: $HELPER not found!"
+              exit 1
+            fi
+            SIZE=$(stat -c%s "$HELPER" 2>/dev/null || echo 0)
+            if [ "$SIZE" -lt 100000 ]; then
+              echo "ERROR: $HELPER suspiciously small ($SIZE bytes)"
+              exit 1
+            fi
+            ELF_CLASS=$(od -A n -t x1 -N 5 "$HELPER" | awk '{print $2}')
+            if [ "$ELF_CLASS" != "0$(printf %o $WANT_CLASS)" ]; then
+              # ELF byte 5 (e_ident[EI_CLASS]): 01=32-bit, 02=64-bit
+              echo "ERROR: $HELPER wrong ELF class (byte=$ELF_CLASS, want 0$WANT_CLASS)"
+              exit 1
+            fi
+            echo "[OK] $HELPER: $(numfmt --to=iec $SIZE) (ELF class ok)"
+          done
+
+      - name: Upload Rust native libs + bundled decompressor
         uses: actions/upload-artifact@v4
         with:
           name: rust-native-libs
-          path: android/app/src/main/jniLibs/
+          path: |
+            android/app/src/main/jniLibs/
+            android/app/src/main/assets/
           retention-days: 1
           # T24 rerun safety: re-runs re-upload the same name; without
           # overwrite the upload 409s against the earlier attempt's copy.
@@ -137,11 +185,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Rust native libs
+      - name: Download Rust native libs + bundled decompressor
         uses: actions/download-artifact@v4
         with:
           name: rust-native-libs
-          path: android/app/src/main/jniLibs/
+          # Artifact root = src/main (contains jniLibs/ + assets/)
+          path: android/app/src/main/
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

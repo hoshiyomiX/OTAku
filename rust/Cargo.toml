@@ -8,6 +8,14 @@ description = "OTAku native backend — Rust + JNI for Android"
 name = "otaku_native"
 crate-type = ["cdylib"]
 
+# T49: bundled universal decompressor shipped inside every flashable ZIP.
+# Same crate, same codecs (flate2/bzip2/xz2/lz4_flex/zstd) — zero new deps;
+# the thin CLI wrapper lives in src/bin/otaku_decomp.rs, the engine in
+# src/decomp.rs (unit-tested with the lib under `cargo test --lib`).
+[[bin]]
+name = "otaku-decomp"
+path = "src/bin/otaku_decomp.rs"
+
 [dependencies]
 # JNI bridge
 jni = "0.21"
@@ -30,7 +38,11 @@ xz2 = "0.1"
 # pkg-config or system libzstd needed for cross-compile.
 # NOTE: Do NOT add "pkg-config" feature — it breaks Android NDK cross-compile
 # because pkg-config cannot find target-architecture libraries.
-zstd = { version = "0.13", default-features = false }
+# T49: zstdmt compiles libzstd with ZSTD_MULTITHREAD — multi-thread capable
+# build. Single-frame decompression stays single-thread (inherent to the
+# format); MT engages for multi-frame streams and is a prerequisite for any
+# future MT encoder switch on the app side.
+zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
 
 # Hashing
 sha2 = "0.10"

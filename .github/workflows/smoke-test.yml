@@ -66,7 +66,7 @@ jobs:
 
       - name: Run cargo clippy (lint)
         working-directory: rust
-        run: cargo clippy --lib -- -D warnings 2>&1
+        run: cargo clippy --lib --bins -- -D warnings 2>&1
 
       - name: Show test summary on failure
         if: failure()

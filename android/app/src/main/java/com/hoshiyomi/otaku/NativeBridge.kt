@@ -115,7 +115,12 @@ object NativeBridge {
         device: String = "generic",
         skipVerify: Boolean = false,
         romName: String = "",
-        maker: String = ""
+        maker: String = "",
+        // T49: APK that carries the bundled otaku-decomp helper + the asset
+        // entry matching this device ABI. Rust reads the bytes straight out
+        // of the APK (it IS a zip) and embeds them into the flashable ZIP.
+        helperApkPath: String,
+        helperAsset: String
     ): DdBuildResult {
         if (!isLoaded) {
             return DdBuildResult.error("Native library not loaded: $loadError")
@@ -126,7 +131,7 @@ object NativeBridge {
             val imagesJson = JSONObject(images).toString()
             val resultJson = nativeBuildDd(
                 imagesJson, compression, level, outputPath, device,
-                skipVerify, romName, maker
+                skipVerify, romName, maker, helperApkPath, helperAsset
             )
             val result = parseDdBuildResult(resultJson)
             Log.d(TAG, "buildDd() result: success=${result.success}, zip_path=${result.zipPath}, duration=${result.durationMs}ms")
@@ -708,7 +713,10 @@ object NativeBridge {
         device: String,
         skipVerify: Boolean,
         romName: String,
-        maker: String
+        maker: String,
+        // T49: bundled decompressor source inside the installed APK
+        helperApkPath: String,
+        helperAsset: String
     ): String
 
     // Device codename detection (spoof-resistant — reads vendor partition props)

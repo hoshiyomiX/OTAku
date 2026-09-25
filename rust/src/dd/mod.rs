@@ -1,6 +1,8 @@
 //! DD mode — Generate an otaku-format flashable ZIP from partition images.
 //!
-//! Produces a flashable ZIP containing:
+//! Produces a flashable ZIP containing (T49 layout — deterministic order,
+//! the flasher walks local file headers from byte 0):
+//!   - otaku-decomp (bundled universal decompressor, stored, unix 755)
 //!   - otaku.bin (DDBU header + compressed partition data)
 //!   - META-INF/com/google/android/update-binary (TWRP/OrangeFox flasher script)
 //!   - META-INF/com/google/android/updater-script (stub)
@@ -19,7 +21,7 @@
 //! Ported from Python modes/dd.py (849 lines) to Rust with identical semantics.
 
 use std::fs::File;
-use std::io::{Seek, Write, SeekFrom};
+use std::io::{Read, Seek, Write, SeekFrom};
 use std::path::Path;
 
 use crate::compression::{
@@ -111,6 +113,8 @@ pub const ALIGN: usize = 4096;
 
 /// Get the shell decompressor command for a compress ID.
 fn decomp_cmd_for_id(compress_id: u16) -> &'static str {
+    // T49: this now names the ALGORITHM passed to the bundled helper
+    // (`otaku-decomp -a <alg>`), not a recovery binary to look up.
     // F3 (T25): ids 4 and unknown are UNREACHABLE from the generated script —
     // it aborts on them before any decompressor wiring (see script.rs gate).
     // The arms remain as defense-in-depth for future call sites; they map to
@@ -370,6 +374,37 @@ fn build_flash_info(
 // lib.rs (which would still receive 8 JNI args + have to construct the
 // struct). Allow clippy::too_many_arguments.
 #[allow(clippy::too_many_arguments)]
+/// T49: read the bundled decompressor bytes out of the installed APK.
+///
+/// The APK is itself a ZIP — open it with the same `zip` crate that builds
+/// the flashable ZIP and pull the asset entry for the device's ABI. The
+/// bytes are then embedded as entry #1 of the produced flashable ZIP.
+fn read_helper_from_apk(apk_path: &str, helper_asset: &str) -> Result<Vec<u8>, String> {
+    let file = File::open(apk_path)
+        .map_err(|e| format!("Cannot open APK '{}': {}", apk_path, e))?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .map_err(|e| format!("Cannot read APK '{}' as ZIP: {}", apk_path, e))?;
+    let mut entry = archive
+        .by_name(helper_asset)
+        .map_err(|e| format!(
+            "Bundled decompressor '{}' not found in APK: {}. \
+Reinstall the current OTAku app — every flashable ZIP needs the helper.",
+            helper_asset, e
+        ))?;
+    let mut bytes = Vec::new();
+    entry
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read '{}' from APK: {}", helper_asset, e))?;
+    if bytes.len() < 64 * 1024 {
+        return Err(format!(
+            "Bundled decompressor '{}' is suspiciously small ({} bytes) — APK corrupt?",
+            helper_asset,
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
 pub fn run_dd_build(
     images: &[(String, String)], // (partition_name, image_path)
     compression: &str,
@@ -379,6 +414,9 @@ pub fn run_dd_build(
     skip_verify: bool,
     rom_name: &str,
     maker: &str,
+    // T49: location of the bundled decompressor inside the installed APK
+    helper_apk_path: &str, // e.g. /data/app/…/base.apk
+    helper_asset: &str,    // e.g. tools/otaku-decomp/arm64-v8a/otaku-decomp
 ) -> DdBuildResult {
     let start = std::time::Instant::now();
     let mut lines: Vec<String> = Vec::new();
@@ -769,6 +807,38 @@ pub fn run_dd_build(
             100, // all partitions done
         );
 
+        // ── T49: load the bundled decompressor from the APK asset ──
+        // The helper is embedded into EVERY flashable ZIP (entry #1) so the
+        // flasher never depends on recovery-provided gzip/bzip2/xz/lz4/zstd
+        // or unzip binaries. Read from the installed APK directly — always
+        // fresh, zero filesystem mutation outside the output ZIP.
+        let helper_bytes = match read_helper_from_apk(helper_apk_path, helper_asset) {
+            Ok(b) => b,
+            Err(e) => {
+                return DdBuildResult {
+                    success: false,
+                    output: format!("[!] Error: {}", e),
+                    zip_path: None,
+                    zip_size: None,
+                    bundle_size: None,
+                    total_unc_size: None,
+                    error: Some(e),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+        };
+        let helper_size = helper_bytes.len() as u64;
+        let helper_sha256 = {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(&helper_bytes);
+            digest.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        };
+        lines.push(format!(
+            "  otaku-decomp : {} bytes (SHA-256 {}…)",
+            helper_size,
+            &helper_sha256[..16.min(helper_sha256.len())]
+        ));
+
         let update_binary = build_update_script(
             num_parts,
             compress_id_val,
@@ -777,6 +847,9 @@ pub fn run_dd_build(
             total_unc_size,
             device,
             skip_verify,
+            helper_size,
+            &helper_sha256,
+            helper_asset,
         );
 
         // Inject ROM name and Maker into the flasher banner (Issue #4 fix).
@@ -883,6 +956,20 @@ pub fn run_dd_build(
                 .compression_method(zip::CompressionMethod::Stored)
                 .large_file(true);  // ZIP64: support otaku.bin > 4 GB
 
+            // T49: entry #1 = bundled decompressor. MUST be first — the
+            // flasher walks local file headers from byte 0 expecting
+            // "otaku-decomp" then "otaku.bin". Stored + unix 755 (F13):
+            // recoveries that exec extracted files rely on the mode bit.
+            // large_file(false): a ~1-2 MB binary never needs ZIP64.
+            let exec_options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .large_file(false)
+                .unix_permissions(0o755);
+            zip.start_file("otaku-decomp", exec_options)
+                .map_err(|e| format!("Cannot start otaku-decomp in ZIP: {}", e))?;
+            zip.write_all(&helper_bytes)
+                .map_err(|e| format!("Cannot write otaku-decomp: {}", e))?;
+
             // Add otaku.bin (from the temp file we built incrementally)
             zip.start_file("otaku.bin", options)
                 .map_err(|e| format!("Cannot start otaku.bin in ZIP: {}", e))?;
@@ -901,11 +988,13 @@ pub fn run_dd_build(
             // F13 fix (T25): carry the executable bit (0o755) in the ZIP entry —
             // recoveries that exec the extracted file directly rely on it; a
             // modeless entry defaults to 0o600 on some unzip implementations.
-            let exec_options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored)
-                .large_file(true)
-                .unix_permissions(0o755);
-            zip.start_file("META-INF/com/google/android/update-binary", exec_options)
+            zip.start_file(
+                "META-INF/com/google/android/update-binary",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored)
+                    .large_file(true)
+                    .unix_permissions(0o755),
+            )
                 .map_err(|e| format!("Cannot start update-binary in ZIP: {}", e))?;
             zip.write_all(update_binary.as_bytes())
                 .map_err(|e| format!("Cannot write update-binary: {}", e))?;

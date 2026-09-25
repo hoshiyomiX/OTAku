@@ -16,6 +16,7 @@
 
 # Generated files
 bin/
+!rust/src/bin/
 gen/
 out/
 
@@ -55,6 +56,7 @@ rust/Cargo.lock
 
 # Generated .so files (built by CI cargo-ndk step)
 android/app/src/main/jniLibs/*/libotaku_native.so
+android/app/src/main/assets/tools/
 
 # ═══════════════════════════════════════════════════════════════
 #  OS / Editor

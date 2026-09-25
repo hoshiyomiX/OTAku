@@ -4,6 +4,11 @@
 
 use super::script::build_update_script;
 use super::*;
+    // ── T49: baked bundled-decompressor facts for every test call ──
+    const T49_HELPER_SIZE: u64 = 1_234_567;
+    const T49_HELPER_SHA: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const T49_HELPER_ASSET: &str = "tools/otaku-decomp/arm64-v8a/otaku-decomp";
+
 
 
 
@@ -24,7 +29,9 @@ use super::*;
             comp_hash_hex: "b".repeat(64),
         }];
         for &sv in &[false, true] {
-            let s = build_update_script(1, 1, "gzip", &meta, 0, "", sv);
+            let s = build_update_script(1, 1, "gzip", &meta, 0, "", sv,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
             assert!(
                 !s.contains("WRITTEN_SIZE"),
                 "F2 REGRESSION: partition-size proxy WRITTEN_SIZE kembali (skip_verify={})",
@@ -50,8 +57,12 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s_off = build_update_script(1, 1, "gzip", &meta, 0, "", false);
-        let s_on = build_update_script(1, 1, "gzip", &meta, 0, "", true);
+        let s_off = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
+        let s_on = build_update_script(1, 1, "gzip", &meta, 0, "", true,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(s_off.contains("dd_failure_verdict() {"), "helper verdict hilang");
         assert!(s_off.contains("SKIP_VERIFY=0"), "flag SKIP_VERIFY=0 hilang (verify aktif)");
         assert!(s_on.contains("SKIP_VERIFY=1"), "flag SKIP_VERIFY=1 hilang (skip_verify)");
@@ -74,7 +85,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             !s.contains(r#"[ -b "$PTARGET" ] && [ -z "$DD_OFLAG" ]"#),
             "F5 REGRESSION: guard -z DD_OFLAG kembali (stale oflag bisa bocor)"
@@ -99,7 +112,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             s.contains("bootctl set-active-boot-slot $SLOT_NUM"),
             "F4 REGRESSION: bootctl menerima huruf lagi (strtoul('b')=0 = slot A)"
@@ -133,7 +148,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             !s.contains(r#"mount_points=$(mount 2>/dev/null | grep -E "($real_dev|$dev_name)""#),
             "F7 REGRESSION: grep device-name tanpa anchor kembali di helper unmount"
@@ -164,7 +181,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             s.contains(r#"[ "$HDR_NUM_PARTS" != "$NUM_PARTS" ]"#),
             "F8: cross-check HDR_NUM_PARTS vs NUM_PARTS hilang"
@@ -187,7 +206,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             !s.contains("$HARUKA_PARSER_CHANGE_LINE"),
             "F9 REGRESSION: artefak tokenisasi LLM kembali di template"
@@ -205,7 +226,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             s.contains("| head -3 | tr '\\n' ' '"),
             "F12: flatten tr-'\\n'-' ' hilang dari pipeline GZIP_ERR_MSG"
@@ -224,7 +247,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             s.contains(r#"[ "$is_dynamic" = "1" ] && [ -n "$lp_name" ]"#),
             "F11: guard is_dynamic+lp_name hilang (hint 'lptools map ' kosong bisa kembali)"
@@ -245,7 +270,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             s.contains(r#"case "$COMPRESS_ID" in"#),
             "F3: gate case compress_id hilang"
@@ -289,7 +316,9 @@ use super::*;
         let dir = std::path::Path::new("target/dump");
         std::fs::create_dir_all(dir).unwrap();
         for (name, sv) in [("update-binary.sh", false), ("update-binary-skip.sh", true)] {
-            let s = build_update_script(2, 1, "gzip", &meta, 33554432, "crosshatch", sv);
+            let s = build_update_script(2, 1, "gzip", &meta, 33554432, "crosshatch", sv,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
             std::fs::write(dir.join(name), s).unwrap();
         }
     }
@@ -327,7 +356,9 @@ use super::*;
                     comp_hash_hex: format!("{:064x}", i + 7),
                 })
                 .collect();
-            let s = build_update_script(np, cid, cname, &meta, tot, dev, sv);
+            let s = build_update_script(np, cid, cname, &meta, tot, dev, sv,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
             combined.push_str(&s);
             combined.push('\u{1}');
         }
@@ -347,11 +378,77 @@ use super::*;
             //             cleanup trap restores every state (re-creates a
             //             deleted entry at the original size, resizes back a
             //             present one — no-op when already original)
-            // Previous golden: 7e19fe173170bd5782bede40a6c48698deb9debdda36e68e9a17fadb946ffb6f
-            "dcb3ebd659a55edf63a2651c55b6ac9b2f0926011b7627934cf318e7ce0cdd2f",
+            // Previous golden: dcb3ebd659a55edf63a2651c55b6ac9b2f0926011b7627934cf318e7ce0cdd2f (T33 F-H)
+            // T49 PLACEHOLDER — local toolchain absent (CI = sole compiler);
+            // first CI run reveals the real hash in the assertion diff,
+            // then this line gets the actual value in the same push series.
+            "000000000000000000000000000000000000000000000000000000000000t49",
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // T49: inbuilt decompressor — template must wire the bundled helper
+    // and contain ZERO recovery-side decompressor machinery.
+    // ──────────────────────────────────────────────────────────────
+    #[test]
+    fn test_t49_bundled_decompressor_wiring() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: format!("{:064x}", 1u32),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: format!("{:064x}", 2u32),
+        }];
+        for (cid, alg) in [(1u16, "gzip"), (2u16, "bzip2"), (3u16, "xz"), (5u16, "lz4"), (6u16, "zstd")] {
+            let s = build_update_script(
+                1,
+                cid,
+                alg,
+                &meta,
+                33554432,
+                "crosshatch",
+                false,
+                T49_HELPER_SIZE,
+                T49_HELPER_SHA,
+                T49_HELPER_ASSET,
+            );
+            // Bundled helper is extracted, verified, self-tested, and wired.
+            assert!(s.contains("otaku-decomp"), "cid {}: helper entry name missing", cid);
+            assert!(s.contains("--selftest"), "cid {}: selftest call missing", cid);
+            assert!(s.contains("--unzip-entry"), "cid {}: bundled unzip mode missing", cid);
+            assert!(s.contains(&format!("$HELPER -a {}", alg)), "cid {}: helper pipe missing", cid);
+            assert!(s.contains("HELPER_SHA256="), "cid {}: baked integrity hash missing", cid);
+            assert!(s.contains("HELPER_SIZE="), "cid {}: baked size missing", cid);
+            assert!(s.contains("tail -c +$HELPER_TRIM"), "cid {}: bulk byte-trim extraction missing", cid);
+            // Recovery-side decompressor machinery must be GONE.
+            assert!(!s.contains("check_decompressor"), "cid {}: legacy availability fn leaked", cid);
+            assert!(!s.contains("try_zip_listing"), "cid {}: legacy zip listing leaked", cid);
+            assert!(!s.contains("unzip -l"), "cid {}: legacy unzip -l leaked", cid);
+            assert!(!s.contains("busybox --list"), "cid {}: legacy busybox probe leaked", cid);
+            assert!(!s.contains("toybox unzip"), "cid {}: legacy toybox unzip leaked", cid);
+            assert!(!s.contains("-T0 -dc"), "cid {}: legacy recovery MT branch leaked", cid);
+            assert!(!s.contains("trying fallback decompressors"), "cid {}: legacy retry block leaked", cid);
+        }
+        // ALG_NONE stays plain cat — but the helper is still extracted and
+        // verified in Step 0 (every T49 zip carries it, even none-bundles).
+        let s0 = build_update_script(
+            1,
+            0,
+            "none",
+            &meta,
+            33554432,
+            "",
+            false,
+            T49_HELPER_SIZE,
+            T49_HELPER_SHA,
+            T49_HELPER_ASSET,
+        );
+        assert!(s0.contains("DECOMP_PIPE=\"cat\""));
+        assert!(s0.contains("--selftest"));
+        assert!(s0.contains("HELPER_SHA256="));
     }
 
 
@@ -427,7 +524,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(script.starts_with("#!/sbin/sh"));
         assert!(script.contains("PART_0_NAME=\"boot\""));
         assert!(script.contains("PART_0_HASH=\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\""));
@@ -448,7 +547,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", true);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", true,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(script.contains("Verification skipped"));
         // sha256sum appears in pre-flash compressed hash verification even when
         // post-flash verify is skipped — that's expected behavior.
@@ -465,7 +566,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "crosshatch", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "crosshatch", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(script.contains("TARGET_DEVICE=\"crosshatch\""));
         assert!(script.contains("DEVICE_MATCH"));
     }
@@ -534,7 +637,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // The broken pattern was:
         //   lptools resize "$rname" "$rsize" >/dev/null 2>&1 || \
@@ -570,7 +675,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Assert: broken regex pattern is NOT present.
         let broken_patterns = [
@@ -611,7 +718,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Assert: idempotent check is present.
         assert!(
@@ -647,7 +756,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Bug #9: slot-suffixed path check in cleanup "already mapped" guard.
         // The cleanup trap must check /dev/mapper/$pname_lp in addition to
@@ -715,7 +826,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Assert: explicit RC capture variables are present.
         // RESIZE_RC and CREATE_RC are inline in the resize loop.
@@ -747,7 +860,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Dead interactivity must stay dead.
         assert!(
@@ -791,7 +906,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Assert: vendor partition props are the primary source.
         assert!(
@@ -830,7 +947,9 @@ use super::*;
         }];
         for skip in [false, true] {
             for device in ["", "alioth"] {
-                let script = build_update_script(1, 1, "gzip", &meta, 0, device, skip);
+                let script = build_update_script(1, 1, "gzip", &meta, 0, device, skip,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
                 assert!(
                     script.trim_end().ends_with("exit 0"),
                     "Script does not end with exit 0 (skip={}, device='{}')",
@@ -873,7 +992,9 @@ use super::*;
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // AOSP standard names
         for required in ["system", "vendor", "product", "system_ext", "odm", "odm_dlkm", "vendor_dlkm"] {
@@ -936,7 +1057,9 @@ use super::*;
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Pre-flash verify step is present
         assert!(
@@ -987,7 +1110,9 @@ use super::*;
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Merged step header
         assert!(
@@ -1024,7 +1149,9 @@ use super::*;
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
         // Without device check
-        let script_no_dev = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script_no_dev = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Step 0 = open payload — header line format: "[Step 0/8]"
         assert!(script_no_dev.contains("Step 0/"), "Step 0 (open payload) missing");
@@ -1051,7 +1178,9 @@ use super::*;
         );
 
         // With device check, all subsequent steps shift +1
-        let script_with_dev = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false);
+        let script_with_dev = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // Step 3 = device check (with device) — header format: "Step {device_check_step}:" (note colon)
         assert!(
             script_with_dev.contains("Step 3:") || script_with_dev.contains("Step 3 "),
@@ -1082,7 +1211,9 @@ use super::*;
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(script.contains("empty_offset"), "Bug NEW-A: empty_offset guard missing");
         assert!(script.contains("empty_comp_size"), "Bug NEW-A: empty_comp_size guard missing");
     }
@@ -1097,7 +1228,9 @@ use super::*;
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // The fix uses ${VUNC:-0} — check for the literal string in output
         assert!(script.contains("VUNC"), "Bug NEW-B: VUNC reference missing");
     }
@@ -1112,7 +1245,9 @@ use super::*;
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(script.contains("HASH_SHORT"), "Bug NEW-C: HASH_SHORT variable missing");
         assert!(script.contains("printf"), "Bug NEW-C: printf fix missing");
     }
@@ -1129,7 +1264,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // The flash step guard checks for empty POFFSET, PCSIZE, PSIZE
         assert!(
             script.contains("-z \"$POFFSET\"") || script.contains("-z \"$POFFSET\""),
@@ -1163,7 +1300,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // PCOMP_HASH eval is present
         assert!(
             script.contains("PCOMP_HASH"),
@@ -1203,7 +1342,9 @@ use super::*;
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // ZIP_DATA_OFFSET variable is computed
         assert!(
@@ -1265,7 +1406,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // dd_if_bundle helper function is defined
         assert!(
@@ -1307,7 +1450,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // GZIP_ERR temp file is used (not 2>/dev/null on decompressor)
         assert!(
             script.contains("GZIP_ERR"),
@@ -1355,7 +1500,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // ── Fix 1: lptools resize is PRIMARY ──
         // The resize step must try `lptools resize` FIRST, with remove+create
@@ -1435,7 +1582,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // Cleanup trap must do unmap BEFORE resize (BlassGo pattern)
         // The old code just did resize; the new code does unmap → resize → map.
@@ -1469,7 +1618,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // 1. unmount_partition function is defined (split from unmount_and_unmap)
         assert!(
@@ -1572,7 +1723,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // 1. /dev/block/platform/bootdevice/by-name/ path resolution
         assert!(
@@ -1624,7 +1777,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // 1. Auto-map comment present (references Format Data / Unmap_Super_Devices)
         assert!(
@@ -1690,7 +1845,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 5, "lz4", &meta, 0, "", false);
+        let script = build_update_script(1, 5, "lz4", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // 1. COMPRESS_ID=5 in the script
         assert!(
@@ -1756,7 +1913,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 5, "lz4", &meta, 0, "", false);
+        let script = build_update_script(1, 5, "lz4", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // The lz4-specific override must be present in the generated script
         assert!(
             script.contains(r#"if [ "$COMPRESS_ID" = "5" ]; then"#),
@@ -1786,7 +1945,9 @@ use super::*;
         }];
 
         // gzip — NO MT upgrade (pigz removed, never available on OrangeFox)
-        let gzip_script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let gzip_script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // pigz should NOT appear as an executable command (in a case branch, fallback, or pipe)
         // It MAY appear in comments (e.g. "pigz REMOVED") — that's fine.
         assert!(
@@ -1800,7 +1961,9 @@ use super::*;
         );
 
         // bzip2 — NO MT upgrade (pbzip2 removed, never available on OrangeFox)
-        let bzip2_script = build_update_script(1, 2, "bzip2", &meta, 0, "", false);
+        let bzip2_script = build_update_script(1, 2, "bzip2", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // pbzip2 should NOT appear as an executable command
         // It MAY appear in comments (e.g. "pbzip2 REMOVED") — that's fine.
         assert!(
@@ -1813,7 +1976,9 @@ use super::*;
         );
 
         // xz → xz -T0
-        let xz_script = build_update_script(1, 3, "xz", &meta, 0, "", false);
+        let xz_script = build_update_script(1, 3, "xz", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             xz_script.contains("3) # xz → try xz -T0"),
             "REGRESSION: xz MT case label missing"
@@ -1828,7 +1993,9 @@ use super::*;
         );
 
         // lz4 → lz4 -T0
-        let lz4_script = build_update_script(1, 5, "lz4", &meta, 0, "", false);
+        let lz4_script = build_update_script(1, 5, "lz4", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             lz4_script.contains("5) # lz4"),
             "REGRESSION: lz4 MT case label missing"
@@ -1845,7 +2012,9 @@ use super::*;
         );
 
         // zstd → zstd -T0
-        let zstd_script = build_update_script(1, 6, "zstd", &meta, 0, "", false);
+        let zstd_script = build_update_script(1, 6, "zstd", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         assert!(
             zstd_script.contains("6) # zstd"),
             "REGRESSION: zstd MT case label missing"
@@ -1880,7 +2049,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false);
+        let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
         // The MT upgrade block should be guarded by NPROC > 1
         assert!(
             script.contains("if [ \"$NPROC\" -gt 1 ]; then"),
@@ -1920,7 +2091,9 @@ use super::*;
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
         }];
-        let script = build_update_script(1, 3, "xz", &meta, 0, "", false);
+        let script = build_update_script(1, 3, "xz", &meta, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
+        );
 
         // verify_trim() must use single braces: `verify_trim() {` not `verify_trim() {{`
         assert!(

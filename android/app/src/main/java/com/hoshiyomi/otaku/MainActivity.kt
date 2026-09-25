@@ -3039,6 +3039,7 @@ class MainActivity : AppCompatActivity() {
                         outputPath = outPath,
                         romName = romName,
                         maker = maker,
+                        helperApkPath = applicationInfo.sourceDir,
                         onProgress = { progress ->
                             // Cancel heartbeat — real progress is arriving from file polling
                             heartbeatJob.cancel()

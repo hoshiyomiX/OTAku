@@ -17,7 +17,7 @@ const SCRIPT_VERSION: &str = "Custom Payload Maker";
 ///
 /// This is a TWRP/OrangeFox-compatible flasher that:
 /// 1. Opens payload (direct ZIP read or fallback extract to /tmp)
-/// 2. Checks decompressor availability
+/// 2. Extracts, hash-verifies and self-tests the bundled decompressor (otaku-decomp)
 /// 3. Validates bundle integrity (DDBU magic, version, compress, partition count)
 /// 4. Checks device compatibility (if device specified)
 /// 5. Detects A/B slot
@@ -31,6 +31,11 @@ pub(super) fn build_update_script(
     total_unc_size: u64,
     device: &str,
     skip_verify: bool,
+    // T49: bundled decompressor facts baked into the script so it can
+    // verify the helper it pulls out of the ZIP (size + SHA-256 + origin).
+    helper_size: u64,
+    helper_sha256: &str,
+    helper_asset: &str,
 ) -> String {
     let decomp_cmd = decomp_cmd_for_id(compress_id);
 
@@ -470,6 +475,10 @@ TOTAL_FLASH_SIZE={total_unc_size}   # Total uncompressed size of all partitions 
 {part_vars}NUM_PARTS={num_parts}
 COMPRESS_ID={compress_id}
 SKIP_VERIFY={skip_verify_flag}   # F2: 1 = no post-flash hash; dd failures must then prove themselves
+# T49: bundled decompressor facts (entry #1 of this ZIP, verified in Step 0)
+HELPER_SIZE={helper_size}
+HELPER_SHA256="{helper_sha256}"
+HELPER_ASSET="{helper_asset}"
 
 ui_print "======================================"
 ui_print "  OTAku — {script_version}"
@@ -483,9 +492,12 @@ ui_print "======================================"
         num_parts = num_parts,
         compress_id = compress_id,
         skip_verify_flag = if skip_verify { 1 } else { 0 },
+        helper_size = helper_size,
+        helper_sha256 = helper_sha256,
+        helper_asset = helper_asset,
     ));
 
-    // ── Step 0: Open payload (direct ZIP reading or fallback extract) ──
+    // ── Step 0: Open payload + extract/verify the bundled decompressor ──
     // BUG FIX: Previously, the entire otaku.bin (potentially 4+ GB) was
     // extracted to /tmp (tmpfs, RAM-backed). On devices with limited RAM
     // (e.g. Infinix-X6871 with 8 GB RAM, /tmp ~2-4 GB), this fails with
@@ -500,7 +512,7 @@ ui_print "======================================"
     // size. The old extract-to-/tmp path is retained as a fallback for edge
     // cases (e.g. ZIP on a FUSE filesystem where dd skip is unreliable).
     script.push_str(&format!(
-        r#"# ── Step {extract_step}/{total_steps}: Open payload ──────────────────
+        r#"# ── Step {extract_step}/{total_steps}: Open payload + bundled decompressor ──────────────────
 ui_print "> Opening payload..."
 
 if [ ! -f "$ZIPFILE" ]; then
@@ -509,169 +521,116 @@ if [ ! -f "$ZIPFILE" ]; then
     exit 1
 fi
 
-# ── Primary path: Compute ZIP_DATA_OFFSET from local file header ──
-# The ZIP format stores each file entry as:
-#   [Local file header: 30 bytes fixed + filename + extra field]
-#   [File data]
-# We parse the first local file header to find where otaku.bin data starts.
-# Since otaku.bin is always the first entry in our ZIPs, it starts at byte 0.
-#
-# Local file header layout (little-endian):
-#   Offset 0:  Signature (4B) = 0x04034b50
-#   Offset 26: Filename length (2B)
-#   Offset 28: Extra field length (2B)
-#   Data starts at: 30 + filename_length + extra_field_length
-#
-# With ZIP64 (large_file=true), the extra field contains:
-#   ZIP64 extended info: header_id(2B) + data_size(2B) + orig_size(8B) + comp_size(8B)
-#   = 20 bytes extra (typical for our ZIPs with 9-byte filename "otaku.bin")
-#   Total offset = 30 + 9 + 20 = 59 bytes
+# ── T49: extract the BUNDLED decompressor (otaku-decomp) ──────────
+# ZIP layout is deterministic (built by the OTAku app):
+#   entry 1: otaku-decomp   (stored, unix 755)  <- walked from byte 0
+#   entry 2: otaku.bin      (stored, ZIP64-able)
+#   entry 3+: flash_info.txt / META-INF/...     (never parsed here)
+# We walk the first TWO local file headers — zero reliance on any
+# recovery-provided unzip or decompressor binary.
+HELPER="/tmp/otaku-decomp"
 DIRECT_READ_OK=0
+BUNDLE=""
+ZIP_DATA_OFFSET=0
+BUNDLE_SIZE=0
+
 ZIP_LFH_SIG=$(od -A n -t x1 -N 4 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
-if [ "$ZIP_LFH_SIG" = "504b0304" ]; then
-    FNAME_LEN=$(od -A n -t u2 -j 26 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
-    EXTRA_LEN=$(od -A n -t u2 -j 28 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
-    if [ -n "$FNAME_LEN" ] && [ -n "$EXTRA_LEN" ]; then
-        ZIP_DATA_OFFSET=$(( 30 + FNAME_LEN + EXTRA_LEN ))
-        # Verify: read the filename and confirm it's "otaku.bin"
-        FNAME_READ=$(dd if="$ZIPFILE" bs=1 skip=30 count=$FNAME_LEN 2>/dev/null | tr -d '\0')
-        if [ "$FNAME_READ" = "otaku.bin" ]; then
+if [ "$ZIP_LFH_SIG" != "504b0304" ]; then
+    ui_print "✗ Error: not a ZIP archive (no local file header signature)"
+    exit 1
+fi
+FNAME1_LEN=$(od -A n -t u2 -j 26 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
+EXTRA1_LEN=$(od -A n -t u2 -j 28 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
+if [ -z "$FNAME1_LEN" ] || [ -z "$EXTRA1_LEN" ]; then
+    ui_print "✗ Error: malformed local file header (entry 1)"
+    exit 1
+fi
+HELPER_OFF=$(( 30 + FNAME1_LEN + EXTRA1_LEN ))
+FNAME1=$(dd if="$ZIPFILE" bs=1 skip=30 count=$FNAME1_LEN 2>/dev/null | tr -d '\0')
+if [ "$FNAME1" != "otaku-decomp" ]; then
+    ui_print "✗ Error: first ZIP entry is '$FNAME1', expected 'otaku-decomp'"
+    ui_print "  This ZIP was built by an OTAku version without the bundled"
+    ui_print "  decompressor (T49). Rebuild the bundle with the current app."
+    exit 1
+fi
+
+# Bulk-extract the helper: 4096-aligned dd + tail/head byte-trim.
+# (bs=1 for a ~1-2 MB binary would take minutes on slow storage.)
+HELPER_SKIP_BLK=$(( HELPER_OFF / 4096 ))
+HELPER_TRIM=$(( (HELPER_OFF % 4096) + 1 ))
+HELPER_NBLK=$(( (HELPER_SIZE + (HELPER_OFF % 4096) + 4095) / 4096 ))
+dd if="$ZIPFILE" bs=4096 skip=$HELPER_SKIP_BLK count=$HELPER_NBLK 2>/dev/null \
+    | tail -c +$HELPER_TRIM | head -c "$HELPER_SIZE" > "$HELPER" 2>/dev/null
+HELPER_GOT=$(wc -c < "$HELPER" 2>/dev/null | tr -d ' ')
+if [ "$HELPER_GOT" != "$HELPER_SIZE" ]; then
+    ui_print "✗ Error: bundled decompressor truncated ($HELPER_GOT of $HELPER_SIZE bytes)"
+    exit 1
+fi
+HELPER_SUM=$(sha256sum "$HELPER" 2>/dev/null | awk '{{print $1}}')
+if [ "$HELPER_SUM" != "$HELPER_SHA256" ]; then
+    ui_print "✗ Error: bundled decompressor failed integrity check"
+    ui_print "  Expected SHA-256: $HELPER_SHA256"
+    ui_print "  Actual   SHA-256: $HELPER_SUM"
+    ui_print "  The ZIP is corrupt — re-transfer it and flash again."
+    exit 1
+fi
+chmod 755 "$HELPER" 2>/dev/null
+if ! "$HELPER" --selftest >/dev/null 2>&1; then
+    ui_print "✗ Error: bundled decompressor failed its self-test on this recovery"
+    ui_print "  Helper: $HELPER_ASSET (from the APK asset)"
+    ui_print "  Causes: recovery ABI mismatch, or /tmp mounted noexec."
+    ui_print "  (T49 design: no recovery-side decompressor fallback.)"
+    exit 1
+fi
+ui_print "  ✓ Bundled decompressor OK ($(( HELPER_SIZE / 1024 )) KB, self-tested)"
+
+# ── Walk entry 2 (otaku.bin) for direct-read mode ──
+H2=$(( HELPER_OFF + HELPER_SIZE ))
+H2_SIG=$(od -A n -t x1 -j $H2 -N 4 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
+if [ "$H2_SIG" = "504b0304" ]; then
+    FNAME2_LEN=$(od -A n -t u2 -j $(( H2 + 26 )) -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
+    EXTRA2_LEN=$(od -A n -t u2 -j $(( H2 + 28 )) -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$FNAME2_LEN" ] && [ -n "$EXTRA2_LEN" ]; then
+        FNAME2=$(dd if="$ZIPFILE" bs=1 skip=$(( H2 + 30 )) count=$FNAME2_LEN 2>/dev/null | tr -d '\0')
+        if [ "$FNAME2" = "otaku.bin" ]; then
+            ZIP_DATA_OFFSET=$(( H2 + 30 + FNAME2_LEN + EXTRA2_LEN ))
             DIRECT_READ_OK=1
         else
-            ui_print "  Note: First ZIP entry is '$FNAME_READ', not 'otaku.bin'"
+            ui_print "  Note: second ZIP entry is '$FNAME2', not 'otaku.bin'"
         fi
     fi
-fi
-
-# Query ZIP central directory for expected otaku.bin size (used for validation).
-EXPECTED_BUNDLE_SIZE=0
-ZIP_LIST_OK=0
-ZIP_LIST_NAME_PATTERN='otaku[.]bin$'
-
-try_zip_listing() {{
-    local unzip_cmd="$1"
-    local listing
-    listing=$($unzip_cmd -l "$ZIPFILE" 2>/dev/null | tr -d '\r' | awk '{{print $1, $NF}}' | grep "$ZIP_LIST_NAME_PATTERN")
-    [ -z "$listing" ] && return 1
-    EXPECTED_BUNDLE_SIZE=$(echo "$listing" | awk '{{print $1}}' | tr -d ' ')
-    case "$EXPECTED_BUNDLE_SIZE" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    [ "$EXPECTED_BUNDLE_SIZE" -gt 0 ] 2>/dev/null || return 1
-    return 0
-}}
-
-if which unzip >/dev/null 2>&1; then
-    try_zip_listing "unzip" && ZIP_LIST_OK=1
-fi
-if [ "$ZIP_LIST_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
-    try_zip_listing "busybox unzip" && ZIP_LIST_OK=1
-fi
-if [ "$ZIP_LIST_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
-    try_zip_listing "toybox unzip" && ZIP_LIST_OK=1
 fi
 
 if [ "$DIRECT_READ_OK" = "1" ]; then
-    # ── Primary: Direct ZIP reading ──
+    # Primary: read otaku.bin data straight from the ZIP via dd skip —
+    # zero /tmp usage regardless of bundle size (4 GB+ safe).
     BUNDLE="$ZIPFILE"
-    ZIP_FILE_SIZE=$(wc -c < "$ZIPFILE" | tr -d ' ')
-
+    ZIP_FILE_SIZE=$(wc -c < "$ZIPFILE" 2>/dev/null | tr -d ' ')
+    if [ -z "$ZIP_FILE_SIZE" ]; then
+        ZIP_FILE_SIZE=0
+    fi
+    # Without a ZIP listing this over-counts (trailing entries + central
+    # directory) — informational only; per-partition sizes remain the
+    # authoritative flash gate (T25 F2 policy).
+    BUNDLE_SIZE=$(( ZIP_FILE_SIZE - ZIP_DATA_OFFSET ))
     ui_print "  Mode: Direct ZIP read (no /tmp extraction needed)"
     ui_print "  ZIP data offset: $ZIP_DATA_OFFSET bytes"
-
-    # ── BUNDLE_SIZE computation ──
-    # ZIP_FILE_SIZE - ZIP_DATA_OFFSET gives the size of ALL bytes from the
-    # otaku.bin data start to the END of the ZIP file — but the ZIP file also
-    # contains the central directory and EOCD record AFTER otaku.bin's data.
-    # These trailing bytes inflate the computed size, causing a mismatch against
-    # the actual otaku.bin size reported by unzip -l.
-    # When unzip -l is available (ZIP_LIST_OK=1), use EXPECTED_BUNDLE_SIZE
-    # directly — it gives the exact otaku.bin uncompressed size, which equals
-    # the stored (CompressionMethod=Stored) data size inside the ZIP.
-    # When unzip -l is unavailable, use ZIP_FILE_SIZE - ZIP_DATA_OFFSET as a
-    # best-effort estimate (slightly over-counts, but unavoidable without listing).
-    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
-        BUNDLE_SIZE=$EXPECTED_BUNDLE_SIZE
-        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB ✓ (verified via ZIP listing)"
-    else
-        BUNDLE_SIZE=$(( ZIP_FILE_SIZE - ZIP_DATA_OFFSET ))
-        ui_print "  Size: $(( BUNDLE_SIZE / 1048576 )) MB (listing unavailable — size includes ZIP trailer)"
-    fi
+    ui_print "  Size: ~$(( BUNDLE_SIZE / 1048576 )) MB (incl. ZIP trailer)"
     ui_print "  ✓ Direct read ready"
 else
-    # ── Fallback: Extract otaku.bin to /tmp ──
-    # This path is used when:
-    #   - ZIP local file header parsing failed (unusual ZIP structure)
-    #   - First ZIP entry is not otaku.bin
-    #   - od command not available
-    # WARNING: This requires enough /tmp space for the entire otaku.bin!
-    ui_print "  Note: Direct ZIP read unavailable — falling back to /tmp extraction"
-    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
-        ui_print "  Size: $(( EXPECTED_BUNDLE_SIZE / 1048576 )) MB"
-    else
-        ui_print "  Note: cannot query ZIP listing — size check will be skipped."
-    fi
-
-    # Pre-extraction /tmp space check (if df available)
-    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && command -v df >/dev/null 2>&1; then
-        TMP_FREE_KB=$(df /tmp 2>/dev/null | tail -1 | awk '{{print $4}}')
-        NEEDED_KB=$(( (EXPECTED_BUNDLE_SIZE + 1023) / 1024 ))
-        if [ -n "$TMP_FREE_KB" ] && [ "$TMP_FREE_KB" -lt "$NEEDED_KB" ] 2>/dev/null; then
-            ui_print "✗ Error: Not enough /tmp space for extraction"
-            ui_print "  Needed: $(( NEEDED_KB / 1024 )) MB"
-            ui_print "  Available: $(( TMP_FREE_KB / 1024 )) MB"
-            ui_print "  Hint: Use a smaller bundle or free up /tmp space"
-            exit 1
-        fi
-    fi
-
+    # Fallback: extract otaku.bin via the BUNDLED decompressor's own
+    # --unzip-entry mode (CRC-checked inside the helper) — replaces the
+    # old unzip/busybox-unzip/toybox-unzip recovery chain entirely.
+    ui_print "  Note: Direct ZIP read unavailable — extracting otaku.bin to /tmp"
     BUNDLE="/tmp/otaku.bin"
     rm -f "$BUNDLE"
-    EXTRACT_OK=0
-    if which unzip >/dev/null 2>&1; then
-        unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
-    fi
-    if [ "$EXTRACT_OK" = "0" ] && busybox --list 2>/dev/null | grep -q "^unzip$"; then
-        busybox unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
-    fi
-    if [ "$EXTRACT_OK" = "0" ] && toybox unzip --help >/dev/null 2>&1; then
-        toybox unzip -o -j "$ZIPFILE" otaku.bin -d /tmp/ >/dev/null 2>&1 && EXTRACT_OK=1
-    fi
-
-    if [ "$EXTRACT_OK" = "0" ] || [ ! -f "$BUNDLE" ]; then
-        ui_print "✗ Error: Failed to extract otaku.bin"
+    if ! "$HELPER" --unzip-entry "$ZIPFILE" otaku.bin "$BUNDLE" >/dev/null 2>&1; then
+        ui_print "✗ Error: Failed to extract otaku.bin (bundled unzip)"
         ui_print "  Hint: Check /tmp free space or ZIP integrity"
-        if command -v df >/dev/null 2>&1; then
-            df -h /tmp 2>/dev/null | tail -1 | awk '{{print "    total="$2" used="$3" free="$4}}' 2>/dev/null
-        fi
         exit 1
     fi
-
-    BUNDLE_EXTRACT_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
-    BUNDLE_SIZE=$BUNDLE_EXTRACT_SIZE
-
-    # Post-extract size verification
-    if [ "$ZIP_LIST_OK" = "1" ] && [ -n "$EXPECTED_BUNDLE_SIZE" ] && [ "$EXPECTED_BUNDLE_SIZE" != "0" ]; then
-        if [ "$BUNDLE_EXTRACT_SIZE" != "$EXPECTED_BUNDLE_SIZE" ]; then
-            ui_print "✗ Error: otaku.bin size mismatch"
-            ui_print "  Expected: $EXPECTED_BUNDLE_SIZE bytes"
-            ui_print "  Actual:   $BUNDLE_EXTRACT_SIZE bytes"
-            ui_print "  Hint: tmpfs full or ZIP CRC error"
-            if command -v df >/dev/null 2>&1; then
-                TMP_FREE=$(df /tmp 2>/dev/null | tail -1 | awk '{{print $4}}')
-                if [ -n "$TMP_FREE" ]; then
-                    ui_print "    Free: $TMP_FREE (1K-blocks)"
-                fi
-            else
-                ui_print "    (df not available in this recovery)"
-            fi
-            rm -f "$BUNDLE"
-            exit 1
-        fi
-        ui_print "  ✓ Size verified"
-    fi
-
-    ui_print "  ✓ Extracted ($(( BUNDLE_EXTRACT_SIZE / 1048576 )) MB)"
+    BUNDLE_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
+    ui_print "  ✓ Extracted ($(( BUNDLE_SIZE / 1048576 )) MB)"
 fi
 "#,
         extract_step = extract_step,
@@ -813,31 +772,6 @@ ui_print "  ✓ All $NUM_PARTS partition(s) verified"
         r#"# ── Step {integrity_step}/{total_steps}: Bundle integrity + decompressor ──────────
 ui_print "> Checking bundle integrity..."
 
-# ── Decompressor availability ──
-DECOMP_CMD=""
-check_decompressor() {{
-    local cmd="$1"
-    if which "$cmd" >/dev/null 2>&1; then
-        DECOMP_CMD="$cmd"
-        return 0
-    fi
-    if busybox --list 2>/dev/null | grep -q "^${{cmd}}$"; then
-        DECOMP_CMD="busybox $cmd"
-        return 0
-    fi
-    if toybox --help >/dev/null 2>&1 && toybox "$cmd" --help >/dev/null 2>&1; then
-        DECOMP_CMD="toybox $cmd"
-        return 0
-    fi
-    for p in /system/bin/$cmd /vendor/bin/$cmd /sbin/$cmd; do
-        if [ -x "$p" ]; then
-            DECOMP_CMD="$p"
-            return 0
-        fi
-    done
-    return 1
-}}
-
 # F3 fix (T25): gate the compression id BEFORE any decompressor wiring.
 #   id 4 = legacy brotli — OTAku can no longer PRODUCE such bundles and
 #   recovery-side brotli was removed; the old path wired "cat -dc"
@@ -863,76 +797,20 @@ esac
 if [ "$COMPRESS_ID" = "0" ]; then
     # ALG_NONE: no decompression needed — use plain cat (no -d flag).
     # BUG FIX (NEW-F): Previously used "$DECOMP_CMD -d" which expands
-    # to "cat -d" — neither GNU coreutils cat, busybox cat, nor toybox
-    # cat supports -d, causing the flash to fail with "invalid option".
-    DECOMP_CMD="cat"
+    # to "cat -d" — no cat implementation (GNU/busybox/toybox) supports
+    # -d, causing "invalid option" failures.
     DECOMP_PIPE="cat"
 else
-    if ! check_decompressor "{decomp_cmd}"; then
-        ui_print "! ABORT: {decomp_cmd} not found."
-        ui_print "! Available tools:"
-        which gzip bzip2 xz lz4 zstd zstdcat 2>/dev/null || echo "  (none found)"
-        busybox --list 2>/dev/null | head -5
-        ui_print "! Rebuild bundle with an available compressor."
-        ui_print "! Recommended: --compress lz4 (fastest) or --compress gzip"
-        exit 1
-    fi
-    DECOMP_PIPE="$DECOMP_CMD -d"
-    # BUG FIX: lz4 requires explicit -c flag for stdout output when piped.
-    # gzip/bzip2/xz auto-detect pipe and write to stdout, but lz4 -d
-    # without -c may attempt to write to a file (especially older versions
-    # or busybox lz4). The fallback chain already uses "lz4 -dc" as the
-    # first fallback, so the primary pipe should match.
-    if [ "$COMPRESS_ID" = "5" ]; then
-        DECOMP_PIPE="$DECOMP_CMD -dc"
-    fi
-    # ZSTD also requires -c for stdout output when piped (like lz4).
-    # zstd -d without -c writes to a file with .zst removed by default.
-    if [ "$COMPRESS_ID" = "6" ]; then
-        DECOMP_PIPE="$DECOMP_CMD -dc"
-    fi
-
-    # ── Multi-threaded decompressor upgrade ──
-    # OrangeFox recovery availability (default build, no optional flags):
-    #   gzip/bzip2/xz: ✅ via toybox (single-threaded only)
-    #   nproc:         ✅ via toybox
-    #   pigz/pbzip2:   ❌ REMOVED — no OrangeFox build flag exists; never available
-    #   brotli:        ❌ REMOVED — no OrangeFox build flag exists; never available
-    #   xz -T0:        ⚠️  Only if FOX_USE_XZ_UTILS=1 enabled by device maintainer
-    #   lz4:           ⚠️  Only if FOX_USE_LZ4_BINARY=1 enabled by device maintainer
-    #   zstd:          ⚠️  Only if FOX_USE_ZSTD_BINARY=1 enabled by device maintainer
-    #
-    # pigz/pbzip2/brotli MT upgrade branches removed — they were dead code
-    # (command -v always fails on OrangeFox). Removing them shrinks the
-    # generated script and eliminates misleading "try pigz" messages.
-    NPROC=$(nproc 2>/dev/null || echo 1)
-    if [ "$NPROC" -gt 1 ]; then
-        case "$COMPRESS_ID" in
-            3) # xz → try xz -T0 (multi-threaded xz, liblzma 5.2+)
-                # xz -T0 uses all available threads; -T1 = single-threaded (default)
-                if xz -T0 --help >/dev/null 2>&1; then
-                    DECOMP_PIPE="xz -T0 -dc"
-                    ui_print "  ✓ Multi-threaded: xz -T0 ($NPROC cores)"
-                fi
-                ;;
-            5) # lz4 → lz4 is already extremely fast single-threaded,
-                # but lz4 -T0 can use multiple threads for marginal gain.
-                # Only enable if the lz4 binary supports -T flag.
-                if lz4 -T0 --help >/dev/null 2>&1; then
-                    DECOMP_PIPE="lz4 -dc -T0"
-                    ui_print "  ✓ Multi-threaded: lz4 -T0 ($NPROC cores)"
-                fi
-                ;;
-            6) # zstd → zstd -T0 uses all available threads.
-                # zstd decompression is already fast (~400 MB/s single-thread),
-                # but multi-threaded decompress can help on very large partitions.
-                if zstd -T0 --help >/dev/null 2>&1; then
-                    DECOMP_PIPE="zstd -dc -T0"
-                    ui_print "  ✓ Multi-threaded: zstd -T0 ($NPROC cores)"
-                fi
-                ;;
-        esac
-    fi
+    # T49: the flashable ZIP bundles its own universal decompressor —
+    # otaku-decomp, extracted + hash-verified + self-tested back in
+    # Step 0. Zero reliance on recovery-provided gzip/bzip2/xz/lz4/zstd
+    # binaries: the old which/busybox/toybox chains are gone BY DESIGN.
+    # Recovery tool availability varies wildly (OrangeFox ships lz4/zstd
+    # only behind device-maintainer flags) — a missing binary mid-flash
+    # is exactly the "not necessarily supported" failure this kills.
+    # The helper streams single-frame input (see decomp.rs threading
+    # note for the zstdmt capability compiled in).
+    DECOMP_PIPE="$HELPER -a {decomp_cmd}"
 fi
 ui_print "  ✓ Decompressor: $DECOMP_PIPE"
 
@@ -1827,16 +1705,10 @@ ui_print "  ✓ Free space check complete"
     // BUG FIX (NEW-G): Generate algorithm-specific fallback decompressors instead
     // of hardcoding gzip-only fallbacks. Previously, all compression types used
     // gzip fallbacks, which guaranteed failure for bzip2/xz/brotli partitions.
-    let fallback_decompressors = match compress_id {
-        0 => "",  // ALG_NONE — no decompression, no fallback needed
-        1 => r#""gzip -dc" "gunzip -c" "zcat" "busybox gzip -dc""#,
-        2 => r#""bzip2 -dc" "bzcat" "busybox bzip2 -dc""#,
-        3 => r#""xz -T0 -dc" "xz -dc" "xzcat" "busybox xz -dc""#,
-        4 => "",  // brotli removed — no fallback available
-        5 => r#""lz4 -dc" "lz4 -d" "busybox lz4 -dc""#,
-        6 => r#""zstd -dc" "zstdcat" "busybox zstd -dc""#,
-        _ => "",
-    };
+    // T49: no per-algorithm fallback decompressor list anymore — the
+    // bundled otaku-decomp helper is the ONLY decompressor (helper-only
+    // design, user decision). A mid-flash decompression failure aborts
+    // with a clear diagnostic instead of retrying recovery binaries.
     script.push_str(&format!(
         r#"# ── Step {flash_step_offset}+{num_parts_minus_1}/{total_steps}: Flash each partition ────────────────────
 for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
@@ -2229,72 +2101,30 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             # line per call; embedded newlines broke the recovery log layout.
             GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ' ')
             rm -f "$GZIP_ERR"
-            # Use "! WARNING" (not "! ABORT") because we'll try fallback decompressors
-            # if the compressed hash was verified OK. Only say ABORT when all fallbacks
-            # fail (see bottom of this block).
+            # T49: straight ABORT — the bundled helper is the only
+            # decompressor by design; there is no fallback chain to try.
             ui_print "✗ Error: Decompression failed for $PNAME"
             ui_print "  Decompressor: $DECOMP_PIPE (status=$DECOMP_STATUS)"
             ui_print "  Details: $GZIP_ERR_MSG"
             ui_print "  Bundle: $BUNDLE_SIZE bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
 
-            # If compressed-data hash was verified above (PCOMP_HASH non-empty),
-            # the compressed data IS intact — the issue is with the decompressor
-            # itself (e.g., busybox gzip quirk). Try fallback decompressors.
+            # T49: helper-only design — no recovery-side fallback decompressor
+            # exists anymore. If the compressed hash was verified OK earlier,
+            # the bytes are intact and the bundled helper rejected them
+            # (corrupt section or a helper bug) — either way, stop here.
             if [ -n "$PCOMP_HASH" ]; then
-                ui_print "  → Hash OK, trying fallback decompressors..."
-                FALLBACK_OK=0
-                for FB_DECOMP in {fallback_decompressors}; do
-                    ui_print "  → Trying: $FB_DECOMP..."
-                    TMP_FIFO2="/tmp/ddpart_${{i}}.fifo2"
-                    rm -f "$TMP_FIFO2" "$GZIP_ERR"
-                    mkfifo "$TMP_FIFO2" 2>/dev/null
-                    if [ $? -ne 0 ]; then
-                        ui_print "    FIFO creation failed — skipping $FB_DECOMP"
-                        continue
-                    fi
-                    dd_if_bundle | \
-                        trim_pipe | \
-                        $FB_DECOMP > "$TMP_FIFO2" 2>"$GZIP_ERR" &
-                    FB_PID=$!
-                    dd of="$PTARGET" bs=1048576 if="$TMP_FIFO2" $DD_OFLAG 2>"$DD_ERR"
-                    FB_DD_STATUS=$?
-                    wait $FB_PID 2>/dev/null
-                    FB_DECOMP_STATUS=$?
-                    rm -f "$TMP_FIFO2"
-                    if [ $FB_DECOMP_STATUS -eq 0 ]; then
-                        ui_print "  ✓ $FB_DECOMP succeeded!"
-                        FALLBACK_OK=1
-                        # Check dd write status — F2 policy (proof, never proxy)
-                        if [ $FB_DD_STATUS -ne 0 ]; then
-                            if ! dd_failure_verdict "$FB_DD_STATUS" "$DD_ERR" "$PNAME" "$PSIZE"; then
-                                rm -f "$GZIP_ERR" "$DD_ERR"
-                                exit 1
-                            fi
-                        fi
-                        rm -f "$GZIP_ERR" "$DD_ERR"
-                        break
-                    else
-                        FB_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -1)
-                        ui_print "    $FB_DECOMP failed: $FB_ERR_MSG"
-                        rm -f "$GZIP_ERR"
-                    fi
-                done
-                if [ "$FALLBACK_OK" = "1" ]; then
-                    : # Fall through to post-verify
-                else
-                    ui_print "✗ Error: All decompressors failed"
-                    ui_print "  Hint: Rebuild with --compress lz4 (fastest) or --compress gzip"
-                    exit 1
-                fi
-            else
-                rm -f "$GZIP_ERR"
-                exit 1
+                ui_print "  Compressed-data hash was verified OK — data intact;"
+                ui_print "  the bundled decompressor rejected this stream."
             fi
+            ui_print "! ABORT: no alternative decompressor exists (T49 bundled-only)."
+            exit 1
         else
             rm -f "$GZIP_ERR"
         fi
 
-        # Only check DD_STATUS if we didn't already handle it in the fallback path
+        # Decompression succeeded — now judge the dd write status.
+        # (T49: the old fallback-path caveat no longer applies; a failed
+        # decompression exits above.)
         if [ "$DECOMP_STATUS" -eq 0 ]; then
             # busybox dd may return status=1 on block devices (ftruncate EINVAL)
             # even when all data was written — but that must be PROVEN, not
@@ -2436,7 +2266,6 @@ exit 0
         num_parts_minus_1 = if num_parts > 0 { num_parts - 1 } else { 0 },
         total_steps = total_steps,
         verify_block = verify_block.trim(),
-        fallback_decompressors = fallback_decompressors,
     ));
 
     script

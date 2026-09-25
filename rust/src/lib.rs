@@ -40,6 +40,7 @@ pub mod proto;
 pub mod compression;
 pub mod payload;
 pub mod dd;
+pub mod decomp;
 
 // ---------------------------------------------------------------------------
 //  Panic-safety helpers
@@ -206,6 +207,8 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeResetCancel(
 /// @param output_path   Absolute path for output .zip
 /// @param device        Device codename(s), comma-separated
 /// @param skip_verify   Skip SHA-256 post-flash verification (0/1)
+/// @param helper_apk_path  Absolute path of the installed APK (asset source)
+/// @param helper_asset     APK asset entry of otaku-decomp for this ABI
 /// @return JSON result: {"success": bool, "output": str, "error": str|null,
 ///                       "zip_path": str|null, "zip_size": int|null, "bundle_size": int|null,
 ///                       "duration_ms": int, "native_version": str}
@@ -226,6 +229,9 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
     skip_verify: jboolean,
     rom_name: JString,
     maker: JString,
+    // T49: APK path + asset entry of the bundled decompressor helper
+    helper_apk_path: JString,
+    helper_asset: JString,
 ) -> jstring {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         // Parse JNI string arguments
@@ -253,6 +259,23 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
             Ok(s) => s.into(),
             Err(_) => String::new(),
         };
+        // T49: bundled decompressor location (APK path + asset entry name).
+        // Both are required — a missing helper means the ZIP cannot be
+        // flashed anywhere (helper-only design, no recovery fallback).
+        let helper_apk_str: String = match env.get_string(&helper_apk_path) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid helper APK path"),
+        };
+        let helper_asset_str: String = match env.get_string(&helper_asset) {
+            Ok(s) => s.into(),
+            Err(_) => return make_error_json(&env, "Invalid helper asset name"),
+        };
+        if helper_apk_str.is_empty() || helper_asset_str.is_empty() {
+            return make_error_json(
+                &env,
+                "Bundled decompressor location missing (empty APK path or asset name)",
+            );
+        }
 
         // Parse images JSON: {"partition_name": "path", ...}
         let images_map: std::collections::HashMap<String, String> = match serde_json::from_str(&images_str) {
@@ -279,6 +302,8 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
             skip_verify != 0,
             &rom_name_str,
             &maker_str,
+            &helper_apk_str,
+            &helper_asset_str,
         );
 
         // Serialize result to JSON

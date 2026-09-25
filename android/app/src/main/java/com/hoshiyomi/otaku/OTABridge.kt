@@ -1,5 +1,6 @@
 package com.hoshiyomi.otaku
 
+import android.os.Build
 import android.os.Process
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -128,6 +129,10 @@ object OTABridge {
         outputPath: String,
         romName: String = "",
         maker: String = "",
+        // T49: path of the installed APK - the source of the bundled
+        // otaku-decomp decompressor asset. The caller (MainActivity) owns
+        // the Context and supplies applicationInfo.sourceDir.
+        helperApkPath: String = "",
         onProgress: ((ProgressUpdate) -> Unit)? = null,
         onOutputLine: ((String) -> Unit)? = null
     ): OTAResult {
@@ -281,6 +286,23 @@ object OTABridge {
                     Process.setThreadPriority(Process.myTid(), -4)
                 } catch (_: Exception) {}
 
+                // T49: resolve the bundled decompressor asset for THIS
+                // device ABI. Build.SUPPORTED_ABIS needs no Context; the
+                // APK path comes from the caller. An unsupported ABI (x86
+                // emulator etc.) fails fast with a clear message instead of
+                // producing a ZIP no recovery can flash.
+                val helperAbi = Build.SUPPORTED_ABIS.firstOrNull {
+                    it == "arm64-v8a" || it == "armeabi-v7a"
+                }
+                if (helperApkPath.isEmpty() || helperAbi == null) {
+                    val abis = Build.SUPPORTED_ABIS.joinToString()
+                    return@withContext OTAResult.error(
+                        "Bundled decompressor unavailable (apk=${helperApkPath.isEmpty()}, abis=$abis) " +
+                        "- DD ZIPs require an arm64/armv7 device"
+                    )
+                }
+                val helperAsset = "tools/otaku-decomp/$helperAbi/otaku-decomp"
+
                 val ddResult = NativeBridge.buildDd(
                     images = images,
                     compression = compression,
@@ -289,7 +311,9 @@ object OTABridge {
                     device = effectiveDevice,
                     skipVerify = skipVerify,
                     romName = romName,
-                    maker = maker
+                    maker = maker,
+                    helperApkPath = helperApkPath,
+                    helperAsset = helperAsset
                 )
 
                 // Emit all Rust output lines to the log
