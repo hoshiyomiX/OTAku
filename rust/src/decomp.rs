@@ -609,7 +609,7 @@ pub fn selftest() -> Result<(), String> {
                 let pos = f
                     .stream_position()
                     .map_err(|e| format!("selftest chunked pos: {}", e))?;
-                let aligned = (pos + 4095) / 4096 * 4096;
+                let aligned = pos.div_ceil(4096) * 4096;
                 if aligned > pos {
                     wr(&mut f, &vec![0u8; (aligned - pos) as usize], "pad")?;
                 }
@@ -778,7 +778,7 @@ mod tests {
                 let off = f.stream_position().unwrap();
                 f.write_all(comp).unwrap();
                 let pos = f.stream_position().unwrap();
-                let aligned = (pos + 4095) / 4096 * 4096;
+                let aligned = pos.div_ceil(4096) * 4096;
                 if aligned > pos {
                     f.write_all(&vec![0u8; (aligned - pos) as usize]).unwrap();
                 }

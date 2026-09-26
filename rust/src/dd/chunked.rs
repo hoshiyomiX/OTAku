@@ -107,7 +107,7 @@ pub(crate) fn encode_chunk_table(entries: &[ChunkEntry]) -> Vec<u8> {
 /// Parse `bytes` as a chunk table. Rejects any length not a multiple of the
 /// entry size — a torn trailer must fail loudly, never half-parse.
 pub(crate) fn decode_chunk_table(bytes: &[u8]) -> Result<Vec<ChunkEntry>, String> {
-    if bytes.len() % CHUNK_ENTRY_SIZE != 0 {
+    if !bytes.len().is_multiple_of(CHUNK_ENTRY_SIZE) {
         return Err(format!(
             "chunk table length {} is not a multiple of {}",
             bytes.len(),
@@ -305,7 +305,7 @@ pub(crate) fn compress_xz_chunked_with_progress(
         .len();
     let level_clamped = resolve_level(ALG_XZ, level).clamp(0, 9) as u32;
 
-    let num_chunks = ((file_size + chunk_size - 1) / chunk_size).max(1) as usize;
+    let num_chunks = file_size.div_ceil(chunk_size).max(1) as usize;
     let chunk_decomp_len =
         |idx: usize| -> u64 { chunk_size.min(file_size.saturating_sub(idx as u64 * chunk_size)) };
 
