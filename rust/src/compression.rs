@@ -530,10 +530,15 @@ fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     let frame_info = lz4_frame_info_for_level(resolved_level);
     let mut result = Vec::new();
     {
-        let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
+        let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result);
         encoder.write_all(data)
             .map_err(|e| format!("lz4 frame compress write error: {}", e))?;
-    } // encoder.finish() is called on drop — flushes and writes end mark
+        // T53-F03: explicit finish — uniform with the streaming paths; a
+        // drop-time flush cannot propagate errors.
+        encoder
+            .finish()
+            .map_err(|e| format!("lz4 frame compress finish error: {}", e))?;
+    }
     Ok(result)
 }
 
@@ -747,7 +752,7 @@ pub fn compress_streaming(
         let frame_info = lz4_frame_info_for_level(resolved_level);
         let mut result = Vec::new();
         {
-            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result);
             let mut offset: usize = 0;
             while offset < data.len() {
                 let end = (offset + effective_chunk).min(data.len());
@@ -759,7 +764,10 @@ pub fn compress_streaming(
                     cb(offset as u64, total);
                 }
             }
-        } // encoder is flushed on drop
+            encoder
+                .finish()
+                .map_err(|e| format!("lz4 streaming finish error: {}", e))?;
+        }
         return Ok(result);
     }
 
@@ -957,7 +965,7 @@ pub fn hash_and_compress_file(
         let frame_info = lz4_frame_info_for_level(resolved_level);
         let mut result = Vec::new();
         {
-            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result).auto_finish();
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut result);
             loop {
                 let n = file
                     .read(&mut buf)
@@ -970,7 +978,13 @@ pub fn hash_and_compress_file(
                     .write_all(&buf[..n])
                     .map_err(|e| format!("lz4 compress write error: {}", e))?;
             }
-        } // encoder is flushed on drop
+            encoder
+                .finish()
+                .map_err(|e| format!("lz4 compress finish error: {}", e))?;
+        }
+        // T53-F03: explicit finish — Drop (auto_finish) cannot propagate
+        // the final flush error, so an ENOSPC during the last block write
+        // would silently truncate the LZ4 frame inside an "Ok" result.
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
         return Ok((result, hex));
     }
@@ -1270,7 +1284,7 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
     if is_alg(algorithm, ALG_LZ4) {
         let frame_info = lz4_frame_info_for_level(resolved_level);
         {
-            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting).auto_finish();
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting);
             loop {
                 let n = file
                     .read(&mut buf)
@@ -1283,7 +1297,12 @@ pub fn hash_and_compress_file_to_writer<W: Write>(
                     .write_all(&buf[..n])
                     .map_err(|e| format!("lz4 compress write error: {}", e))?;
             }
-        } // encoder is flushed on drop
+            encoder
+                .finish()
+                .map_err(|e| format!("lz4 compress finish error: {}", e))?;
+        }
+        // T53-F03: explicit finish replaced drop-time auto_finish — errors
+        // from the final block flush now propagate.
         let compressed_size = counting.bytes_written();
         counting.flush().map_err(|e| format!("lz4 flush error: {}", e))?;
         let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
@@ -1559,7 +1578,7 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
     if is_alg(algorithm, ALG_LZ4) {
         let frame_info = lz4_frame_info_for_level(resolved_level);
         {
-            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting).auto_finish();
+            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting);
             loop {
                 // T36: user cancellation — abort at the next 4MB chunk boundary.
                 if crate::cancel_requested() {
@@ -1578,7 +1597,11 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
                 bytes_read += n as u64;
                 report_progress(bytes_read, file_size);
             }
-        } // encoder is flushed on drop
+            encoder
+                .finish()
+                .map_err(|e| format!("lz4 compress finish error: {}", e))?;
+        }
+        // T53-F03: explicit finish — see note above.
         counting.flush().map_err(|e| format!("lz4 flush error: {}", e))?;
         let comp_size = counting.bytes_written();
         let (comp_hash_hex, _sha_writer) = counting.into_inner().finalize();

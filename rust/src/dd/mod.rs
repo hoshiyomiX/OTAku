@@ -575,6 +575,11 @@ pub fn run_dd_build(
         digest.iter().map(|b| format!("{:02x}", b)).collect::<String>()
     };
 
+    // T53-F01: set once the ZIP assembly has actually created (and thereby
+    // truncated) output_path — the error branch may remove the partial ZIP
+    // only when THIS build destroyed/replaced the file, never a valid
+    // pre-existing ZIP from an earlier build on early-failure paths.
+    let mut zip_started = false;
     let result: Result<DdBuildResult, String> = (|| {
         let num_parts = images.len();
         // Resolve effective level: 0 = algorithm default (zstd→3, gzip→6, etc.)
@@ -607,7 +612,14 @@ pub fn run_dd_build(
         let output_parent = Path::new(output_path)
             .parent()
             .unwrap_or_else(|| Path::new("."));
-        let bundle_tmp_path = output_parent.join("otaku_build_tmp.bin");
+        // T53-F02: per-process temp name — the fixed name let a concurrent
+        // build in the same directory unlink this build's in-flight file
+        // (its stale-cleanup pass) and later zip the OTHER build's partial
+        // file as this build's otaku.bin.
+        let bundle_tmp_path = output_parent.join(format!(
+            "otaku_build_tmp_{}.bin",
+            std::process::id()
+        ));
         let bundle_tmp_path_str = bundle_tmp_path.to_string_lossy().to_string();
 
         // BUG FIX: Pre-check write permission before spending minutes compressing.
@@ -627,7 +639,10 @@ pub fn run_dd_build(
             ));
         }
 
-        // Clean up stale temp file from previous builds
+        // Clean up stale temp files from previous builds — the legacy
+        // fixed name (pre-T53 builds) and this pid's own name (a killed
+        // build restarted with a recycled pid).
+        let _ = std::fs::remove_file(output_parent.join("otaku_build_tmp.bin"));
         let _ = std::fs::remove_file(&bundle_tmp_path);
 
         // Open temp file with read+write access and keep it open for the
@@ -1041,6 +1056,7 @@ pub fn run_dd_build(
         {
             let zip_file =
                 File::create(output_path).map_err(|e| format!("Cannot create ZIP: {}", e))?;
+            zip_started = true;
             let mut zip = zip::ZipWriter::new(zip_file);
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored)
@@ -1140,8 +1156,16 @@ pub fn run_dd_build(
             let output_parent = Path::new(output_path)
                 .parent()
                 .unwrap_or_else(|| Path::new("."));
-            let bundle_tmp_path = output_parent.join("otaku_build_tmp.bin");
+            let bundle_tmp_path = output_parent
+                .join(format!("otaku_build_tmp_{}.bin", std::process::id()));
             let _ = std::fs::remove_file(&bundle_tmp_path);
+            // T53-F01: remove the partial ZIP — but ONLY if this build
+            // actually started assembling it (File::create truncated the
+            // destination); a pre-existing ZIP from an earlier build must
+            // survive early-failure paths untouched.
+            if zip_started {
+                let _ = std::fs::remove_file(output_path);
+            }
 
             lines.push(format!("[!] Error: {}", e));
             DdBuildResult {

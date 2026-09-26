@@ -59,6 +59,13 @@ pub const METADATA_SIG_ALIGNMENT: u64 = 4096;
 #[allow(clippy::doc_lazy_continuation)]
 const MAX_OP_DATA_SIZE: u64 = 256 * 1024 * 1024;
 
+// T53-F05: absolute sanity caps for header/manifest lengths. The
+// file_size-relative bounds alone still allow a sparse or crafted multi-GB
+// file to request a multi-GB allocation before read_exact can fail — an
+// uncatchable allocation abort, not a catch_unwind-able panic.
+const MAX_HEADER_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_MANIFEST_SIZE: u64 = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 //  Payload read result
 // ---------------------------------------------------------------------------
@@ -141,6 +148,17 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
             header_len, file_size
         ));
     }
+    // T53-F05: absolute cap + 32-bit truncation guard (the manifest side
+    // already had both via NEW-I/NEW-N; the header side did not).
+    if header_len > MAX_HEADER_SIZE {
+        return Err(format!(
+            "Header length {} exceeds {} MB sanity limit — possible corrupt payload",
+            header_len, MAX_HEADER_SIZE / (1024 * 1024)
+        ));
+    }
+    if header_len > isize::MAX as u64 {
+        return Err(format!("Header too large: {} bytes exceeds isize::MAX", header_len));
+    }
 
     // ── Header protobuf ──
     let mut header_bytes = vec![0u8; header_len as usize];
@@ -173,6 +191,13 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
     // this follows the integer truncation guard principle.
     if manifest_len > isize::MAX as u64 {
         return Err(format!("Manifest too large: {} bytes exceeds isize::MAX", manifest_len));
+    }
+    // T53-F05: absolute cap — same rationale as the header cap above.
+    if manifest_len > MAX_MANIFEST_SIZE {
+        return Err(format!(
+            "Manifest length {} exceeds {} MB sanity limit — possible corrupt payload",
+            manifest_len, MAX_MANIFEST_SIZE / (1024 * 1024)
+        ));
     }
     let mut manifest_bytes = vec![0u8; manifest_len as usize];
     file.read_exact(&mut manifest_bytes)
@@ -323,14 +348,35 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
                 op.data_length, MAX_OP_DATA_SIZE / (1024 * 1024)
             ));
         }
-        if payload_info.data_offset + op.data_offset + op.data_length > payload_info.file_size {
+        // T53-F06: checked arithmetic — a corrupt manifest can carry
+        // data_offset near u64::MAX; plain adds panic in debug builds
+        // (inside the JNI worker) and wrap in release (seek to a bogus
+        // offset before a confusing downstream failure).
+        let op_data_start = payload_info
+            .data_offset
+            .checked_add(op.data_offset)
+            .ok_or_else(|| {
+                format!(
+                    "Operation offset overflow (data_offset={} + op offset={})",
+                    payload_info.data_offset, op.data_offset
+                )
+            })?;
+        let op_data_end = op_data_start
+            .checked_add(op.data_length)
+            .ok_or_else(|| {
+                format!(
+                    "Operation offset overflow (data_offset={} + op offset={} + length={})",
+                    payload_info.data_offset, op.data_offset, op.data_length
+                )
+            })?;
+        if op_data_end > payload_info.file_size {
             return Err(format!(
                 "Operation data extends beyond file (offset={}, length={}, file_size={})",
                 op.data_offset, op.data_length, payload_info.file_size
             ));
         }
 
-        file.seek(SeekFrom::Start(payload_info.data_offset + op.data_offset))
+        file.seek(SeekFrom::Start(op_data_start))
             .map_err(|e| format!("Seek error: {}", e))?;
         let mut compressed_data = vec![0u8; op.data_length as usize];
         file.read_exact(&mut compressed_data)
@@ -1153,6 +1199,13 @@ fn write_payload_inner(
         let mut bytes_copied: u64 = 0;
         let mut last_copy_pct: i32 = -1;
         loop {
+            // T53-F08: honor cancellation during the final multi-GB copy —
+            // every other phase checks the flag; without this, Cancel
+            // during "assembling" runs to completion (minutes on slow
+            // storage) before the operation ends.
+            if crate::cancel_requested() {
+                return Err(crate::CANCEL_SENTINEL.to_string());
+            }
             let n = blobs_reader.read(&mut copy_buf)
                 .map_err(|e| format!("Read blobs temp error: {}", e))?;
             if n == 0 { break; }
@@ -1175,7 +1228,10 @@ fn write_payload_inner(
                         bytes_copied,
                         Some(&blobs_tmp_path_str),
                         total_estimated,
-                        100,
+                        // T53-F07: the computed copy_pct — the literal 100
+                        // froze the sidecar at 100% for the entire final
+                        // multi-GB copy.
+                        copy_pct,
                     );
                 }
             }

@@ -57,14 +57,19 @@ fn null_jstring() -> jstring {
 /// Log a panic message to Android logcat (best-effort) so the failure is
 /// debuggable. We can't call `env.new_string()` here because the JNIEnv
 /// may be in an inconsistent state post-panic — just log the message.
-fn log_panic(location: &str, panic_info: &str) {
-    // Truncate panic_info to 500 chars — panic messages can include long
-    // backtraces that would flood logcat.
-    let truncated = if panic_info.len() > 500 {
-        &panic_info[..500]
-    } else {
-        panic_info
-    };
+fn log_panic(location: &str, panic_info: &Box<dyn std::any::Any + Send>) {
+    // T53 (audit): the previous body took a &str built by the callers via
+    // format!("{:?}", panic_info) — Debug on a Box<dyn Any> prints only
+    // "Any { .. }", so the actual panic message was NEVER logged. Downcast
+    // to the real payload instead (&str / String are what panic! produces).
+    let msg = panic_info
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic_info.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".to_string());
+    // Truncate to 500 CHARS, not bytes — byte-slicing at 500 can split a
+    // multi-byte UTF-8 char and panic inside the panic handler itself.
+    let truncated: String = msg.chars().take(500).collect();
     log::error!("PANIC in {} (caught via catch_unwind): {}", location, truncated);
 }
 
@@ -97,7 +102,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeGetVersion(
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeGetVersion", &format!("{:?}", panic_info));
+        log_panic("nativeGetVersion", &panic_info);
         null_jstring()
     })
 }
@@ -128,7 +133,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeCheckDeps(
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeCheckDeps", &format!("{:?}", panic_info));
+        log_panic("nativeCheckDeps", &panic_info);
         null_jstring()
     })
 }
@@ -320,7 +325,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeBuildDd(
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeBuildDd", &format!("{:?}", panic_info));
+        log_panic("nativeBuildDd", &panic_info);
         null_jstring()
     })
 }
@@ -373,7 +378,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeDetectDeviceC
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeDetectDeviceCodename", &format!("{:?}", panic_info));
+        log_panic("nativeDetectDeviceCodename", &panic_info);
         null_jstring()
     })
 }
@@ -500,7 +505,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeScanDevicePar
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeScanDevicePartitions", &format!("{:?}", panic_info));
+        log_panic("nativeScanDevicePartitions", &panic_info);
         null_jstring()
     })
 }
@@ -677,7 +682,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeReadPayload(
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeReadPayload", &format!("{:?}", panic_info));
+        log_panic("nativeReadPayload", &panic_info);
         null_jstring()
     })
 }
@@ -790,7 +795,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeExtractPartition", &format!("{:?}", panic_info));
+        log_panic("nativeExtractPartition", &panic_info);
         null_jstring()
     })
 }
@@ -899,7 +904,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeWritePayload(
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeWritePayload", &format!("{:?}", panic_info));
+        log_panic("nativeWritePayload", &panic_info);
         null_jstring()
     })
 }
@@ -943,7 +948,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeVerifyPayload
         }
     }));
     result.unwrap_or_else(|panic_info| {
-        log_panic("nativeVerifyPayload", &format!("{:?}", panic_info));
+        log_panic("nativeVerifyPayload", &panic_info);
         null_jstring()
     })
 }

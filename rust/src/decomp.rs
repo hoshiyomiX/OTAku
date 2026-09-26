@@ -310,6 +310,39 @@ pub fn flash_chunked(
         .map_err(|e| format!("chunked flash: table read failed: {}", e))?;
     let entries: Vec<ChunkEntry> = decode_chunk_table(&table_bytes)?;
 
+    // T53-F13: sanity-cap table fields BEFORE any allocation — a torn or
+    // hand-edited table must fail with a clean error, never an uncatchable
+    // OOM abort (vec![0u8; comp_len] / Vec::with_capacity(decomp_len) used
+    // to trust attacker-controlled u64s). comp data must lie inside the
+    // bundle file; decomp_len is bounded by the encoder's chunk size.
+    let file_len = f
+        .metadata()
+        .map_err(|e| format!("chunked flash: stat failed: {}", e))?
+        .len();
+    for e in &entries {
+        let comp_end = e
+            .comp_offset
+            .checked_add(e.comp_len)
+            .and_then(|o| base_off.checked_add(o));
+        match comp_end {
+            Some(end) if end <= file_len => {}
+            _ => {
+                return Err(format!(
+                    "chunked flash: chunk table entry out of bounds \
+                     (comp_offset={}, comp_len={}, bundle={})",
+                    e.comp_offset, e.comp_len, file_len
+                ));
+            }
+        }
+        if e.decomp_len > crate::dd::chunked::CHUNK_SIZE {
+            return Err(format!(
+                "chunked flash: chunk decomp_len {} exceeds chunk size {} — corrupt table",
+                e.decomp_len,
+                crate::dd::chunked::CHUNK_SIZE
+            ));
+        }
+    }
+
     // Decompressed offset of each entry (running sum) — needed for pwrite
     // and for sanity checks.
     let mut decomp_offsets: Vec<u64> = Vec::with_capacity(entries.len());

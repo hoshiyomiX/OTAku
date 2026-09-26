@@ -131,10 +131,19 @@ fn main() -> ExitCode {
                 },
                 "--comp-hash" => match args.get(i + 1) {
                     Some(v) => {
-                        // An empty value means "no hash baked" (defensive —
-                        // v2 bundles always bake one, but a hand-edited
-                        // flasher line must not turn into a false mismatch).
-                        comp_hash = if v.is_empty() { None } else { Some(v.clone()) };
+                        // T53-F12: v2 bundles ALWAYS bake a comp hash — an
+                        // empty value means a torn or hand-edited flasher
+                        // line. Refuse it: silently treating it as "no hash"
+                        // would disable the pre-write corruption gate.
+                        if v.is_empty() {
+                            eprintln!(
+                                "otaku-decomp: --comp-hash needs a hex value \
+                                 (empty is invalid for v2 chunked bundles)"
+                            );
+                            eprintln!("{}", USAGE);
+                            return ExitCode::from(1);
+                        }
+                        comp_hash = Some(v.clone());
                         i += 2;
                     }
                     None => {
@@ -204,16 +213,24 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some(name) => {
-            let alg = Alg::from_name(name).expect("checked by pick_alg");
-            match run_decompress(alg) {
+        Some(name) => match Alg::from_name(name) {
+            // T53-F11: pick_alg performs NO validation despite the old
+            // expect message — an unrecognized -a value (typo, wrong case,
+            // unsupported codec) used to panic here: exit code 101 and a
+            // backtrace instead of the documented usage error.
+            None => {
+                eprintln!("otaku-decomp: unknown algorithm '{}'", name);
+                eprintln!("{}", USAGE);
+                ExitCode::from(1)
+            }
+            Some(alg) => match run_decompress(alg) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprint_err(&format!("{} error", name), &e);
                     ExitCode::from(2)
                 }
-            }
-        }
+            },
+        },
     }
 }
 

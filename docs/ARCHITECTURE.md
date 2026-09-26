@@ -76,7 +76,7 @@
 │  │  ├── /data/data/com.hoshiyomi.otaku/files/                    │  │
 │  │  │   ├── input/            User-provided input images          │  │
 │  │  │   ├── output/           Output OTA ZIPs (or user-selected)  │  │
-│  │  │   └── <tmp>/otaku_build_tmp.bin  Incremental bundle build   │  │
+│  │  │   └── <tmp>/otaku_build_tmp_<pid>.bin   Incremental build │  │
 │  │                                                                │  │
 │  │  Shared Storage (via SAF / MANAGE_EXTERNAL_STORAGE)            │  │
 │  │  ├── /storage/emulated/0/OTAku/  Default output directory      │  │
@@ -282,7 +282,7 @@ The progress sidecar file is the **only** mechanism for Rust → Kotlin progress
   "name": "system",
   "phase": "compressing",
   "bytes_written": 104857600,
-  "tmp_path": "/data/data/.../otaku_build_tmp.bin",
+  "tmp_path": "/data/data/.../otaku_build_tmp_<pid>.bin",
   "total_estimated": 5368709120,
   "partition_percent": 45,
   "overall_percent": 29
@@ -330,7 +330,7 @@ All file operations default to app-internal storage:
 
 ```
 <std::env::temp_dir()>/
-└── otaku_build_tmp.bin       # Incremental bundle build (header + compressed partitions)
+└── otaku_build_tmp_<pid>.bin # Incremental bundle build (header + compressed partitions)
                               # Deleted after ZIP is finalized
 ```
 
