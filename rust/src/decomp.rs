@@ -406,7 +406,7 @@ pub fn flash_chunked(
         // ── Writer (main thread) ──
         match out {
             ChunkOut::Pwrite(ref dev_path) => {
-                let mut dev = std::fs::OpenOptions::new()
+                let dev = std::fs::OpenOptions::new()
                     .write(true)
                     .open(dev_path)
                     .map_err(|e| {
@@ -583,7 +583,7 @@ pub fn selftest() -> Result<(), String> {
 
         let tmp_bundle = std::env::temp_dir().join("otaku-decomp-selftest-chunked.bin");
         let tmp_out = std::env::temp_dir().join("otaku-decomp-selftest-chunked.out");
-        let mut comp_hash = String::new();
+        let comp_hash: String;
         {
             let mut f = File::create(&tmp_bundle)
                 .map_err(|e| format!("selftest chunked bundle create: {}", e))?;

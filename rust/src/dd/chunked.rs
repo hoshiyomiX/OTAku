@@ -169,7 +169,7 @@ pub(crate) fn parse_header_v2(hdr: &[u8], num_parts: u16) -> Result<ChunkedHeade
                 .expect("header slice is exactly 2 bytes"),
         )
     };
-    let part_counts = (0..num_parts as usize)
+    let part_counts: Vec<u16> = (0..num_parts as usize)
         .map(|i| rd_u16(HDR_V2_PART_COUNTS_FIELD + i * 2))
         .collect();
     let total_chunks = rd_u32(HDR_V2_COUNT_FIELD);
