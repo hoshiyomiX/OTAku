@@ -394,10 +394,10 @@ use super::*;
             // T49: revealed by CI (no local toolchain) — bundled decompressor
             // rework: helper extraction/verification/self-test in Step 0,
             // helper-only wiring, listing/unzip/MT/fallback machinery removed.
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            // T51 placeholder — CI-reveal procedure (locked decision):
-            // the failing assertion prints the REAL combined hash in its
-            // diff; paste it here in the fixup commit.
+            "5dbd241925d0437dccf3d6353def34835c7b1269867e11f8f22aec208e08f7d3",
+            // T51: revealed by CI run#314/#241 (no local toolchain) — chunked
+            // flash path: IS_CHUNKED/OTAKU_WRITE_MODE constants, HDR_VERSION
+            // expectation gate, chunked flash loop branch, PART_i_CHUNKES.
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
