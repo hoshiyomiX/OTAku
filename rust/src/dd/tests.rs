@@ -27,6 +27,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         for &sv in &[false, true] {
             let s = build_update_script(1, 1, "gzip", &meta, 0, "", sv,
@@ -56,6 +57,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s_off = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -84,6 +86,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -111,6 +114,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -147,6 +151,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -180,6 +185,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -205,6 +211,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -225,6 +232,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -246,6 +254,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -269,6 +278,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let s = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -311,6 +321,7 @@ use super::*;
                 comp_size: 512 * (i as u64 + 1),
                 data_offset: 4096 * (i as u64 + 1),
                 comp_hash_hex: format!("{:064x}", i + 7),
+                chunks: 0,
             })
             .collect();
         let dir = std::path::Path::new("target/dump");
@@ -354,6 +365,7 @@ use super::*;
                     comp_size: 512 * (i as u64 + 1),
                     data_offset: 4096 * (i as u64 + 1),
                     comp_hash_hex: format!("{:064x}", i + 7),
+                    chunks: 0,
                 })
                 .collect();
             let s = build_update_script(np, cid, cname, &meta, tot, dev, sv,
@@ -382,7 +394,10 @@ use super::*;
             // T49: revealed by CI (no local toolchain) — bundled decompressor
             // rework: helper extraction/verification/self-test in Step 0,
             // helper-only wiring, listing/unzip/MT/fallback machinery removed.
-            "c3de53a11c1b384340ba2e61162a112c4c9bffe3d3e07f96395f672c534bf8d3",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // T51 placeholder — CI-reveal procedure (locked decision):
+            // the failing assertion prints the REAL combined hash in its
+            // diff; paste it here in the fixup commit.
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
              (atau perbarui golden INI secara sadar bersama fix Fase-2)"
         );
@@ -401,6 +416,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
             comp_hash_hex: format!("{:064x}", 2u32),
+            chunks: 0,
         }];
         for (cid, alg) in [(1u16, "gzip"), (2u16, "bzip2"), (3u16, "xz"), (5u16, "lz4"), (6u16, "zstd")] {
             let s = build_update_script(
@@ -465,7 +481,7 @@ use super::*;
 
     #[test]
     fn test_build_header() {
-        let hdr = build_header(1, 3); // gzip, 3 partitions
+        let hdr = build_header(1, 3, None); // gzip, 3 partitions, classic v1
         assert_eq!(hdr.len(), HEADER_SIZE);
         // Magic
         assert_eq!(&hdr[0..4], b"DDBU");
@@ -523,6 +539,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -547,6 +564,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", true,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -566,6 +584,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "crosshatch", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -583,6 +602,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let info = build_flash_info("gzip", 16781312, 33554432, 1, &meta, "crosshatch", 6, false, "TestROM", "TestMaker");
         assert!(info.contains("OTAku — Custom Payload Maker"));
@@ -641,6 +661,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -679,6 +700,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -724,6 +746,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -762,6 +785,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -832,6 +856,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -866,6 +891,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
             comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -912,6 +938,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "alioth", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -951,6 +978,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         for skip in [false, true] {
             for device in ["", "alioth"] {
@@ -998,6 +1026,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 0,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1063,6 +1092,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1116,6 +1146,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1154,6 +1185,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         // Without device check
         let script_no_dev = build_update_script(1, 1, "gzip", &meta, 0, "", false,
@@ -1217,6 +1249,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1234,6 +1267,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1251,6 +1285,7 @@ use super::*;
             comp_size: 16777216,
             data_offset: 4096,
         comp_hash_hex: "testcomp0123456789abcdef0123456789abcdef0123456789abcdef012345".to_string(),
+        chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1270,6 +1305,7 @@ use super::*;
             comp_size: 334,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1306,6 +1342,7 @@ use super::*;
             comp_size: 334,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1348,6 +1385,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 4096,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1418,6 +1456,7 @@ use super::*;
             comp_size: 334,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1462,6 +1501,7 @@ use super::*;
             comp_size: 334,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1516,6 +1556,7 @@ use super::*;
             comp_size: 350224384,  // 334 MB
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1598,6 +1639,7 @@ use super::*;
             comp_size: 350224384,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1634,6 +1676,7 @@ use super::*;
             comp_size: 350224384,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1739,6 +1782,7 @@ use super::*;
             comp_size: 1048576,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1793,6 +1837,7 @@ use super::*;
             comp_size: 4158234112,  // 3965 MB
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1861,6 +1906,7 @@ use super::*;
             comp_size: 2048000000, // 2048 MB
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 5, "lz4", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1918,6 +1964,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 5, "lz4", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -1949,6 +1996,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
 
         // T49 rewrite: every algorithm is piped through the BUNDLED
@@ -1985,6 +2033,7 @@ use super::*;
             comp_size: 536870912,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 1, "gzip", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -2029,6 +2078,7 @@ use super::*;
             comp_size: 234881024,
             data_offset: 0,
             comp_hash_hex: "b".repeat(64),
+            chunks: 0,
         }];
         let script = build_update_script(1, 3, "xz", &meta, 0, "", false,
             T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET,
@@ -2052,4 +2102,76 @@ use super::*;
             !script.contains("VERIFY_REMAINDER 2>/dev/null\n            fi\n        }}"),
             "REGRESSION: verify_trim closing brace is double-brace — must be single brace"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // T51: chunked-xz (DDBU v2) — header v2 fields + template wiring
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_t51_build_header_v2_fields() {
+        use crate::dd::chunked::{parse_header_v2, DDBUNDLE_VERSION_V2};
+        let counts = vec![3u16, 1u16];
+        let hdr = build_header(3, 2, Some((987_654u64, &counts)));
+        assert_eq!(&hdr[..4], b"DDBU");
+        assert_eq!(u16::from_le_bytes([hdr[4], hdr[5]]), DDBUNDLE_VERSION_V2);
+        assert_eq!(u16::from_le_bytes([hdr[6], hdr[7]]), 3); // xz
+        let info = parse_header_v2(&hdr, 2).unwrap();
+        assert_eq!(info.table_offset, 987_654);
+        assert_eq!(info.part_counts, counts);
+        assert_eq!(info.total_chunks, 4);
+        // Classic builds stay byte-identical v1: version 1 + zero padding.
+        let v1 = build_header(3, 2, None);
+        assert_eq!(u16::from_le_bytes([v1[4], v1[5]]), 1);
+        assert!(
+            v1[16..4096].iter().all(|&b| b == 0),
+            "v1 header padding must stay zero (v2 fields absent)"
+        );
+    }
+
+    #[test]
+    fn test_t51_template_chunked_wiring() {
+        // Chunked build (xz): DDBU v2 constants, chunk counts baked, the
+        // helper's chunked invocation present in BOTH write modes.
+        let meta = vec![PartitionMeta {
+            name: "system".to_string(),
+            unc_size: 201_326_592, // 192 MB = 3 chunks
+            hash_hex: format!("{:064x}", 1u32),
+            comp_size: 67_108_864,
+            data_offset: 4096,
+            comp_hash_hex: format!("{:064x}", 2u32),
+            chunks: 3,
+        }];
+        let s = build_update_script(1, 3, "xz", &meta, 201326592, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET);
+        assert!(s.contains("IS_CHUNKED=1"), "chunked flag must be baked");
+        assert!(s.contains("EXPECTED_DDBU_VERSION=2"));
+        assert!(s.contains("OTAKU_WRITE_MODE=\"pipe\""));
+        assert!(s.contains("PART_0_CHUNKES=\"3\""));
+        assert!(
+            s.contains("--flash-chunked \"$BUNDLE\" $i --base $ZIP_DATA_OFFSET"),
+            "helper chunked invocation (pipe mode) must be wired"
+        );
+        assert!(s.contains("--comp-hash \"$PCOMP_HASH\""));
+        assert!(s.contains("--pwrite \"$PTARGET\""), "pwrite opt-in branch must exist");
+        assert!(s.contains("if [ \"$HDR_VERSION\" != \"$EXPECTED_DDBU_VERSION\" ]"));
+        assert!(s.contains("Chunked decode → pwrite"));
+        // The classic verdict machinery stays reachable in the chunked flasher.
+        assert!(s.contains("dd_failure_verdict"));
+
+        // Classic build (gzip): chunked wiring OFF, v1 expected, classic pipe on.
+        let meta2 = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: format!("{:064x}", 1u32),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: format!("{:064x}", 2u32),
+            chunks: 0,
+        }];
+        let s2 = build_update_script(1, 1, "gzip", &meta2, 0, "", false,
+            T49_HELPER_SIZE, T49_HELPER_SHA, T49_HELPER_ASSET);
+        assert!(s2.contains("IS_CHUNKED=0"));
+        assert!(s2.contains("EXPECTED_DDBU_VERSION=1"));
+        assert!(s2.contains("$HELPER -a gzip"), "classic per-alg pipe must stay wired");
     }

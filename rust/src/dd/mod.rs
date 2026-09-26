@@ -29,10 +29,14 @@ use crate::compression::{
     ALG_GZIP, ALG_BZIP2, ALG_XZ, ALG_LZ4, ALG_ZSTD,
 };
 
+// pub(crate): decomp.rs (the bundled helper) reads the chunk table + header
+// helpers for its --flash-chunked path — same crate, same format spec.
+pub(crate) mod chunked;
 mod script;
 #[cfg(test)]
 mod tests;
 
+use self::chunked::{compress_xz_chunked_with_progress, write_chunk_table_trailer, ChunkEntry, CHUNK_SIZE};
 use self::script::build_update_script;
 
 // ---------------------------------------------------------------------------
@@ -184,6 +188,10 @@ struct PartitionMeta {
     /// before any block device is touched. Empty string for bundles built
     /// with older OTAku versions (flash script skips the check when empty).
     comp_hash_hex: String,
+    /// T51: number of independently-compressed chunks for this partition.
+    /// 0 = classic single-stream (DDBU v1); >0 = chunked xz (DDBU v2, the
+    /// flasher's `--flash-chunked` path reads the table from the trailer).
+    chunks: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -237,12 +245,22 @@ fn human_size(size_bytes: u64) -> String {
 ///
 /// Format: magic "DDBU" (4B) + version (u16 LE) + compress_id (u16 LE)
 ///         + num_parts (u16 LE) + header_size (u16 LE) + zero-padding
-fn build_header(compress_id: u16, num_parts: u16) -> Vec<u8> {
+///
+/// T51: `chunked` = Some((table_offset, per-part counts)) for xz builds —
+/// version becomes 2 and the v2 fields are patched into the padding area.
+/// Classic builds pass None and get version 1, byte-identical to every
+/// pre-T51 bundle.
+fn build_header(compress_id: u16, num_parts: u16, chunked: Option<(u64, &[u16])>) -> Vec<u8> {
     let mut hdr = Vec::with_capacity(HEADER_SIZE);
     // Magic (4 bytes)
     hdr.extend_from_slice(&DDBUNDLE_MAGIC);
     // Version (u16 LE)
-    hdr.extend_from_slice(&DDBUNDLE_VERSION.to_le_bytes());
+    let version = if chunked.is_some() {
+        chunked::DDBUNDLE_VERSION_V2
+    } else {
+        DDBUNDLE_VERSION
+    };
+    hdr.extend_from_slice(&version.to_le_bytes());
     // Compress ID (u16 LE)
     hdr.extend_from_slice(&compress_id.to_le_bytes());
     // Num parts (u16 LE)
@@ -251,6 +269,10 @@ fn build_header(compress_id: u16, num_parts: u16) -> Vec<u8> {
     hdr.extend_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
     // Zero-pad to HEADER_SIZE
     hdr.resize(HEADER_SIZE, 0u8);
+    // T51: v2 fields land in the (formerly zero) padding area.
+    if let Some((table_offset, counts)) = chunked {
+        chunked::patch_header_v2(&mut hdr, table_offset, counts);
+    }
     hdr
 }
 
@@ -313,6 +335,10 @@ fn build_flash_info(
         human_size(total_unc_size)
     ));
     lines.push(format!("Partitions: {}", num_parts));
+    // T51: bundle format version — 2 = chunked xz (parallel encode/decode
+    // via the chunk table trailer), 1 = classic single-stream per partition.
+    let is_chunked = is_alg(compress_name, ALG_XZ);
+    lines.push(format!("DDBU version: {}", if is_chunked { 2 } else { 1 }));
     lines.push(format!(
         "Verification: {}",
         if skip_verify { "disabled" } else { "enabled" }
@@ -343,6 +369,9 @@ fn build_flash_info(
         ));
         lines.push(format!("    SHA-256:      {}", p.hash_hex));
         lines.push(format!("    Data offset:  {}", p.data_offset));
+        if p.chunks > 0 {
+            lines.push(format!("    Chunks:       {} (64 MB each, parallel)", p.chunks));
+        }
         lines.push(String::new());
     }
 
@@ -552,6 +581,9 @@ pub fn run_dd_build(
         // Always show the actual level used — never display the raw sentinel 0.
         let level_opt = if level > 0 { Some(level) } else { None };
         let effective_level = resolve_level(&compress_name, level_opt);
+        // T51: xz builds take the chunked multi-threaded path (DDBU v2);
+        // every other algorithm keeps the classic single-stream encoder.
+        let is_xz = is_alg(&compress_name, ALG_XZ);
         let level_display = format!(" (level {})", effective_level);
 
         // ── Compute total estimated size (sum of all input image sizes) ──
@@ -658,6 +690,9 @@ pub fn run_dd_build(
         }
 
         let mut partitions_meta: Vec<PartitionMeta> = Vec::new();
+        // T51: per-partition chunk tables (empty for classic builds). Written
+        // as the bundle trailer after the loop, referenced by the v2 header.
+        let mut all_chunk_entries: Vec<Vec<ChunkEntry>> = Vec::new();
         // (level_opt already computed above — used by resolve_level and compression)
 
         // Stream compressed data directly to the temp file.
@@ -724,34 +759,53 @@ pub fn run_dd_build(
             // Stream compress: pass file by value, get it back on return.
             // This avoids holding both a reference and the file itself,
             // which would violate Rust's borrow rules.
-            let (result, returned_file) = hash_and_compress_file_to_writer_with_progress(
-                path,
-                &compress_name,
-                level_opt,
-                tmp_file,  // move file into the function
-                Some(&mut |bytes_read: u64, file_size: u64| {
-                    let pct = (bytes_read * 100)
-                        .checked_div(file_size)
-                        .map(|v| v as i32)
-                        .unwrap_or(100);
-                    // Get current file size for progress via path (not file handle,
-                    // which has been moved into the compression function).
-                    let current_size = std::fs::metadata(&bundle_tmp_path)
-                        .map(|m| m.len())
-                        .unwrap_or(HEADER_SIZE as u64);
-                    write_progress_with_percent(
-                        &output_path_clone,
-                        i + 1,
-                        num_parts,
-                        &name_clone,
-                        "compressing",
-                        current_size,
-                        Some(&bundle_tmp_path_str_clone),
-                        total_estimated,
-                        pct,
-                    );
-                }),
-            )?;
+            //
+            // T51: xz builds use the chunked multi-threaded encoder (DDBU v2
+            // — 64 MB independently-compressed chunks on a worker pool);
+            // every other algorithm keeps the classic single-stream path.
+            // The progress callback is shared by both branches.
+            let mut prog_cb = |bytes_read: u64, file_size: u64| {
+                let pct = (bytes_read * 100)
+                    .checked_div(file_size)
+                    .map(|v| v as i32)
+                    .unwrap_or(100);
+                // Get current file size for progress via path (not file handle,
+                // which has been moved into the compression function).
+                let current_size = std::fs::metadata(&bundle_tmp_path)
+                    .map(|m| m.len())
+                    .unwrap_or(HEADER_SIZE as u64);
+                write_progress_with_percent(
+                    &output_path_clone,
+                    i + 1,
+                    num_parts,
+                    &name_clone,
+                    "compressing",
+                    current_size,
+                    Some(&bundle_tmp_path_str_clone),
+                    total_estimated,
+                    pct,
+                );
+            };
+
+            let (result, part_entries, returned_file) = if is_xz {
+                let (res, entries, f) = compress_xz_chunked_with_progress(
+                    path,
+                    level_opt,
+                    tmp_file, // move file into the function
+                    CHUNK_SIZE,
+                    Some(&mut prog_cb),
+                )?;
+                (res, Some(entries), f)
+            } else {
+                let (res, f) = hash_and_compress_file_to_writer_with_progress(
+                    path,
+                    &compress_name,
+                    level_opt,
+                    tmp_file, // move file into the function
+                    Some(&mut prog_cb),
+                )?;
+                (res, None, f)
+            };
 
             // Re-acquire the file handle from the compression function return
             tmp_file = returned_file;
@@ -760,6 +814,11 @@ pub fn run_dd_build(
             let hash_hex = result.unc_hash_hex;
             let comp_hash_hex = result.comp_hash_hex;
 
+            let part_chunk_count = part_entries.as_ref().map_or(0, |v| v.len() as u16);
+            if let Some(entries) = part_entries {
+                all_chunk_entries.push(entries);
+            }
+
             partitions_meta.push(PartitionMeta {
                 name: name.clone(),
                 unc_size,
@@ -767,6 +826,7 @@ pub fn run_dd_build(
                 comp_size,
                 data_offset,
                 comp_hash_hex,
+                chunks: part_chunk_count,
             });
 
             // Align to 4096 boundary
@@ -803,9 +863,30 @@ pub fn run_dd_build(
             ));
         }
 
+        // T51: chunked (xz) builds append the chunk-table trailer AFTER the
+        // last partition, then bake its offset + per-part counts into the
+        // header (version 2). Classic builds write version 1, byte-identical
+        // to every pre-T51 bundle.
+        let chunked_info = if is_xz {
+            let table_offset = write_chunk_table_trailer(&mut tmp_file, &all_chunk_entries)?;
+            let counts: Vec<u16> = all_chunk_entries.iter().map(|v| v.len() as u16).collect();
+            lines.push(format!(
+                "  Chunk table : {} entries (DDBU v2, {} workers)",
+                counts.iter().map(|&c| c as u32).sum::<u32>(),
+                chunked::xz_pool_workers()
+            ));
+            Some((table_offset, counts))
+        } else {
+            None
+        };
+
         // Overwrite the header placeholder with the real header.
         // Same file handle — no close+reopen, no risk of "No such file or directory".
-        let header = build_header(compress_id_val, num_parts as u16);
+        let header = build_header(
+            compress_id_val,
+            num_parts as u16,
+            chunked_info.as_ref().map(|(o, c)| (*o, c.as_slice())),
+        );
         tmp_file.seek(std::io::SeekFrom::Start(0))
             .map_err(|e| format!("Cannot seek to start for header: {}", e))?;
         tmp_file.write_all(&header)

@@ -219,6 +219,8 @@ jobs:
               # T49: baked bundled-decompressor facts (replaces the removed
               # fallback_decompressors arg — helper-only design)
               "helper_size", "helper_sha256", "helper_asset",
+              # T51: chunked-xz (DDBU v2) template constants
+              "is_chunked", "expected_ddbu_version",
           ]
           # Verify T49 helper plumbing is present in the dd module
           zstd_checks = [
@@ -227,6 +229,10 @@ jobs:
               ("--unzip-entry", "helper zip-entry extraction"),
               ("zstd", "zstd codec wiring"),
               ("COMPRESS_ID", "COMPRESS_ID mapping"),
+              # T51: chunked flash path plumbing
+              ("--flash-chunked", "chunked flash invocation"),
+              ("--comp-hash", "chunked compressed-hash gate"),
+              ("OTAKU_WRITE_MODE", "chunked write-mode selector"),
           ]
           for check, desc in zstd_checks:
               if check not in content:

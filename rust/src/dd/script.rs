@@ -53,9 +53,10 @@ pub(super) fn build_update_script(
              PART_{}_HASH=\"{}\"\n\
              PART_{}_COMP_SIZE=\"{}\"\n\
              PART_{}_DATA_OFFSET=\"{}\"\n\
-             PART_{}_COMP_HASH=\"{}\"\n",
+             PART_{}_COMP_HASH=\"{}\"\n\
+             PART_{}_CHUNKES=\"{}\"\n",
             i, shell_escape_dq(&p.name), i, p.unc_size, i, p.hash_hex, i, p.comp_size, i, p.data_offset,
-            i, p.comp_hash_hex
+            i, p.comp_hash_hex, i, p.chunks
         ));
     }
 
@@ -480,6 +481,18 @@ SKIP_VERIFY={skip_verify_flag}   # F2: 1 = no post-flash hash; dd failures must 
 HELPER_SIZE={helper_size}
 HELPER_SHA256="{helper_sha256}"
 HELPER_ASSET="{helper_asset}"
+# T51: chunked-xz wiring (DDBU v2). IS_CHUNKED=1 ⇔ every partition is 64 MB
+# independently-compressed chunks (parallel encode in-app, parallel decode
+# via the bundled helper). EXPECTED_DDBU_VERSION is cross-checked against the
+# bundle header at runtime (F8-style: script and bundle from the same build).
+# OTAKU_WRITE_MODE selects the flash write path:
+#   pipe   (default) — ordered stream through the existing dd-of-FIFO path
+#   pwrite (opt-in)  — the helper writes each decoded chunk directly to the
+#                      block device at its offset (no FIFO, no dd). Edit
+#                      this line inside the ZIP to try it on your device.
+IS_CHUNKED={is_chunked}
+EXPECTED_DDBU_VERSION={expected_ddbu_version}
+OTAKU_WRITE_MODE="pipe"
 
 ui_print "======================================"
 ui_print "  OTAku — {script_version}"
@@ -496,6 +509,8 @@ ui_print "======================================"
         helper_size = helper_size,
         helper_sha256 = helper_sha256,
         helper_asset = helper_asset,
+        is_chunked = if compress_id == 3 { 1 } else { 0 },
+        expected_ddbu_version = if compress_id == 3 { 2 } else { 1 },
     ));
 
     // ── Step 0: Open payload + extract/verify the bundled decompressor ──
@@ -801,6 +816,11 @@ if [ "$COMPRESS_ID" = "0" ]; then
     # to "cat -d" — no cat implementation (GNU/busybox/toybox) supports
     # -d, causing "invalid option" failures.
     DECOMP_PIPE="cat"
+elif [ "$IS_CHUNKED" = "1" ]; then
+    # T51: chunked-xz bundles decode via the helper's parallel chunk pool.
+    # Display-only string — the real invocation lives in the flash loop,
+    # where the partition index and write mode are known.
+    DECOMP_PIPE="$HELPER --flash-chunked (parallel xz)"
 else
     # T49: the flashable ZIP bundles its own universal decompressor —
     # otaku-decomp, extracted + hash-verified + self-tested back in
@@ -814,6 +834,9 @@ else
     DECOMP_PIPE="$HELPER -a {decomp_cmd}"
 fi
 ui_print "  ✓ Decompressor: $DECOMP_PIPE"
+if [ "$IS_CHUNKED" = "1" ]; then
+    ui_print "  ✓ Chunked mode: DDBU v2 | write mode: $OTAKU_WRITE_MODE"
+fi
 
 # ── Bundle integrity ──
 # BUNDLE_SIZE is already set from Step 0 (either computed from ZIP or extracted file).
@@ -847,8 +870,10 @@ HDR_COMPRESS=$(read_bundle_bytes 6 2 | od -A n -t u2 | tr -d '[:space:]')
 HDR_NUM_PARTS=$(read_bundle_bytes 8 2 | od -A n -t u2 | tr -d '[:space:]')
 HDR_HDR_SIZE=$(read_bundle_bytes 10 2 | od -A n -t u2 | tr -d '[:space:]')
 
-if [ "$HDR_VERSION" != "1" ]; then
-    ui_print "! ABORT: Unsupported bundle version: $HDR_VERSION"
+if [ "$HDR_VERSION" != "$EXPECTED_DDBU_VERSION" ]; then
+    ui_print "! ABORT: Unsupported bundle version: $HDR_VERSION (this flasher expects $EXPECTED_DDBU_VERSION)"
+    ui_print "!  A newer-version bundle needs a current OTAku flasher;"
+    ui_print "!  a version mismatch means script and bundle come from different builds."
     exit 1
 fi
 
@@ -1891,7 +1916,12 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     rm -f "$HASH_FIFO" "$HASH_FILE"
     HASH_VERIFIED=0
 
-    if [ -n "$PCOMP_HASH" ]; then
+    if [ "$IS_CHUNKED" = "1" ]; then
+        # T51: chunked bundles verify the compressed-data hash INSIDE the
+        # helper (--comp-hash) before decoding or writing anything — same
+        # verify-before-write semantics, no tee/FIFO plumbing needed here.
+        STREAMING_HASH=0
+    elif [ -n "$PCOMP_HASH" ]; then
         ui_print "  Verifying compressed data integrity..."
         # Try streaming dual-FIFO path (reads data once, hashes while decompressing)
         if mkfifo "$HASH_FIFO" 2>/dev/null; then
@@ -1948,6 +1978,88 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     fi
     ui_print "  Writing to $PTARGET..."
 
+    # ── T51: chunked flash path (DDBU v2 bundles) ─────────────────────
+    # The bundled helper decodes this partition's 64 MB xz chunks on a
+    # parallel pool and verifies the compressed-data hash (--comp-hash)
+    # BEFORE decoding or writing anything — the same verify-before-write
+    # semantics as the classic path's tee+sha256sum, just inside the helper.
+    if [ "$IS_CHUNKED" = "1" ]; then
+        GZIP_ERR="/tmp/ddpart_${{i}}.err"
+        rm -f "$GZIP_ERR"
+        if [ "$OTAKU_WRITE_MODE" = "pwrite" ]; then
+            # Opt-in: the helper opens the block device itself and writes
+            # each decoded chunk directly at its offset — no FIFO, no dd,
+            # no ordering constraint. Its exit code is the verdict; the
+            # post-flash hash verify (Step C) still applies below.
+            ui_print "  Chunked decode → pwrite $PTARGET"
+            if ! "$HELPER" --flash-chunked "$BUNDLE" $i --base $ZIP_DATA_OFFSET \
+                    --comp-hash "$PCOMP_HASH" --pwrite "$PTARGET" 2>"$GZIP_ERR"; then
+                GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ' ')
+                rm -f "$GZIP_ERR"
+                ui_print "✗ Error: chunked decode/pwrite failed for $PNAME"
+                ui_print "  Details: $GZIP_ERR_MSG"
+                ui_print "  Bundle: $BUNDLE_SIZE bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
+                exit 1
+            fi
+            rm -f "$GZIP_ERR"
+        else
+            # Default: ordered stream through the same FIFO + dd machinery
+            # the classic path uses (O_DIRECT probe, dd_failure_verdict,
+            # post-flash verify — all unchanged).
+            TMP_FIFO="/tmp/ddpart_${{i}}.fifo"
+            rm -f "$TMP_FIFO"
+            mkfifo "$TMP_FIFO" 2>/dev/null
+            if [ $? -ne 0 ]; then
+                ui_print "! ABORT: mkfifo failed for $PNAME (tmpfs full?)"
+                exit 1
+            fi
+            "$HELPER" --flash-chunked "$BUNDLE" $i --base $ZIP_DATA_OFFSET \
+                --comp-hash "$PCOMP_HASH" > "$TMP_FIFO" 2>"$GZIP_ERR" &
+            DECOMP_PID=$!
+
+            DD_ERR="/tmp/dderr_$$_${{i}}"
+            rm -f "$DD_ERR"
+            DD_OFLAG=""
+            if [ -b "$PTARGET" ]; then
+                # Same O_DIRECT probe as the classic path: probe on the
+                # ACTUAL target device (see the classic block below for the
+                # false-positive history — never probe on /dev/null).
+                _OD_PROBE="/tmp/od_probe_$$_${{i}}"
+                dd if=/dev/zero of="$_OD_PROBE" bs=4096 count=1 2>/dev/null
+                if dd oflag=direct if="$_OD_PROBE" of="$PTARGET" bs=4096 count=1 conv=notrunc 2>/dev/null; then
+                    DD_OFLAG="oflag=direct"
+                fi
+                rm -f "$_OD_PROBE"
+            fi
+
+            dd of="$PTARGET" bs=1048576 if="$TMP_FIFO" $DD_OFLAG 2>"$DD_ERR"
+            DD_STATUS=$?
+            wait $DECOMP_PID 2>/dev/null
+            DECOMP_STATUS=$?
+            rm -f "$TMP_FIFO"
+
+            if [ $DECOMP_STATUS -ne 0 ]; then
+                GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ' ')
+                rm -f "$GZIP_ERR"
+                ui_print "✗ Error: chunked decode failed for $PNAME (status=$DECOMP_STATUS)"
+                ui_print "  Details: $GZIP_ERR_MSG"
+                ui_print "  Bundle: $BUNDLE_SIZE bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
+                exit 1
+            fi
+            rm -f "$GZIP_ERR"
+
+            if [ $DD_STATUS -ne 0 ]; then
+                if ! dd_failure_verdict "$DD_STATUS" "$DD_ERR" "$PNAME" "$PSIZE"; then
+                    rm -f "$DD_ERR"
+                    exit 1
+                fi
+            fi
+            rm -f "$DD_ERR"
+        fi
+    else
+    # ── Classic single-stream path (v1 bundles — unchanged) ──
+    # (The classic block below intentionally keeps its original indentation.)
+    #
     # Use a FIFO pipeline: extract+decompress → FIFO → dd write.
     # This avoids writing the decompressed data to a temp file in /tmp,
     # which would exhaust tmpfs for large partitions (e.g. 2327 MB
@@ -2185,6 +2297,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             rm -f "$GZIP_ERR" "$DD_ERR"
         fi
     fi
+    fi   # ── end classic (non-chunked) flash path ──
 
     # Step C: Post-verify (conditional)
     {verify_block}

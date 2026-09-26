@@ -10,7 +10,19 @@
 //!                                             (alg: gzip|bzip2|xz|lz4|zstd|none)
 //!   otaku-decomp --unzip-entry <zip> <entry> <outfile>
 //!                                             extract one ZIP entry (CRC-checked)
+//!   otaku-decomp --flash-chunked <bundle> <part_index> [flags]   (T51)
+//!                                             parallel decode of a DDBU v2
+//!                                             chunked-xz partition; flags:
+//!                                               --base N          bundle byte offset
+//!                                               (ZIP direct-read mode; default 0)
+//!                                               --comp-hash HEX   verify compressed
+//!                                               data BEFORE writing (recommended)
+//!                                               --pwrite DEV      write chunks directly
+//!                                               to the block device at their offsets
+//!                                               --out FILE        ordered stream to a
+//!                                               file (selftest/debug; default stdout)
 //!   otaku-decomp --selftest                   round-trip all codecs + zip extract
+//!                                             + chunked flash path
 //!   otaku-decomp --version                    print version
 //!
 //! Exit codes:
@@ -30,6 +42,8 @@ use otaku_native::decomp::{self, Alg};
 
 const USAGE: &str = "usage: otaku-decomp -a <gzip|bzip2|xz|lz4|zstd|none>\n\
                       \x20      otaku-decomp --unzip-entry <zip> <entry> <outfile>\n\
+                      \x20      otaku-decomp --flash-chunked <bundle> <part> [--base N] \
+[--comp-hash HEX] [--pwrite DEV | --out FILE]\n\
                       \x20      otaku-decomp --selftest | --version";
 
 fn eprint_err(prefix: &str, err: &str) {
@@ -47,7 +61,7 @@ fn main() -> ExitCode {
     if args.iter().any(|a| a == "--selftest") {
         return match decomp::selftest() {
             Ok(()) => {
-                println!("selftest OK: gzip bzip2 xz lz4 zstd + zip-entry");
+                println!("selftest OK: gzip bzip2 xz lz4 zstd + zip-entry + chunked-flash");
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -75,6 +89,98 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprint_err("zip error", &e);
                 ExitCode::from(3)
+            }
+        };
+    }
+
+    if args.iter().any(|a| a == "--flash-chunked") {
+        // args = ["--flash-chunked", <bundle>, <part_index>, (flags...)]
+        if args.len() < 3 {
+            eprintln!("otaku-decomp: --flash-chunked needs <bundle> <part_index> [flags]");
+            eprintln!("{}", USAGE);
+            return ExitCode::from(1);
+        }
+        let bundle = args[1].as_str();
+        let part_idx: usize = match args[2].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!(
+                    "otaku-decomp: --flash-chunked partition index must be a number (got '{}')",
+                    args[2]
+                );
+                eprintln!("{}", USAGE);
+                return ExitCode::from(1);
+            }
+        };
+        let mut base_off: u64 = 0;
+        let mut comp_hash: Option<String> = None;
+        let mut out = decomp::ChunkOut::Stdout;
+        let mut i = 3;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--base" => match args.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    Some(v) => {
+                        base_off = v;
+                        i += 2;
+                    }
+                    None => {
+                        eprintln!("otaku-decomp: --base needs a numeric value");
+                        eprintln!("{}", USAGE);
+                        return ExitCode::from(1);
+                    }
+                },
+                "--comp-hash" => match args.get(i + 1) {
+                    Some(v) => {
+                        // An empty value means "no hash baked" (defensive —
+                        // v2 bundles always bake one, but a hand-edited
+                        // flasher line must not turn into a false mismatch).
+                        comp_hash = if v.is_empty() { None } else { Some(v.clone()) };
+                        i += 2;
+                    }
+                    None => {
+                        eprintln!("otaku-decomp: --comp-hash needs a hex value");
+                        eprintln!("{}", USAGE);
+                        return ExitCode::from(1);
+                    }
+                },
+                "--pwrite" => match args.get(i + 1) {
+                    Some(v) => {
+                        out = decomp::ChunkOut::Pwrite(v.clone());
+                        i += 2;
+                    }
+                    None => {
+                        eprintln!("otaku-decomp: --pwrite needs a block device path");
+                        eprintln!("{}", USAGE);
+                        return ExitCode::from(1);
+                    }
+                },
+                "--out" => match args.get(i + 1) {
+                    Some(v) => {
+                        out = decomp::ChunkOut::File(v.clone());
+                        i += 2;
+                    }
+                    None => {
+                        eprintln!("otaku-decomp: --out needs a file path");
+                        eprintln!("{}", USAGE);
+                        return ExitCode::from(1);
+                    }
+                },
+                other => {
+                    eprintln!("otaku-decomp: unknown --flash-chunked flag '{}'", other);
+                    eprintln!("{}", USAGE);
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        return match decomp::flash_chunked(bundle, base_off, part_idx, out, comp_hash.as_deref())
+        {
+            Ok(n) => {
+                eprintln!("otaku-decomp: chunked decode wrote {} bytes", n);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprint_err("chunked flash error", &e);
+                ExitCode::from(2)
             }
         };
     }

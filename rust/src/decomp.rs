@@ -19,13 +19,21 @@
 //! single-threaded here (documented deviation from the "MT helper" ideal;
 //! the old recovery-side `xz -T0` upgrade path only helped multi-block
 //! streams too, so no capability is lost vs the pre-T49 template).
+//!
+//! T51 closes that gap at the FORMAT level: chunked-xz bundles (DDBU v2)
+//! split each partition into independently-compressed 64 MB chunks, so the
+//! `flash_chunked` pool below decodes them in parallel — ordered pipe to
+//! stdout by default, direct pwrite to the block device opt-in. Classic
+//! single-stream bundles (v1) keep the `decompress_stream` path above,
+//! untouched.
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Version of the bundled helper (surfaced by `otaku-decomp --version`).
-pub const DECOMP_VERSION: &str = "1.0.0";
+/// T51: 1.1.0 — adds the chunked flash path (`--flash-chunked`).
+pub const DECOMP_VERSION: &str = "1.1.0";
 
 /// I/O buffer size for streaming pipelines (1 MiB).
 const BUF: usize = 1 << 20;
@@ -192,6 +200,323 @@ fn compress_bytes(alg: Alg, data: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+//  T51: chunked flash path (DDBU v2)
+// ---------------------------------------------------------------------------
+
+/// Where the chunked flash path writes its decompressed output.
+///
+/// * `Stdout` — ordered stream to stdout (pipe mode, the flasher's default:
+///   the existing `dd of=<partition>` machinery consumes it unchanged).
+/// * `File`   — ordered stream to a file (selftest / debugging).
+/// * `Pwrite` — each finished chunk is written DIRECTLY to the block device
+///   at its decompressed offset via `pwrite` — no FIFO, no `dd`, and no
+///   ordering constraint (chunks are independent). Opt-in from the flasher
+///   template via `OTAKU_WRITE_MODE=pwrite`.
+#[derive(Debug, Clone)]
+pub enum ChunkOut {
+    Stdout,
+    File(String),
+    Pwrite(String),
+}
+
+/// Flash (decode) one partition of a DDBU v2 chunked bundle on a worker pool.
+///
+/// `base_off` shifts every table offset — non-zero when `bundle` is the
+/// flashable ZIP itself in the flasher's direct-read mode (table offsets are
+/// absolute within otaku.bin; the ZIP local-file-header shift is added on
+/// top). Pass 0 for an extracted otaku.bin.
+///
+/// Verification order mirrors the classic flasher: if `expected_comp_hash`
+/// is provided, the partition's compressed bytes are hashed and compared
+/// BEFORE anything is decoded or written — a corrupt bundle aborts while
+/// the partition is still untouched.
+///
+/// Returns the total decompressed bytes written.
+pub fn flash_chunked(
+    bundle: &str,
+    base_off: u64,
+    part_idx: usize,
+    out: ChunkOut,
+    expected_comp_hash: Option<&str>,
+) -> Result<u64, String> {
+    use crate::dd::chunked::{decode_chunk_table, parse_header_v2, ChunkEntry};
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::FileExt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    let hdr_size = 4096usize;
+    let mut f = File::open(bundle)
+        .map_err(|e| format!("chunked flash: cannot open '{}': {}", bundle, e))?;
+    f.seek(SeekFrom::Start(base_off))
+        .map_err(|e| format!("chunked flash: seek failed: {}", e))?;
+    let mut hdr = vec![0u8; hdr_size];
+    f.read_exact(&mut hdr)
+        .map_err(|e| format!("chunked flash: header read failed: {}", e))?;
+
+    // Magic + version + compress id gates (defense in depth — the flasher
+    // template gates on the baked constants too; a mixed/corrupt ZIP must
+    // fail here before any device write).
+    if hdr[..4] != *b"DDBU" {
+        return Err("chunked flash: bad bundle magic (expected DDBU)".to_string());
+    }
+    let version = u16::from_le_bytes([hdr[4], hdr[5]]);
+    if version != 2 {
+        return Err(format!(
+            "chunked flash: bundle version {} is not a chunked (v2) bundle — \
+             rebuild with a current OTAku xz build",
+            version
+        ));
+    }
+    let compress_id = u16::from_le_bytes([hdr[6], hdr[7]]);
+    if compress_id != 3 {
+        return Err(format!(
+            "chunked flash: compress id {} is not xz (chunked bundles are xz-only)",
+            compress_id
+        ));
+    }
+    let num_parts = u16::from_le_bytes([hdr[8], hdr[9]]);
+    if part_idx >= num_parts as usize {
+        return Err(format!(
+            "chunked flash: partition index {} out of range (bundle has {})",
+            part_idx, num_parts
+        ));
+    }
+
+    let info = parse_header_v2(&hdr, num_parts)?;
+    let start = info
+        .part_counts
+        .iter()
+        .take(part_idx)
+        .map(|&c| c as usize)
+        .sum::<usize>();
+    let count = info.part_counts[part_idx] as usize;
+    if count == 0 {
+        // The encoder never emits zero-entry partitions (empty images get
+        // one empty chunk) — a zero here means a torn/corrupt header.
+        return Err(format!(
+            "chunked flash: partition {} has zero chunk entries — corrupt header?",
+            part_idx
+        ));
+    }
+
+    // Read this partition's slice of the trailer table.
+    let mut table_bytes = vec![0u8; count * crate::dd::chunked::CHUNK_ENTRY_SIZE];
+    f.seek(SeekFrom::Start(base_off + info.table_offset + (start * crate::dd::chunked::CHUNK_ENTRY_SIZE) as u64))
+        .map_err(|e| format!("chunked flash: table seek failed: {}", e))?;
+    f.read_exact(&mut table_bytes)
+        .map_err(|e| format!("chunked flash: table read failed: {}", e))?;
+    let entries: Vec<ChunkEntry> = decode_chunk_table(&table_bytes)?;
+
+    // Decompressed offset of each entry (running sum) — needed for pwrite
+    // and for sanity checks.
+    let mut decomp_offsets: Vec<u64> = Vec::with_capacity(entries.len());
+    let mut acc: u64 = 0;
+    for e in &entries {
+        decomp_offsets.push(acc);
+        acc = acc
+            .checked_add(e.decomp_len)
+            .ok_or_else(|| "chunked flash: decomp_len overflow in chunk table".to_string())?;
+    }
+
+    // ── Pre-verify the compressed data hash BEFORE decoding/writing ──
+    if let Some(expected) = expected_comp_hash {
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 1 << 20]; // 1 MiB reusable read buffer
+        for e in &entries {
+            let mut off: u64 = 0;
+            while off < e.comp_len {
+                let n = ((1u64) << 20).min(e.comp_len - off) as usize;
+                f.read_exact_at(&mut buf[..n], base_off + e.comp_offset + off)
+                    .map_err(|err| format!("chunked flash: comp read failed: {}", err))?;
+                hasher.update(&buf[..n]);
+                off += n as u64;
+            }
+        }
+        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        if hex != expected {
+            return Err(format!(
+                "chunked flash: compressed data hash mismatch for partition {} — \
+                 bundle is corrupt; rebuild and re-transfer",
+                part_idx
+            ));
+        }
+    }
+
+    // ── Decode pool ──
+    // Same envelope as the encoder: min(available_parallelism, 4) workers —
+    // each holds one in-flight chunk (≤ 64 MB input + output).
+    let workers = crate::dd::chunked::xz_pool_workers().max(1).min(entries.len().max(1));
+    let f = Arc::new(f);
+    let next_idx = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::sync_channel::<(usize, Result<Vec<u8>, String>)>(workers + 2);
+
+    let total_written: u64 = std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let f = Arc::clone(&f);
+            let next_idx = Arc::clone(&next_idx);
+            let failed = Arc::clone(&failed);
+            let tx = tx.clone();
+            let entries = &entries;
+            scope.spawn(move || loop {
+                if failed.load(Ordering::SeqCst) {
+                    return;
+                }
+                let idx = next_idx.fetch_add(1, Ordering::SeqCst);
+                if idx >= entries.len() {
+                    return;
+                }
+                let e = entries[idx];
+                let mut comp = vec![0u8; e.comp_len as usize];
+                if let Err(err) = f.read_exact_at(&mut comp, base_off + e.comp_offset) {
+                    let _ = tx.send((idx, Err(format!("comp read failed: {}", err))));
+                    failed.store(true, Ordering::SeqCst);
+                    return;
+                }
+                let mut dec = xz2::read::XzDecoder::new(&comp[..]);
+                let mut data = Vec::with_capacity(e.decomp_len as usize);
+                if let Err(err) = dec.read_to_end(&mut data) {
+                    let _ = tx.send((idx, Err(format!("xz decode failed: {}", err))));
+                    failed.store(true, Ordering::SeqCst);
+                    return;
+                }
+                if data.len() as u64 != e.decomp_len {
+                    let _ = tx.send((
+                        idx,
+                        Err(format!(
+                            "chunk {} decoded to {} bytes, table says {}",
+                            idx,
+                            data.len(),
+                            e.decomp_len
+                        )),
+                    ));
+                    failed.store(true, Ordering::SeqCst);
+                    return;
+                }
+                if tx.send((idx, Ok(data))).is_err() {
+                    return; // writer gone
+                }
+            });
+        }
+        drop(tx);
+
+        // ── Writer (main thread) ──
+        match out {
+            ChunkOut::Pwrite(ref dev_path) => {
+                let mut dev = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(dev_path)
+                    .map_err(|e| {
+                        format!("chunked flash: cannot open device '{}': {}", dev_path, e)
+                    })?;
+                let mut written: u64 = 0;
+                let mut received = 0usize;
+                let mut err: Option<String> = None;
+                while received < entries.len() {
+                    let (idx, res) = match rx.recv() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            err = Some("chunked flash: decode pool exited unexpectedly".into());
+                            break;
+                        }
+                    };
+                    received += 1;
+                    match res {
+                        Ok(data) => {
+                            if let Err(e) = dev.write_all_at(&data, decomp_offsets[idx]) {
+                                err = Some(format!("chunked flash: pwrite failed: {}", e));
+                                break;
+                            }
+                            written += data.len() as u64;
+                        }
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                drop(rx);
+                match err {
+                    Some(e) => Err(e),
+                    None => Ok(written),
+                }
+            }
+            ChunkOut::Stdout | ChunkOut::File(_) => {
+                // Ordered stream: buffer out-of-order completions, flush in
+                // order (bounded by workers in flight).
+                let mut sink: BufWriter<Box<dyn Write>> = if let ChunkOut::File(ref p) = out {
+                    BufWriter::with_capacity(
+                        BUF,
+                        Box::new(
+                            File::create(p)
+                                .map_err(|e| format!("chunked flash: cannot create '{}': {}", p, e))?,
+                        ),
+                    )
+                } else {
+                    BufWriter::with_capacity(BUF, Box::new(io::stdout()))
+                };
+                let mut pending: std::collections::BTreeMap<usize, Vec<u8>> =
+                    std::collections::BTreeMap::new();
+                let mut next_write = 0usize;
+                let mut received = 0usize;
+                let mut written: u64 = 0;
+                let mut err: Option<String> = None;
+                while received < entries.len() {
+                    let (idx, res) = match rx.recv() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            err = Some("chunked flash: decode pool exited unexpectedly".into());
+                            break;
+                        }
+                    };
+                    received += 1;
+                    match res {
+                        Ok(data) => {
+                            pending.insert(idx, data);
+                        }
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                    while err.is_none() {
+                        let data = match pending.remove(&next_write) {
+                            Some(d) => d,
+                            None => break,
+                        };
+                        if let Err(e) = sink.write_all(&data) {
+                            err = Some(format!("chunked flash: write failed: {}", e));
+                            break;
+                        }
+                        written += data.len() as u64;
+                        next_write += 1;
+                    }
+                    if err.is_some() {
+                        break;
+                    }
+                }
+                // Flush stdout/file BEFORE dropping — a short write at the end
+                // of a pipe is a failed flash, not a warning.
+                if err.is_none() {
+                    if let Err(e) = sink.flush() {
+                        err = Some(format!("chunked flash: flush failed: {}", e));
+                    }
+                }
+                drop(rx);
+                match err {
+                    Some(e) => Err(e),
+                    None => Ok(written),
+                }
+            }
+        }
+    })?;
+
+    Ok(total_written)
+}
+
 /// Self-test: round-trip every algorithm plus a ZIP extraction, with no
 /// filesystem dependencies outside the system temp dir.
 ///
@@ -238,6 +563,110 @@ pub fn selftest() -> Result<(), String> {
     let _ = std::fs::remove_file(&tmp_out);
     if read_back != b"zip-selftest-ok" || n != read_back.len() as u64 {
         return Err("zip extraction round-trip mismatch".to_string());
+    }
+
+    // T51: chunked flash path round-trip — build a mini DDBU v2 bundle
+    // (2 independently-compressed chunks + trailer), decode it back via
+    // flash_chunked, and prove the compressed-hash gate refuses a bad hash.
+    // If this passes, the chunked flasher wiring is proven working on this
+    // recovery BEFORE any partition is touched (same guarantee the codec
+    // round-trips above give for classic bundles).
+    {
+        use crate::dd::chunked::{encode_chunk_table, patch_header_v2, ChunkEntry};
+        use sha2::{Digest, Sha256};
+        use std::io::Seek as _;
+
+        let data = b"otaku-decomp chunked selftest payload. ".repeat(48);
+        let half = data.len() / 2;
+        let c0 = compress_bytes(Alg::Xz, &data[..half])?;
+        let c1 = compress_bytes(Alg::Xz, &data[half..])?;
+
+        let tmp_bundle = std::env::temp_dir().join("otaku-decomp-selftest-chunked.bin");
+        let tmp_out = std::env::temp_dir().join("otaku-decomp-selftest-chunked.out");
+        let mut comp_hash = String::new();
+        {
+            let mut f = File::create(&tmp_bundle)
+                .map_err(|e| format!("selftest chunked bundle create: {}", e))?;
+            let wr = |f: &mut File, bytes: &[u8], what: &str| -> Result<(), String> {
+                f.write_all(bytes)
+                    .map_err(|e| format!("selftest chunked {}: {}", what, e))
+            };
+            let mut hdr = vec![0u8; 4096];
+            hdr[..4].copy_from_slice(b"DDBU");
+            hdr[4..6].copy_from_slice(&2u16.to_le_bytes()); // version 2
+            hdr[6..8].copy_from_slice(&3u16.to_le_bytes()); // compress id = xz
+            hdr[8..10].copy_from_slice(&1u16.to_le_bytes()); // num_parts
+            hdr[10..12].copy_from_slice(&4096u16.to_le_bytes()); // header size
+            // (v2 fields are patched AFTER the trailer offset is known)
+            wr(&mut f, &hdr, "header")?;
+
+            let mut entries: Vec<ChunkEntry> = Vec::new();
+            for (i, comp) in [&c0, &c1].iter().enumerate() {
+                let comp_offset = f
+                    .stream_position()
+                    .map_err(|e| format!("selftest chunked pos: {}", e))?;
+                wr(&mut f, comp, "chunk")?;
+                let pos = f
+                    .stream_position()
+                    .map_err(|e| format!("selftest chunked pos: {}", e))?;
+                let aligned = (pos + 4095) / 4096 * 4096;
+                if aligned > pos {
+                    wr(&mut f, &vec![0u8; (aligned - pos) as usize], "pad")?;
+                }
+                entries.push(ChunkEntry {
+                    comp_offset,
+                    comp_len: comp.len() as u64,
+                    decomp_len: if i == 0 {
+                        half as u64
+                    } else {
+                        (data.len() - half) as u64
+                    },
+                });
+            }
+            let table_offset = f
+                .stream_position()
+                .map_err(|e| format!("selftest chunked pos: {}", e))?;
+            wr(&mut f, &encode_chunk_table(&entries), "trailer")?;
+            patch_header_v2(&mut hdr, table_offset, &[2]);
+            f.seek(std::io::SeekFrom::Start(0))
+                .map_err(|e| format!("selftest chunked seek: {}", e))?;
+            wr(&mut f, &hdr, "header rewrite")?;
+            f.flush()
+                .map_err(|e| format!("selftest chunked flush: {}", e))?;
+
+            let mut hasher = Sha256::new();
+            hasher.update(&c0);
+            hasher.update(&c1);
+            comp_hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        }
+
+        // Good hash → full decode round-trip.
+        let n = flash_chunked(
+            tmp_bundle.to_str().unwrap_or_default(),
+            0,
+            0,
+            ChunkOut::File(tmp_out.to_str().unwrap_or_default().to_string()),
+            Some(&comp_hash),
+        )?;
+        let read_back = std::fs::read(&tmp_out)
+            .map_err(|e| format!("selftest chunked read back: {}", e))?;
+        if read_back != data || n != data.len() as u64 {
+            return Err("chunked flash round-trip mismatch".to_string());
+        }
+        // Bad hash → must refuse BEFORE decoding (output file must be
+        // untouched: the gate runs ahead of the pool).
+        let bad = flash_chunked(
+            tmp_bundle.to_str().unwrap_or_default(),
+            0,
+            0,
+            ChunkOut::File(tmp_out.to_str().unwrap_or_default().to_string()),
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+        if bad.is_ok() {
+            return Err("chunked flash accepted a WRONG compressed hash".to_string());
+        }
+        let _ = std::fs::remove_file(&tmp_bundle);
+        let _ = std::fs::remove_file(&tmp_out);
     }
 
     Ok(())
@@ -316,5 +745,103 @@ mod tests {
     #[test]
     fn test_selftest_green() {
         selftest().expect("selftest must pass");
+    }
+
+    /// T51: flash_chunked must honor `base_off` (direct-read mode where the
+    /// "bundle" is the ZIP file itself: junk bytes precede otaku.bin) and
+    /// refuse v1 bundles + out-of-range partition indices.
+    #[test]
+    fn test_flash_chunked_base_offset_and_gates() {
+        use crate::dd::chunked::{encode_chunk_table, patch_header_v2, ChunkEntry};
+
+        let data: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let half = data.len() / 2;
+        let c0 = compress_bytes(Alg::Xz, &data[..half]).unwrap();
+        let c1 = compress_bytes(Alg::Xz, &data[half..]).unwrap();
+
+        // Build the bundle, then prepend junk to simulate ZIP direct-read.
+        let bundle = std::env::temp_dir().join("t51_flash_bundle.bin");
+        let shifted = std::env::temp_dir().join("t51_flash_shifted.bin");
+        let out_path = std::env::temp_dir().join("t51_flash_out.bin");
+        {
+            use std::io::{Seek as _, SeekFrom};
+            let mut f = File::create(&bundle).unwrap();
+            let mut hdr = vec![0u8; 4096];
+            hdr[..4].copy_from_slice(b"DDBU");
+            hdr[4..6].copy_from_slice(&2u16.to_le_bytes());
+            hdr[6..8].copy_from_slice(&3u16.to_le_bytes());
+            hdr[8..10].copy_from_slice(&1u16.to_le_bytes());
+            hdr[10..12].copy_from_slice(&4096u16.to_le_bytes());
+            f.write_all(&hdr).unwrap();
+            let mut entries = Vec::new();
+            for (i, comp) in [&c0, &c1].iter().enumerate() {
+                let off = f.stream_position().unwrap();
+                f.write_all(comp).unwrap();
+                let pos = f.stream_position().unwrap();
+                let aligned = (pos + 4095) / 4096 * 4096;
+                if aligned > pos {
+                    f.write_all(&vec![0u8; (aligned - pos) as usize]).unwrap();
+                }
+                entries.push(ChunkEntry {
+                    comp_offset: off,
+                    comp_len: comp.len() as u64,
+                    decomp_len: if i == 0 { half as u64 } else { (data.len() - half) as u64 },
+                });
+            }
+            let table_off = f.stream_position().unwrap();
+            f.write_all(&encode_chunk_table(&entries)).unwrap();
+            patch_header_v2(&mut hdr, table_off, &[2]);
+            f.seek(SeekFrom::Start(0)).unwrap();
+            f.write_all(&hdr).unwrap();
+        }
+        // Junk prefix = 59 bytes (a realistic ZIP local-header shift).
+        let junk = 59usize;
+        {
+            let orig = std::fs::read(&bundle).unwrap();
+            let mut shifted_bytes = vec![0u8; junk];
+            shifted_bytes.extend_from_slice(&orig);
+            std::fs::write(&shifted, &shifted_bytes).unwrap();
+        }
+
+        // base_off path: decode from the shifted file.
+        let n = flash_chunked(
+            shifted.to_str().unwrap(),
+            junk as u64,
+            0,
+            ChunkOut::File(out_path.to_str().unwrap().to_string()),
+            None,
+        )
+        .expect("base_off decode");
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(std::fs::read(&out_path).unwrap(), data);
+
+        // v1 bundle must be refused (honest error, no half-parse).
+        {
+            let mut orig = std::fs::read(&bundle).unwrap();
+            orig[4..6].copy_from_slice(&1u16.to_le_bytes());
+            std::fs::write(&shifted, &orig).unwrap();
+        }
+        assert!(flash_chunked(
+            shifted.to_str().unwrap(),
+            0,
+            0,
+            ChunkOut::File(out_path.to_str().unwrap().to_string()),
+            None
+        )
+        .is_err());
+
+        // Out-of-range partition index must be refused.
+        assert!(flash_chunked(
+            bundle.to_str().unwrap(),
+            0,
+            5,
+            ChunkOut::File(out_path.to_str().unwrap().to_string()),
+            None
+        )
+        .is_err());
+
+        let _ = std::fs::remove_file(&bundle);
+        let _ = std::fs::remove_file(&shifted);
+        let _ = std::fs::remove_file(&out_path);
     }
 }
