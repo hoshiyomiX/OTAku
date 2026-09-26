@@ -68,10 +68,11 @@ const MAX_OP_DATA_SIZE: u64 = 256 * 1024 * 1024;
 /// (production blocker for large ROM partitions). The writer now slices
 /// each image at this raw-byte boundary and emits one op per slice.
 /// 64 MiB keeps every op 4x below the cap even for pathological codec
-/// expansion, bounds the reader's per-op RAM (compressed Vec +
-/// decompressed Cursor ≈ 2 x slice), matches the T51 chunked-DD chunk
-/// size (measured ratio impact < 1%), and keeps partitions smaller than
-/// one slice on the EXACT legacy single-op structure.
+/// expansion, bounds the reader's per-op RAM (compressed Vec + ~8 MB
+/// streaming decompression state — the decompressed output itself is no
+/// longer buffered since T55), matches the T51 chunked-DD chunk size
+/// (measured ratio impact < 1%), and keeps partitions smaller than one
+/// slice on the EXACT legacy single-op structure.
 const OP_SPLIT_SLICE_SIZE: u64 = 64 * 1024 * 1024;
 
 // T53-F05: absolute sanity caps for header/manifest lengths. The
@@ -281,18 +282,23 @@ pub fn read_payload(path: &str) -> Result<PayloadInfo, String> {
 // Deprecated since 0.4.0, gated with #[cfg(test)] since earlier cleanup,
 // but never called even in tests — removed entirely.
 
-/// Extract and decompress a partition image, streaming to a writer.
+/// Extract and decompress a partition image, streaming to a sink.
 ///
 /// Instead of accumulating the entire decompressed image in RAM as a
 /// `Vec<u8>` (which can be 2-5GB for system.img), it writes decompressed
-/// chunks to the provided writer as they are produced.
+/// chunks to the provided sink as they are produced.
 ///
 /// # Memory usage
-/// Peak RAM: ~8MB per operation (compressed chunk read + decompression buffer).
+/// Peak RAM: ~8MB per operation (compressed chunk read + decompression
+/// buffer). T55 (F02): the decompressed output itself is NEVER buffered —
+/// failed attempts and extent surpluses are rolled back on the SINK
+/// (`ExtractSink::rollback`), not in RAM. Pre-T55 the fallback-retry
+/// buffering held up to MAX_DECOMPRESSED_SIZE (2 GiB) per attempt in a
+/// Cursor — an instant OOM on Android's 256-512 MB heap.
 ///
 /// # Returns
-/// Total bytes written to the writer (the decompressed partition size).
-pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
+/// Total bytes written to the sink (the decompressed partition size).
+pub fn extract_and_decompress_partition_to_writer<W: ExtractSink>(
     payload_info: &PayloadInfo,
     partition_name: &str,
     writer: &mut W,
@@ -433,15 +439,18 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
             None
         };
 
-        // Stream decompress directly to writer.
-        // BUG FIX (NEW-H): Previously, if decompress_to_writer failed after writing
-        // partial data to the writer (File), the fallback would APPEND after the
-        // corrupt partial output — producing a garbage file. Now we buffer the
-        // initial attempt in a Cursor<Vec<u8>>. On success, write the buffer to
-        // the actual writer. On failure, discard the buffer and retry with fallback.
-        // This trades memory for correctness — acceptable since MAX_OP_DATA_SIZE
-        // caps compressed input at 256MB and each op's decompressed output is
-        // bounded by MAX_DECOMPRESSED_SIZE in compression.rs.
+        // T55 (F02): stream decompression DIRECTLY to the sink and roll the
+        // sink back on failure. The previous NEW-H fix buffered the ENTIRE
+        // decompressed output in a Cursor<Vec<u8>> before writing it (so a
+        // failed attempt could be discarded without leaving partial bytes
+        // in the output file). That buffer could reach MAX_DECOMPRESSED_SIZE
+        // (2 GiB) — plus a second one during the fallback retry — an instant
+        // OOM on Android's 256-512 MB heap for pre-T54 single-op payloads
+        // whose decompressed image is gigabytes. The sink's rollback() now
+        // provides the same no-partial-garbage guarantee at a steady ~8 MB
+        // RAM: a failed attempt's bytes are truncated away BEFORE the
+        // fallback runs, and the O-1 surplus truncation reuses the same
+        // mechanism.
         let decomp_bytes = if effective_alg == "none" {
             // Raw data — truncate to expected_size if needed
             let raw_len = if let Some(expected) = expected_size {
@@ -453,43 +462,35 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
                 .map_err(|e| format!("Write raw error: {}", e))?;
             raw_len as u64
         } else {
-            // First attempt: decompress to an in-memory buffer.
-            let mut buf1 = std::io::Cursor::new(Vec::new());
-            match decompress_to_writer(&compressed_data, effective_alg, &mut buf1) {
-                Ok(n) => {
-                    // BUG FIX (O-1): Truncate buffer to expected_size if decompressed
-                    // output exceeds the dst_extents. This matches the in-memory path's
-                    // truncate behavior. Now possible because Cursor buffers the full
-                    // output before writing.
-                    if let Some(expected) = expected_size {
-                        let buf = buf1.get_mut();
-                        if buf.len() > expected as usize {
-                            buf.truncate(expected as usize);
-                        }
+            // Checkpoint = sink position before this op's output. The loop's
+            // own counter is the exact anchor: every op adds precisely the
+            // bytes it wrote (ZERO chunks, raw writes, padding included).
+            let checkpoint = total_written;
+            let primary_n = decompress_to_writer(&compressed_data, effective_alg, writer);
+            let n = match primary_n {
+                Ok(n) => n,
+                Err(primary_err) => {
+                    // T36 cancel: surface the sentinel verbatim — a
+                    // user-requested abort must not be buried under a
+                    // fallback retry. (The old buffered path never touched
+                    // the real writer until success, so its cancel errors
+                    // always surfaced; this keeps that contract.)
+                    if primary_err.contains(crate::CANCEL_SENTINEL) {
+                        return Err(primary_err);
                     }
-                    writer.write_all(buf1.get_ref())
-                        .map_err(|e| format!("Write decompressed error: {}", e))?;
-                    n
-                }
-                Err(_) => {
-                    // First attempt failed — discard partial buffer, try fallback
+                    // Discard whatever the failed primary attempt managed
+                    // to write — NEW-H's no-garbage guarantee, minus the RAM.
+                    writer.rollback(checkpoint).map_err(|e| {
+                        format!("Rollback after failed decompression attempt: {}", e)
+                    })?;
                     let fallback_alg = detect_compression(op_type);
                     if fallback_alg != "none" && fallback_alg != effective_alg {
-                        let mut buf2 = std::io::Cursor::new(Vec::new());
-                        match decompress_to_writer(&compressed_data, fallback_alg, &mut buf2) {
-                            Ok(n) => {
-                                // Truncate fallback buffer too
-                                if let Some(expected) = expected_size {
-                                    let buf = buf2.get_mut();
-                                    if buf.len() > expected as usize {
-                                        buf.truncate(expected as usize);
-                                    }
+                        match decompress_to_writer(&compressed_data, fallback_alg, writer) {
+                            Ok(n) => n,
+                            Err(fallback_err) => {
+                                if fallback_err.contains(crate::CANCEL_SENTINEL) {
+                                    return Err(fallback_err);
                                 }
-                                writer.write_all(buf2.get_ref())
-                                    .map_err(|e| format!("Write fallback decompressed error: {}", e))?;
-                                n
-                            }
-                            Err(_) => {
                                 // BUG FIX (O-4): Return error instead of writing raw
                                 // compressed data as "last resort" — that silently produces
                                 // a corrupt file that could brick the device if flashed.
@@ -509,11 +510,33 @@ pub fn extract_and_decompress_partition_to_writer<W: std::io::Write>(
                         ));
                     }
                 }
+            };
+            // BUG FIX (O-1): Truncate to expected_size if the decompressed
+            // output exceeds the dst_extents — the same semantics the old
+            // in-memory buffer truncate had, applied via sink rollback
+            // instead of holding the surplus bytes in RAM first.
+            if let Some(expected) = expected_size {
+                if n > expected {
+                    let keep_to = checkpoint.checked_add(expected).ok_or_else(|| {
+                        format!(
+                            "Extent truncation offset overflow (checkpoint={} + expected={})",
+                            checkpoint, expected
+                        )
+                    })?;
+                    writer.rollback(keep_to).map_err(|e| {
+                        format!("Rollback for extent truncation: {}", e)
+                    })?;
+                    expected
+                } else {
+                    n
+                }
+            } else {
+                n
             }
         };
 
         // Pad with zeros if decompressed output is smaller than expected size.
-        // Truncation is not needed for streaming (we already wrote what we got).
+        // (Surplus truncation already happened above via sink rollback — O-1.)
         if let Some(expected) = expected_size {
             if decomp_bytes < expected {
                 let padding = (expected - decomp_bytes) as usize;
@@ -688,6 +711,63 @@ impl<W: std::io::Write> std::io::Write for ProgressSidecarWriter<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  T55 (F02): extract sinks with rollback
+// ---------------------------------------------------------------------------
+
+/// T55 (F02): output sink for extraction — a writer whose bytes can be
+/// discarded back to a previously recorded anchor.
+///
+/// The extract loop records `checkpoint = total_written` before each op's
+/// decompressed output; on a failed decompression attempt (or when the
+/// output surpasses the dst_extents), everything past the anchor is
+/// truncated away and writing resumes from there. This replaces the old
+/// NEW-H full-output RAM buffering (up to MAX_DECOMPRESSED_SIZE = 2 GiB
+/// per attempt — an instant OOM on Android's 256-512 MB heap) with a
+/// steady ~8 MB streaming footprint.
+pub trait ExtractSink: std::io::Write {
+    /// Discard every byte written past `pos` and reset the write position
+    /// to `pos`. Rolling back to the current length is a no-op; subsequent
+    /// writes append at `pos`.
+    fn rollback(&mut self, pos: u64) -> std::io::Result<()>;
+}
+
+impl ExtractSink for File {
+    fn rollback(&mut self, pos: u64) -> std::io::Result<()> {
+        // Truncate to the anchor, then park the cursor there so the next
+        // write appends instead of landing at a stale offset.
+        self.set_len(pos)?;
+        self.seek(SeekFrom::Start(pos))?;
+        Ok(())
+    }
+}
+
+impl ExtractSink for std::io::Cursor<Vec<u8>> {
+    fn rollback(&mut self, pos: u64) -> std::io::Result<()> {
+        // 32-bit targets (armv7a): a u64 anchor can exceed usize capacity.
+        if pos > usize::MAX as u64 {
+            return Err(std::io::Error::other(format!(
+                "rollback anchor {} exceeds addressable buffer size",
+                pos
+            )));
+        }
+        self.get_mut().truncate(pos as usize);
+        self.set_position(pos);
+        Ok(())
+    }
+}
+
+impl<W: ExtractSink> ExtractSink for ProgressSidecarWriter<W> {
+    fn rollback(&mut self, pos: u64) -> std::io::Result<()> {
+        self.inner.rollback(pos)?;
+        // The counter IS the sink's logical length — re-anchor it so the
+        // sidecar and subsequent progress deltas stay truthful.
+        self.bytes_written = pos;
+        self.note_progress();
+        Ok(())
     }
 }
 
@@ -1913,6 +1993,233 @@ mod tests {
         assert_eq!(&extracted.get_ref()[..160_100], &original[..]);
         assert!(extracted.get_ref()[160_100..].iter().all(|&b| b == 0));
         assert_eq!(partition_expected_size(&info, "system"), 163_840);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T55 (F02): decompressed output exceeding an op's dst_extents is
+    /// truncated via sink rollback. Multi-op payload: the checkpoint
+    /// anchor must equal the bytes of ALL PRIOR ops (128 KiB here), so the
+    /// final op's 32 KiB output cut down to a 16 KiB extent lands at
+    /// exactly 144 KiB total — the arithmetic the old in-memory buffer
+    /// truncate performed implicitly, now proven on the streaming path.
+    #[test]
+    fn test_t55_surplus_output_truncated_at_extent_boundary() {
+        // 160 KiB image, 64 KiB slices -> 3 ops (64 + 64 + 32 KiB, gzip).
+        let dir = temp_dir("surplus");
+        let original: Vec<u8> = (0..163_840usize)
+            .map(|i| ((i / 1024) % 251) as u8)
+            .collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        // Shrink the LAST op's extent: 8 blocks -> 4 (32 KiB -> 16 KiB).
+        let info = read_payload(&out).unwrap();
+        let file_bytes = std::fs::read(&out).unwrap();
+        let old_data_start = info.data_offset as usize;
+        let mut bad_manifest = info.manifest.clone();
+        bad_manifest.partitions[0].install_operations[2].dst_extents[0].num_blocks = 4;
+        let bad_manifest_bytes = crate::proto::encode_manifest(&bad_manifest);
+        let mut bad_header = info.header.clone();
+        bad_header.manifest_len = bad_manifest_bytes.len() as u64;
+        let bad_header_bytes = crate::proto::encode_payload_header(&bad_header);
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(b"OTKU");
+        rebuilt.extend_from_slice(&(bad_header_bytes.len() as u64).to_be_bytes());
+        rebuilt.extend_from_slice(&bad_header_bytes);
+        rebuilt.extend_from_slice(&bad_manifest_bytes);
+        rebuilt.extend_from_slice(&file_bytes[old_data_start..]);
+        std::fs::write(&out, &rebuilt).unwrap();
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let n = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "system",
+            &mut extracted,
+        )
+        .unwrap_or_else(|e| panic!("extract gagal: {}", e));
+        // Ops 1-2 untouched (128 KiB), final op truncated 32 -> 16 KiB.
+        assert_eq!(n, 131_072 + 16_384);
+        assert_eq!(extracted.get_ref().len(), 131_072 + 16_384);
+        assert_eq!(&extracted.get_ref()[..147_456], &original[..147_456]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T55 (F02): primary + fallback both fail -> O-4 error, and the sink
+    /// is rolled back to the checkpoint — the failed attempt's partial
+    /// bytes must NOT survive in the output (the NEW-H guarantee, now via
+    /// rollback instead of a 2 GiB-class RAM buffer).
+    #[test]
+    fn test_t55_failed_primary_rolls_back_sink() {
+        // 96 KiB image, 64 KiB slices -> 2 gzip ops. Truncate op 2's
+        // data_length to half (gzip magic intact -> sniff = gzip, stream
+        // cut mid-way -> primary fails) and set its op_type to ZSTD so a
+        // distinct fallback exists (zstd on gzip bytes -> also fails).
+        let dir = temp_dir("allfail");
+        let original: Vec<u8> = (0..98_304usize)
+            .map(|i| ((i / 1024) % 251) as u8)
+            .collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        let file_bytes = std::fs::read(&out).unwrap();
+        let old_data_start = info.data_offset as usize;
+        let mut bad_manifest = info.manifest.clone();
+        let orig_len = bad_manifest.partitions[0].install_operations[1].data_length;
+        assert!(orig_len > 40, "blob gzip op2 terlalu kecil utk dipotong: {}", orig_len);
+        {
+            let op2 = &mut bad_manifest.partitions[0].install_operations[1];
+            op2.data_length = orig_len / 2;
+            op2.r#type = 16;
+        }
+        let bad_manifest_bytes = crate::proto::encode_manifest(&bad_manifest);
+        let mut bad_header = info.header.clone();
+        bad_header.manifest_len = bad_manifest_bytes.len() as u64;
+        let bad_header_bytes = crate::proto::encode_payload_header(&bad_header);
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(b"OTKU");
+        rebuilt.extend_from_slice(&(bad_header_bytes.len() as u64).to_be_bytes());
+        rebuilt.extend_from_slice(&bad_header_bytes);
+        rebuilt.extend_from_slice(&bad_manifest_bytes);
+        rebuilt.extend_from_slice(&file_bytes[old_data_start..]);
+        std::fs::write(&out, &rebuilt).unwrap();
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let err = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "system",
+            &mut extracted,
+        )
+        .err()
+        .expect("harus gagal: kedua dekompresor gagal");
+        assert!(
+            err.contains("All decompressors failed"),
+            "pesan error: {}",
+            err
+        );
+        // Rollback terbukti: sink berisi PERSIS output op 1.
+        assert_eq!(extracted.get_ref(), &original[..65_536]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T55 (F02): sniff finds no magic and the op_type hint's decoder
+    /// fails -> no DISTINCT fallback exists -> clean error (no raw-data
+    /// passthrough), sink rolled back to the checkpoint.
+    #[test]
+    fn test_t55_no_fallback_clean_error_rolls_back() {
+        // 96 KiB RAW payload (ALG_NONE), 64 KiB slices -> 2 ops. Flip op
+        // 2's type to XZ (8): sniff sees no magic -> NEW-4 trusts the
+        // op_type hint -> xz decode of raw bytes fails -> fallback ==
+        // primary -> "no fallback available".
+        let dir = temp_dir("nofb");
+        let original: Vec<u8> = (0..98_304usize)
+            .map(|i| ((i / 1024) % 251) as u8)
+            .collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "none".to_string(),
+        }];
+        let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        let file_bytes = std::fs::read(&out).unwrap();
+        let old_data_start = info.data_offset as usize;
+        let mut bad_manifest = info.manifest.clone();
+        bad_manifest.partitions[0].install_operations[1].r#type = 8;
+        let bad_manifest_bytes = crate::proto::encode_manifest(&bad_manifest);
+        let mut bad_header = info.header.clone();
+        bad_header.manifest_len = bad_manifest_bytes.len() as u64;
+        let bad_header_bytes = crate::proto::encode_payload_header(&bad_header);
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(b"OTKU");
+        rebuilt.extend_from_slice(&(bad_header_bytes.len() as u64).to_be_bytes());
+        rebuilt.extend_from_slice(&bad_header_bytes);
+        rebuilt.extend_from_slice(&bad_manifest_bytes);
+        rebuilt.extend_from_slice(&file_bytes[old_data_start..]);
+        std::fs::write(&out, &rebuilt).unwrap();
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let err = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "system",
+            &mut extracted,
+        )
+        .err()
+        .expect("harus gagal: dekompresor hint gagal, tanpa fallback beda");
+        assert!(
+            err.contains("no fallback available"),
+            "pesan error: {}",
+            err
+        );
+        // Sink bersih: hanya output op 1 (raw slice pertama).
+        assert_eq!(extracted.get_ref(), &original[..65_536]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T55 (F02): kontrak ExtractSink itu sendiri — File dan
+    /// ProgressSidecarWriter memotong tepat ke anchor dan melanjutkan
+    /// append dari sana; Cursor meniru kontrak yang sama di memori.
+    #[test]
+    fn test_t55_extract_sink_rollback_contract() {
+        use std::io::Write as _;
+        let dir = temp_dir("sink");
+
+        // File: rollback memotong dan me-re-anchor append.
+        let path = dir.join("a.img");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"aaaa").unwrap();
+        f.write_all(b"bbbb").unwrap();
+        f.write_all(b"cccc").unwrap();
+        f.rollback(4).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 4);
+        f.write_all(b"dddd").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), b"aaaadddd".as_slice());
+
+        // Cursor: kontrak identik, di memori.
+        let mut c = std::io::Cursor::new(Vec::new());
+        c.write_all(b"aaaa").unwrap();
+        c.write_all(b"bbbb").unwrap();
+        c.rollback(2).unwrap();
+        c.write_all(b"ee").unwrap();
+        assert_eq!(c.get_ref().as_slice(), b"aaee".as_slice());
+
+        // ProgressSidecarWriter: counter re-anchor, sidecar mengikuti.
+        let out2 = dir.join("b.img");
+        let out2_str = out2.to_string_lossy().to_string();
+        let f2 = std::fs::File::create(&out2).unwrap();
+        let mut pw = ProgressSidecarWriter::new(f2, &out2_str, "system", 16);
+        pw.write_all(b"aaaa").unwrap();
+        pw.write_all(b"bbbb").unwrap();
+        pw.rollback(5).unwrap();
+        pw.write_all(b"fff").unwrap();
+        assert_eq!(std::fs::read(&out2).unwrap().as_slice(), b"aaaabfff".as_slice());
+        let sidecar = std::fs::read_to_string(format!("{}.progress", out2_str)).unwrap();
+        assert!(
+            sidecar.contains("\"bytes_written\":8"),
+            "sidecar tidak mengikuti rollback: {}",
+            sidecar
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
