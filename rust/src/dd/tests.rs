@@ -292,8 +292,8 @@ use super::*;
             "F3: pesan abort brotli hilang"
         );
         assert!(
-            s.contains("Unknown compression id $COMPRESS_ID"),
-            "F3: pesan abort id tak dikenal hilang"
+            s.contains("unknown compression id $COMPRESS_ID"),
+            "F3: pesan abort id tak dikenal hilang (T52 fail E12)"
         );
         // blok wiring brotli lama harus hilang
         assert!(
@@ -395,10 +395,10 @@ use super::*;
             // rework: helper extraction/verification/self-test in Step 0,
             // helper-only wiring, listing/unzip/MT/fallback machinery removed.
             // Previous golden: 5dbd241925d0437dccf3d6353def34835c7b1269867e11f8f22aec208e08f7d3 (T51)
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            // T52: revealed by CI (no local toolchain) — precise error
-            // reporting: dbg/step/fail/dump_env/persist_dump infra, E01-E37
-            // manifest, silent step tags, /sdcard dump, OTAKU_DEBUG opt-in.
+            "ceb40a14204336daf9fb0d8c10d2c26e56ec07dbfd6088ed3d681ccdf7062243",
+            // T52: revealed by CI run#316/#241 (no local toolchain) — precise
+            // error reporting: dbg/step/fail/dump_env/persist_dump infra,
+            // E01-E37 manifest, silent step tags, /sdcard dump, OTAKU_DEBUG.
             // T51 history: revealed by CI run#314/#241 — chunked
             // flash path: IS_CHUNKED/OTAKU_WRITE_MODE constants, HDR_VERSION
             // expectation gate, chunked flash loop branch, PART_i_CHUNKES.
@@ -987,8 +987,8 @@ use super::*;
             "F6: cabang deteksi-gagal (warn + proceed) hilang"
         );
         assert!(
-            script.contains("Refusing to flash a bundle"),
-            "F6: cabang abort device-beda hilang"
+            script.contains("refusing to flash a bundle built for"),
+            "F6: cabang abort device-beda hilang (T52 fail E19)"
         );
     }
 
@@ -1395,8 +1395,8 @@ use super::*;
         );
         // The abort message should be present
         assert!(
-            script.contains("Missing partition metadata"),
-            "Bug NEW-A/B (flash step): abort message missing"
+            script.contains("missing partition metadata for $PNAME"),
+            "Bug NEW-A/B (flash step): abort message missing (T52 fail E28)"
         );
     }
 
@@ -1429,8 +1429,8 @@ use super::*;
         );
         // Hash mismatch abort message is present
         assert!(
-            script.contains("Compressed data hash mismatch"),
-            "Hash mismatch abort message missing"
+            script.contains("compressed data hash mismatch for $PNAME"),
+            "Hash mismatch abort message missing (T52 fail E30)"
         );
         // Uses verify_trim (dd-based) for exact byte count instead of head -c
         assert!(
@@ -1583,12 +1583,12 @@ use super::*;
         );
         // Diagnostic info on failure
         assert!(
-            script.contains("Details:"),
-            "GZIP error diagnostic message missing"
+            script.contains("stderr=$GZIP_ERR_MSG"),
+            "GZIP error diagnostic message missing (T52: stderr rides fail() ctx)"
         );
         assert!(
-            script.contains("Bundle:"),
-            "Bundle diagnostic info missing"
+            script.contains("bundle=$BUNDLE_SIZE"),
+            "Bundle diagnostic info missing (T52: sizes ride fail() ctx)"
         );
         // T49: NO fallback decompressor list — helper-only by design
         assert!(
