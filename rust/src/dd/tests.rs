@@ -394,8 +394,12 @@ use super::*;
             // T49: revealed by CI (no local toolchain) — bundled decompressor
             // rework: helper extraction/verification/self-test in Step 0,
             // helper-only wiring, listing/unzip/MT/fallback machinery removed.
-            "5dbd241925d0437dccf3d6353def34835c7b1269867e11f8f22aec208e08f7d3",
-            // T51: revealed by CI run#314/#241 (no local toolchain) — chunked
+            // Previous golden: 5dbd241925d0437dccf3d6353def34835c7b1269867e11f8f22aec208e08f7d3 (T51)
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // T52: revealed by CI (no local toolchain) — precise error
+            // reporting: dbg/step/fail/dump_env/persist_dump infra, E01-E37
+            // manifest, silent step tags, /sdcard dump, OTAKU_DEBUG opt-in.
+            // T51 history: revealed by CI run#314/#241 — chunked
             // flash path: IS_CHUNKED/OTAKU_WRITE_MODE constants, HDR_VERSION
             // expectation gate, chunked flash loop branch, PART_i_CHUNKES.
             "update-binary template berubah dari golden — cek diff template yang tidak disengaja \\
@@ -465,6 +469,72 @@ use super::*;
         assert!(s0.contains("DECOMP_PIPE=\"cat\""));
         assert!(s0.contains("--selftest"));
         assert!(s0.contains("HELPER_SHA256="));
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // T52: precise error reporting — infra functions, E-code manifest,
+    // step tags, debug dump, and full E01-E37 coverage must stay wired.
+    // ──────────────────────────────────────────────────────────────
+    #[test]
+    fn test_t52_debug_infra_wiring() {
+        let meta = vec![PartitionMeta {
+            name: "boot".to_string(),
+            unc_size: 33554432,
+            hash_hex: format!("{:064x}", 1u32),
+            comp_size: 16777216,
+            data_offset: 4096,
+            comp_hash_hex: format!("{:064x}", 2u32),
+            chunks: 0,
+        }];
+        let s = build_update_script(
+            1,
+            1,
+            "gzip",
+            &meta,
+            33554432,
+            "crosshatch",
+            false,
+            T49_HELPER_SIZE,
+            T49_HELPER_SHA,
+            T49_HELPER_ASSET,
+        );
+        // Infra functions present exactly once (central abort path).
+        for f in ["dbg() {", "step() {", "fail() {", "dump_env() {", "persist_dump() {"] {
+            assert!(s.contains(f), "T52 infra fn missing: {f}");
+        }
+        // Constants + dump pointer + manifest table.
+        assert!(s.contains("OTAKU_DEBUG=0"), "T52 debug flag missing");
+        assert!(s.contains("DBG_LOG=\"/tmp/otaku-debug.log\""), "T52 dump path missing");
+        assert!(s.contains("OTAKU_EXIT_OK=1"), "T52 success flag missing");
+        assert!(s.contains("Full detail: /sdcard/otaku-debug.log"), "T52 dump pointer missing");
+        assert!(s.contains("E-code manifest"), "T52 manifest table missing");
+        // Every E-code is wired: E01-E19 and E24-E37 as direct fail() call
+        // sites; E20-E23 ride the E24 umbrella as $VFAIL detail strings
+        // (set inside validate_target, printed by the E24 caller's ctx).
+        for n in 1..=19u32 {
+            let code = format!("fail E{n:02} ");
+            assert!(s.contains(&code), "T52 E-code call site missing: E{n:02}");
+        }
+        for n in 24..=37u32 {
+            let code = format!("fail E{n:02} ");
+            assert!(s.contains(&code), "T52 E-code call site missing: E{n:02}");
+        }
+        for detail in [
+            "VFAIL=\"E20 partition not found",
+            "VFAIL=\"E21 ",
+            "VFAIL=\"E22 cannot determine size",
+            "VFAIL=\"E23 partition ",
+        ] {
+            assert!(s.contains(detail), "T52 VFAIL detail missing: {detail}");
+        }
+        // Operational context plumbing survived (stderr capture + rc capture).
+        assert!(s.contains("2>\"$GZIP_ERR\""), "helper stderr capture missing");
+        assert!(s.contains("SELFTEST_RC=$?"), "selftest rc capture missing");
+        assert!(s.contains("PWRITE_RC=$?"), "pwrite rc capture missing");
+        // Silent step tags surface only inside error lines: the only
+        // screen-printing of CUR_STEP is inside fail() itself.
+        assert!(s.contains("ui_print \"\u{2717} $F_CODE @ $CUR_STEP: $F_MSG\""));
+        assert!(!s.contains("ui_print \"step"), "step tag leaked to screen output");
     }
 
 

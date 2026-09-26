@@ -23,6 +23,12 @@ const SCRIPT_VERSION: &str = "Custom Payload Maker";
 /// 5. Detects A/B slot
 /// 6. Validates partition block devices (size check, unmount)
 /// 7. Flashes each partition (direct read → decompress → dd write → optional verify)
+/// 8. Reports failures precisely (T52): every abort point carries a unique
+///    E-code (manifest table inside the script), silent step tags that surface
+///    only inside error lines, operational context (rc/cmd/stderr), and a full
+///    debug dump (/tmp/otaku-debug.log, auto-copied to /sdcard/otaku-debug.log
+///    on any non-success exit; OTAKU_DEBUG=1 inside the ZIP mirrors the debug
+///    log to the recovery console).
 #[allow(clippy::too_many_arguments)] // T49: +helper size/sha/asset (10 args)
 pub(super) fn build_update_script(
     num_parts: usize,
@@ -84,6 +90,7 @@ TARGET_DEVICE="{escaped_device}"
 VENDOR_DEVICE=""
 BOARD_DEVICE=""
 CURRENT_DEVICE=""
+step "S04-device"
 
 # ── Spoof-resistant device codename detection ──
 # Reads 4 sources from VENDOR partition (rarely modified by Magisk/GSI/LineageOS,
@@ -128,6 +135,8 @@ elif [ -n "$VENDOR_DEVICE" ]; then
 elif [ -n "$BOARD_DEVICE" ]; then
     CURRENT_DEVICE="$BOARD_DEVICE"
 fi
+
+dbg "device detect: vendor='$VENDOR_DEVICE' board='$BOARD_DEVICE' current='$CURRENT_DEVICE' target='$TARGET_DEVICE'"
 
 # Support comma-separated device list in both TARGET_DEVICE and CURRENT_DEVICE.
 # Match if ANY value in TARGET_DEVICE matches ANY value in CURRENT_DEVICE.
@@ -176,11 +185,7 @@ if [ -n "$TARGET_DEVICE" ]; then
             ui_print "  ! Device codename could not be detected on this recovery."
             ui_print "  ! Continuing — partition validation still gates the flash."
         else
-            ui_print "! ABORT: Refusing to flash a bundle built for $TARGET_DEVICE"
-            ui_print "!  onto this device ($CURRENT_DEVICE)."
-            ui_print "!  Rebuild the bundle with the correct device selected,"
-            ui_print "!  or flash it on the intended device."
-            exit 1
+            fail E19 "refusing to flash a bundle built for $TARGET_DEVICE onto this device ($CURRENT_DEVICE)" "rebuild the bundle with the correct device selected, or flash it on the intended device" "target=$TARGET_DEVICE current=$CURRENT_DEVICE"
         fi
     else
         ui_print "  ✓ Device: $CURRENT_DEVICE"
@@ -238,7 +243,8 @@ fi
 "#
         .to_string()
     } else {
-        r#"ui_print "  Verifying ($PNAME)..."
+        r#"step "S11-verify:$PNAME"
+ui_print "  Verifying ($PNAME)..."
 VERIFY_HASH=""
 
 # Fast path: large block size + background sha256sum via FIFO.
@@ -331,10 +337,7 @@ fi
 if [ "$VERIFY_HASH" = "$PHASH" ]; then
     ui_print "  ✓ $PNAME verified"
 else
-    ui_print "! ABORT: Hash mismatch for $PNAME!"
-    ui_print "  Expected: $PHASH"
-    ui_print "  Got:      $VERIFY_HASH"
-    exit 1
+    fail E37 "post-flash hash mismatch for $PNAME — data on device does not match the bundle" "write completed but read-back differs — retry the flash; if persistent, suspect storage failure" "expected=$PHASH got=$VERIFY_HASH target=$PTARGET size=$PSIZE"
 fi
 "#
         .to_string()
@@ -360,6 +363,96 @@ ui_print() {{
     echo "ui_print" >&$OUTFD
 }}
 
+# ── T52: precise error reporting infrastructure ──────────────────
+# Design (user-locked): E-codes for permanent abort points + rich context
+# (rc/cmd/stderr) for operational failures; step tags surface ONLY inside
+# error lines (success log stays lean); debug dump at /tmp/otaku-debug.log
+# is auto-copied to /sdcard/otaku-debug.log on any non-success exit.
+#
+# E-code manifest (keep in sync when adding abort points):
+#   E01 ZIP not found                E02 not a ZIP archive
+#   E03 malformed LFH (entry 1)      E04 entry 1 not otaku-decomp
+#   E05 helper truncated             E06 helper sha mismatch
+#   E07 helper selftest failed       E08 bundled unzip-entry failed
+#   E09 bundle missing               E10 pre-flash table verify failed
+#   E11 legacy brotli bundle         E12 unknown compress id
+#   E13 bad bundle magic             E14 bundle version mismatch
+#   E15 compress id mismatch         E16 partition count out of range
+#   E17 header/script parts mismatch E18 header size != 4096
+#   E19 device mismatch refuse
+#   E20 partition not found          E21 not a block device
+#   E22 size undeterminable          E23 partition too small
+#   E24 validation failed (ctx carries E20-E23)
+#   E25 lptools not found            E26 super free space low
+#   E27 resize+remap failed          E28 missing partition metadata
+#   E29 comp-hash compute failed     E30 comp-hash mismatch
+#   E31 block device missing         E32 mkfifo failed
+#   E33 chunked pwrite failed        E34 chunked decode failed
+#   E35 classic decompression failed E36 dd write failed (F2 verdict)
+#   E37 post-flash hash mismatch
+OTAKU_DEBUG=0        # 1 = mirror the debug log to the screen (edit inside the ZIP)
+DBG_LOG="/tmp/otaku-debug.log"
+OTAKU_FAIL_SEEN=0    # set by fail()
+OTAKU_EXIT_OK=0      # set to 1 only on the success path (trap reads it)
+CUR_STEP="S00"       # silent step tag — only appears inside error lines
+
+dbg() {{
+    echo "$*" >> "$DBG_LOG" 2>/dev/null
+    if [ "$OTAKU_DEBUG" = "1" ]; then
+        ui_print "  [dbg] $*"
+    fi
+}}
+
+step() {{
+    CUR_STEP="$1"
+    dbg "step $1"
+}}
+
+fail() {{
+    # fail <CODE> <MSG> [HINT] [CTX] — central abort point (T52).
+    # Screen: "✗ E-NN @ S-tag: MSG" + optional ctx/Fix lines + dump pointer.
+    # Everything is also appended to the debug dump for post-mortem.
+    OTAKU_FAIL_SEEN=1
+    F_CODE="$1"; F_MSG="$2"; F_HINT="$3"; F_CTX="$4"
+    {{
+        echo ""
+        echo "── FAIL $F_CODE @ $CUR_STEP ──"
+        echo "  msg : $F_MSG"
+        if [ -n "$F_CTX" ]; then echo "  ctx : $F_CTX"; fi
+        if [ -n "$F_HINT" ]; then echo "  fix : $F_HINT"; fi
+    }} >> "$DBG_LOG" 2>/dev/null
+    ui_print "✗ $F_CODE @ $CUR_STEP: $F_MSG"
+    if [ -n "$F_CTX" ]; then
+        ui_print "  ctx: $F_CTX"
+    fi
+    if [ -n "$F_HINT" ]; then
+        ui_print "  Fix: $F_HINT"
+    fi
+    ui_print "  Full detail: /sdcard/otaku-debug.log"
+    exit 1
+}}
+
+dump_env() {{
+    # One-shot environment snapshot for post-mortem debugging (T52).
+    {{
+        echo "── env @ boot ──"
+        echo "  zip     : $ZIPFILE ($(wc -c < "$ZIPFILE" 2>/dev/null | tr -d ' ') bytes)"
+        echo "  shell   : $(readlink /proc/$$/exe 2>/dev/null)"
+        echo "  kernel  : $(uname -rm 2>/dev/null)"
+        echo "  recovery: $(getprop ro.twrp.version 2>/dev/null)$(getprop ro.orangefox.version 2>/dev/null)"
+        echo "  busybox : $(busybox 2>/dev/null | head -1)"
+        echo "  tools   : dd=$(command -v dd 2>/dev/null) sha256sum=$(command -v sha256sum 2>/dev/null)"
+        echo "             lptools=$(command -v lptools 2>/dev/null) blockdev=$(command -v blockdev 2>/dev/null)"
+        echo "             mkfifo=$(command -v mkfifo 2>/dev/null) od=$(command -v od 2>/dev/null)"
+        echo "  mounts  :"
+        mount 2>/dev/null | sed 's/^/    /' | head -25
+        echo "  by-name : $(ls /dev/block/by-name/ 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+        echo "  mapper  : $(ls /dev/block/mapper/ 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+    }} >> "$DBG_LOG" 2>/dev/null
+}}
+: > "$DBG_LOG" 2>/dev/null
+dump_env
+
 # ── Cleanup trap — re-resize + remap dynamic partitions on ABORT ──
 # If the script exits abnormally (e.g. dd write false-failure on block device),
 # dynamic partitions may have been:
@@ -376,9 +469,32 @@ DYNAMIC_PART_NAMES=""
 HAS_LPTOOLS=0
 CLEANUP_DONE=0
 RESIZED_ORIGINAL=""   # list of "name:original_size_bytes" pairs (set during resize)
+VFAIL=""               # T52: detail of the last validate_target failure (E20-E23)
+persist_dump() {{
+    # T52: copy the debug log to user-visible storage on failure.
+    # /sdcard first (TWRP/OrangeFox convention), then common alternates.
+    DUMP_SAVED=""
+    for _d in /sdcard /data/media/0 /external_sd /mnt/sdcard; do
+        if cp "$DBG_LOG" "$_d/otaku-debug.log" 2>/dev/null; then
+            DUMP_SAVED="$_d/otaku-debug.log"
+            break
+        fi
+    done
+    if [ -n "$DUMP_SAVED" ]; then
+        ui_print "  Debug log saved: $DUMP_SAVED"
+    else
+        ui_print "  Note: debug log stays at /tmp/otaku-debug.log (storage copy failed)"
+    fi
+}}
+
 cleanup_abort() {{
     if [ "$CLEANUP_DONE" = "1" ]; then return; fi
     CLEANUP_DONE=1
+    # T52: persist the debug dump on ANY non-success exit (fail(), signal,
+    # or uncaught error). OTAKU_EXIT_OK is set only on the success path.
+    if [ "$OTAKU_EXIT_OK" != "1" ]; then
+        persist_dump
+    fi
     # Only attempt cleanup if we got past the validation step
     if [ -z "$DYNAMIC_PART_NAMES" ]; then return; fi
     ui_print "✗ Performing emergency cleanup..."
@@ -529,12 +645,11 @@ ui_print "======================================"
     // cases (e.g. ZIP on a FUSE filesystem where dd skip is unreliable).
     script.push_str(&format!(
         r#"# ── Step {extract_step}/{total_steps}: Open payload + bundled decompressor ──────────────────
+step "S01-open"
 ui_print "> Opening payload..."
 
 if [ ! -f "$ZIPFILE" ]; then
-    ui_print "✗ Error: ZIP file not found"
-    ui_print "  Path: $ZIPFILE"
-    exit 1
+    fail E01 "ZIP file not found" "" "path=$ZIPFILE"
 fi
 
 # ── T49: extract the BUNDLED decompressor (otaku-decomp) ──────────
@@ -552,22 +667,17 @@ BUNDLE_SIZE=0
 
 ZIP_LFH_SIG=$(od -A n -t x1 -N 4 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
 if [ "$ZIP_LFH_SIG" != "504b0304" ]; then
-    ui_print "✗ Error: not a ZIP archive (no local file header signature)"
-    exit 1
+    fail E02 "not a ZIP archive (no local file header signature)" "re-transfer the ZIP — first 4 bytes are not a ZIP signature" "sig=$ZIP_LFH_SIG zip=$ZIPFILE"
 fi
 FNAME1_LEN=$(od -A n -t u2 -j 26 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
 EXTRA1_LEN=$(od -A n -t u2 -j 28 -N 2 "$ZIPFILE" 2>/dev/null | tr -d '[:space:]')
 if [ -z "$FNAME1_LEN" ] || [ -z "$EXTRA1_LEN" ]; then
-    ui_print "✗ Error: malformed local file header (entry 1)"
-    exit 1
+    fail E03 "malformed local file header (entry 1)" "ZIP corrupt — re-transfer it" "fname_len=$FNAME1_LEN extra_len=$EXTRA1_LEN"
 fi
 HELPER_OFF=$(( 30 + FNAME1_LEN + EXTRA1_LEN ))
 FNAME1=$(dd if="$ZIPFILE" bs=1 skip=30 count=$FNAME1_LEN 2>/dev/null | tr -d '\0')
 if [ "$FNAME1" != "otaku-decomp" ]; then
-    ui_print "✗ Error: first ZIP entry is '$FNAME1', expected 'otaku-decomp'"
-    ui_print "  This ZIP was built by an OTAku version without the bundled"
-    ui_print "  decompressor (T49). Rebuild the bundle with the current app."
-    exit 1
+    fail E04 "first ZIP entry is '$FNAME1', expected 'otaku-decomp'" "rebuild the bundle with the current app (bundled decompressor since T49)" "entry1=$FNAME1"
 fi
 
 # Bulk-extract the helper: 4096-aligned dd + tail/head byte-trim.
@@ -579,24 +689,17 @@ dd if="$ZIPFILE" bs=4096 skip=$HELPER_SKIP_BLK count=$HELPER_NBLK 2>/dev/null \
     | tail -c +$HELPER_TRIM | head -c "$HELPER_SIZE" > "$HELPER" 2>/dev/null
 HELPER_GOT=$(wc -c < "$HELPER" 2>/dev/null | tr -d ' ')
 if [ "$HELPER_GOT" != "$HELPER_SIZE" ]; then
-    ui_print "✗ Error: bundled decompressor truncated ($HELPER_GOT of $HELPER_SIZE bytes)"
-    exit 1
+    fail E05 "bundled decompressor truncated" "ZIP corrupt — re-transfer it" "got=$HELPER_GOT bytes want=$HELPER_SIZE bytes"
 fi
 HELPER_SUM=$(sha256sum "$HELPER" 2>/dev/null | awk '{{print $1}}')
 if [ "$HELPER_SUM" != "$HELPER_SHA256" ]; then
-    ui_print "✗ Error: bundled decompressor failed integrity check"
-    ui_print "  Expected SHA-256: $HELPER_SHA256"
-    ui_print "  Actual   SHA-256: $HELPER_SUM"
-    ui_print "  The ZIP is corrupt — re-transfer it and flash again."
-    exit 1
+    fail E06 "bundled decompressor failed integrity check" "ZIP corrupt — re-transfer it and flash again" "sha_expected=$HELPER_SHA256 sha_actual=$HELPER_SUM"
 fi
 chmod 755 "$HELPER" 2>/dev/null
-if ! "$HELPER" --selftest >/dev/null 2>&1; then
-    ui_print "✗ Error: bundled decompressor failed its self-test on this recovery"
-    ui_print "  Helper: $HELPER_ASSET (from the APK asset)"
-    ui_print "  Causes: recovery ABI mismatch, or /tmp mounted noexec."
-    ui_print "  (T49 design: no recovery-side decompressor fallback.)"
-    exit 1
+"$HELPER" --selftest >/dev/null 2>&1
+SELFTEST_RC=$?
+if [ "$SELFTEST_RC" -ne 0 ]; then
+    fail E07 "bundled decompressor failed its self-test on this recovery" "recovery ABI mismatch or /tmp noexec (T49: no recovery-side fallback)" "helper=$HELPER_ASSET selftest_rc=$SELFTEST_RC"
 fi
 ui_print "  ✓ Bundled decompressor OK ($(( HELPER_SIZE / 1024 )) KB, self-tested)"
 
@@ -640,10 +743,10 @@ else
     ui_print "  Note: Direct ZIP read unavailable — extracting otaku.bin to /tmp"
     BUNDLE="/tmp/otaku.bin"
     rm -f "$BUNDLE"
-    if ! "$HELPER" --unzip-entry "$ZIPFILE" otaku.bin "$BUNDLE" >/dev/null 2>&1; then
-        ui_print "✗ Error: Failed to extract otaku.bin (bundled unzip)"
-        ui_print "  Hint: Check /tmp free space or ZIP integrity"
-        exit 1
+    "$HELPER" --unzip-entry "$ZIPFILE" otaku.bin "$BUNDLE" >/dev/null 2>&1
+    UNZIP_RC=$?
+    if [ "$UNZIP_RC" -ne 0 ]; then
+        fail E08 "failed to extract otaku.bin (bundled unzip)" "check /tmp free space or ZIP integrity" "rc=$UNZIP_RC cmd=$HELPER --unzip-entry $ZIPFILE otaku.bin $BUNDLE"
     fi
     BUNDLE_SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
     ui_print "  ✓ Extracted ($(( BUNDLE_SIZE / 1048576 )) MB)"
@@ -674,11 +777,11 @@ fi
     // these errors early, before any block device is touched.
     script.push_str(&format!(
         r#"# ── Step {verify_step}/{total_steps}: Pre-flash partition table verify ──────────────────
+step "S02-verify-table"
 ui_print "> Verifying partition table..."
 
 if [ ! -f "$BUNDLE" ]; then
-    ui_print "! ABORT: $BUNDLE not found"
-    exit 1
+    fail E09 "bundle not found" "extraction failed silently — check /tmp space" "path=$BUNDLE"
 fi
 
 # BUNDLE_SIZE is set in Step 0 (either computed from ZIP size - offset,
@@ -757,6 +860,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     if [ -n "$ERRORS_THIS" ]; then
         ui_print "!  Partition $VPNAME:$ERRORS_THIS"
         ui_print "!    unc_size=${{VUNC:-(empty)}} comp_size=${{VCOMP:-(empty)}} offset=${{VOFFSET:-(empty)}} hash=$HASH_SHORT..."
+        dbg "verify-fail part=$VPNAME errors=$ERRORS_THIS unc=${{VUNC:-(empty)}} comp=${{VCOMP:-(empty)}} off=${{VOFFSET:-(empty)}}"
         VERIFY_OK=0
         VERIFY_ERRORS=$(( VERIFY_ERRORS + 1 ))
     else
@@ -765,9 +869,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
 done
 
 if [ "$VERIFY_OK" != "1" ]; then
-    ui_print "! ABORT: $VERIFY_ERRORS partition(s) failed pre-flash verify."
-    ui_print "!  Bundle is corrupt or was built with incompatible OTAku version."
-    exit 1
+    fail E10 "$VERIFY_ERRORS partition(s) failed pre-flash verify" "bundle is corrupt or built with an incompatible OTAku version — rebuild it" "failed=$VERIFY_ERRORS total=$NUM_PARTS"
 fi
 
 ui_print "  ✓ All $NUM_PARTS partition(s) verified"
@@ -786,6 +888,7 @@ ui_print "  ✓ All $NUM_PARTS partition(s) verified"
     //   - Reduces step count from 8 to 7 (without device check) / 9 to 8 (with).
     script.push_str(&format!(
         r#"# ── Step {integrity_step}/{total_steps}: Bundle integrity + decompressor ──────────
+step "S03-integrity"
 ui_print "> Checking bundle integrity..."
 
 # F3 fix (T25): gate the compression id BEFORE any decompressor wiring.
@@ -798,15 +901,10 @@ case "$COMPRESS_ID" in
     0|1|2|3|5|6)
         ;;
     4)
-        ui_print "! ABORT: This bundle uses legacy brotli compression (id 4)."
-        ui_print "!  OTAku no longer produces or flashes brotli bundles."
-        ui_print "!  Rebuild the bundle with gzip/bzip2/xz/lz4/zstd."
-        exit 1
+        fail E11 "legacy brotli compression (id 4) not supported" "rebuild the bundle with gzip/bzip2/xz/lz4/zstd" "compress_id=$COMPRESS_ID"
         ;;
     *)
-        ui_print "! ABORT: Unknown compression id $COMPRESS_ID (supported: 0,1,2,3,5,6)."
-        ui_print "!  Bundle header and update-binary disagree — mixed or corrupt build."
-        exit 1
+        fail E12 "unknown compression id $COMPRESS_ID (supported: 0,1,2,3,5,6)" "bundle header and update-binary disagree — mixed or corrupt build" "compress_id=$COMPRESS_ID"
         ;;
 esac
 
@@ -856,8 +954,7 @@ read_bundle_bytes() {{
 
 HDR_MAGIC=$(read_bundle_bytes 0 4 | od -A n -t x1 | tr -d '[:space:]')
 if [ "$HDR_MAGIC" != "44444255" ]; then
-    ui_print "! ABORT: Invalid bundle magic (expected DDBU, got $(echo $HDR_MAGIC | sed 's/\(..\)/\\x\1/g'))"
-    exit 1
+    fail E13 "invalid bundle magic (expected DDBU)" "otaku.bin is corrupt or the offset is wrong — rebuild/re-transfer the bundle" "magic=$HDR_MAGIC zip_data_offset=$ZIP_DATA_OFFSET"
 fi
 
 HDR_VERSION=$(read_bundle_bytes 4 2 | od -A n -t u2 | tr -d '[:space:]')
@@ -871,20 +968,15 @@ HDR_NUM_PARTS=$(read_bundle_bytes 8 2 | od -A n -t u2 | tr -d '[:space:]')
 HDR_HDR_SIZE=$(read_bundle_bytes 10 2 | od -A n -t u2 | tr -d '[:space:]')
 
 if [ "$HDR_VERSION" != "$EXPECTED_DDBU_VERSION" ]; then
-    ui_print "! ABORT: Unsupported bundle version: $HDR_VERSION (this flasher expects $EXPECTED_DDBU_VERSION)"
-    ui_print "!  A newer-version bundle needs a current OTAku flasher;"
-    ui_print "!  a version mismatch means script and bundle come from different builds."
-    exit 1
+    fail E14 "unsupported bundle version $HDR_VERSION (this flasher expects $EXPECTED_DDBU_VERSION)" "version mismatch means script and bundle come from different builds — re-download or rebuild" "bundle_version=$HDR_VERSION flasher_version=$EXPECTED_DDBU_VERSION"
 fi
 
 if [ "$HDR_COMPRESS" != "$COMPRESS_ID" ]; then
-    ui_print "! ABORT: Compress mismatch: expected $COMPRESS_ID, got $HDR_COMPRESS"
-    exit 1
+    fail E15 "compress id mismatch" "script and bundle come from different builds — mixed or corrupt ZIP" "script=$COMPRESS_ID bundle=$HDR_COMPRESS"
 fi
 
 if [ "$HDR_NUM_PARTS" -lt 1 ] || [ "$HDR_NUM_PARTS" -gt 20 ]; then
-    ui_print "! ABORT: Invalid partition count: $HDR_NUM_PARTS"
-    exit 1
+    fail E16 "invalid partition count in bundle header" "bundle header corrupt — rebuild it" "num_parts=$HDR_NUM_PARTS range=1..20"
 fi
 
 # F8 fix (T25): cross-check the bundle header against the script's own
@@ -893,19 +985,14 @@ fi
 # ZIP shell) — the offsets/hashes baked into the script would not match
 # the bundle layout, flashing garbage at wrong offsets.
 if [ "$HDR_NUM_PARTS" != "$NUM_PARTS" ]; then
-    ui_print "! ABORT: Header/script partition count mismatch"
-    ui_print "!  otaku.bin header says : $HDR_NUM_PARTS"
-    ui_print "!  update-binary says    : $NUM_PARTS"
-    ui_print "!  This ZIP mixes bundles from different builds — re-download or rebuild."
-    exit 1
+    fail E17 "header/script partition count mismatch" "this ZIP mixes bundles from different builds — re-download or rebuild" "otaku_bin=$HDR_NUM_PARTS update_binary=$NUM_PARTS"
 fi
 
 # Header size is always exactly 4096 (HEADER_SIZE constant in build_header).
 # Previously accepted any value >= 64, which let malformed bundles pass.
 # Strict equality check rejects any drift from the constant.
 if [ "$HDR_HDR_SIZE" != "4096" ]; then
-    ui_print "! ABORT: Invalid header size: $HDR_HDR_SIZE (expected 4096)"
-    exit 1
+    fail E18 "invalid header size (expected 4096)" "bundle header corrupt — rebuild it" "hdr_size=$HDR_HDR_SIZE"
 fi
 
 # Header is always 4096-aligned by construction (HEADER_SIZE = 4096).
@@ -956,6 +1043,7 @@ case "$TARGET_SLOT" in
     *)   TARGET_SLOT="" ;;
 esac
 
+dbg "slot detect: cmdline='$CMDLINE_SLOT' raw='$CMDLINE_SLOT_RAW' prop='$PROP_SLOT' final='$TARGET_SLOT'"
 ui_print "  ✓ Active slot: ${{TARGET_SLOT:-none (non-A/B device)}}"
 
 resolve_target() {{
@@ -1055,6 +1143,7 @@ resolve_target() {{
     // ── Partition validation ──
     script.push_str(&format!(
         r#"# ── Step {validation_step}/{total_steps}: Partition validation ─────────────────────
+step "S06-validate"
 ui_print "> Validating target partitions..."
 
 # Known dynamic partition names (live inside super partition, resizable).
@@ -1187,6 +1276,7 @@ validate_target() {{
             ui_print "  $name not mapped (unmapped after Format Data?) — trying lptools map $lp_name..."
             lptools map "$lp_name" >/dev/null 2>&1
             local map_rc=$?
+            dbg "validate: lptools map $lp_name rc=$map_rc"
             if [ $map_rc -eq 0 ]; then
                 # Re-resolve target after successful map
                 target=$(resolve_target "$name")
@@ -1198,6 +1288,7 @@ validate_target() {{
     fi
 
     if [ ! -e "$target" ]; then
+        VFAIL="E20 partition not found ($name at $target)"
         ui_print "✗ Error: $name partition not found"
         ui_print "  Path: $target"
         # F11 fix (T25): $lp_name is only set inside the dynamic auto-map branch
@@ -1213,6 +1304,7 @@ validate_target() {{
     fi
 
     if [ ! -b "$target" ]; then
+        VFAIL="E21 $target is not a block device"
         ui_print "! ABORT: $target is not a block device"
         return 1
     fi
@@ -1257,6 +1349,7 @@ validate_target() {{
     fi
 
     if [ -z "$PART_SIZE" ] || [ "$PART_SIZE" = "0" ]; then
+        VFAIL="E22 cannot determine size of $target"
         ui_print "! WARNING: Cannot determine size of $target"
         return 1
     fi
@@ -1269,6 +1362,7 @@ validate_target() {{
             RESIZE_TOTAL=$(( RESIZE_TOTAL + min_size - PART_SIZE ))
             return 0
         else
+            VFAIL="E23 partition $name too small ($PART_SIZE < $min_size)"
             ui_print "! ABORT: Partition $name too small: $PART_SIZE < $min_size"
             return 1
         fi
@@ -1283,8 +1377,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     eval "PSIZE=\$PART_${{i}}_UNC_SIZE"
     PTARGET=$(resolve_target "$PNAME")
     if ! validate_target "$PTARGET" "$PSIZE" "$PNAME"; then
-        ui_print "! ABORT: Partition validation failed for $PNAME"
-        exit 1
+        fail E24 "partition validation failed for $PNAME" "see ctx for the specific reason (E20-E23)" "$VFAIL | slot=$TARGET_SLOT target=$PTARGET"
     fi
 done
 "#,
@@ -1295,6 +1388,7 @@ done
     // ── Resize dynamic partitions ──
     script.push_str(&format!(
         r#"# ── Step {resize_step}/{total_steps}: Resize dynamic partitions ──────────────────
+step "S07-resize"
 ui_print "> Resizing dynamic partitions..."
 
 if [ -z "$RESIZE_NEEDED" ]; then
@@ -1322,14 +1416,7 @@ else
     which lptools >/dev/null 2>&1 && HAS_LPTOOLS=1
 
     if [ "$HAS_LPTOOLS" != "1" ]; then
-        ui_print "! ABORT: lptools not found in this recovery."
-        ui_print "!  OTAku requires lptools for dynamic partition resize."
-        ui_print "!  dmsetup/lpmake/lpdump fallbacks have been removed."
-        ui_print "!  Solutions:"
-        ui_print "!  1. Use a recovery with lptools enabled (OF_ENABLE_LPTOOLS=1)"
-        ui_print "!  2. Flash via fastbootd instead of recovery"
-        ui_print "!  3. Manually resize partitions before flashing"
-        exit 1
+        fail E25 "lptools not found in this recovery" "1) use a recovery with lptools enabled (OF_ENABLE_LPTOOLS=1) 2) flash via fastbootd 3) resize manually before flashing" "needed_for=$RESIZE_NEEDED resize_total=$(( RESIZE_TOTAL / 1048576 ))MB"
     fi
 
     # Report super partition info (informational only — lptools handles it)
@@ -1352,9 +1439,7 @@ else
     if [ -n "$LP_FREE" ]; then
         ui_print "  Super free space: $(( LP_FREE / 1048576 )) MB"
         if [ "$LP_FREE" -lt "$RESIZE_TOTAL" ]; then
-            ui_print "! ABORT: Insufficient free space in super partition."
-            ui_print "!  Need: $(( RESIZE_TOTAL / 1048576 )) MB, available: $(( LP_FREE / 1048576 )) MB"
-            exit 1
+            fail E26 "insufficient free space in super partition" "reduce bundle size or repack with smaller partitions" "need=$(( RESIZE_TOTAL / 1048576 ))MB available=$(( LP_FREE / 1048576 ))MB"
         fi
     fi
 
@@ -1392,6 +1477,7 @@ else
         if [ -n "$RESIZE_NEEDED" ]; then
             ui_print "  Resizing partitions: $RESIZE_NEEDED"
             RESIZE_OK=1
+            RESIZE_FAIL_LIST=""
             for pname in $RESIZE_NEEDED; do
                 pname=$(echo "$pname" | tr -d ' ')
                 [ -z "$pname" ] && continue
@@ -1503,6 +1589,7 @@ else
                 ui_print "    resize..."
                 lptools resize "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                 RESIZE_RC=$?
+                dbg "resize $LP_NAME rc=$RESIZE_RC new_size=$(( NEW_SIZE_BYTES / 1048576 ))MB"
 
                 if [ $RESIZE_RC -eq 0 ]; then
                     # Resize succeeded — now map the partition to materialize
@@ -1510,6 +1597,7 @@ else
                     ui_print "    resize OK — mapping..."
                     lptools map "$LP_NAME" >/dev/null 2>&1
                     MAP_RC=$?
+                    dbg "map $LP_NAME rc=$MAP_RC (post-resize)"
                     if [ $MAP_RC -ne 0 ]; then
                         ui_print "    ! lptools map failed (rc=$MAP_RC) — retrying..."
                         lptools unmap "$LP_NAME" >/dev/null 2>&1
@@ -1522,8 +1610,10 @@ else
                             lptools remove "$LP_NAME" >/dev/null 2>&1
                             lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                             CREATE_RC=$?
+                            dbg "create $LP_NAME rc=$CREATE_RC (map-retry fallback)"
                             if [ $CREATE_RC -ne 0 ]; then
                                 ui_print "    ! remove+create also failed for $pname"
+                                RESIZE_FAIL_LIST="$RESIZE_FAIL_LIST $pname(rc=$CREATE_RC)"
                                 RESIZE_OK=0
                                 # F-H fix (T33): KEEP the rollback entry — the
                                 # old code stripped it here, leaving NO rollback
@@ -1544,8 +1634,10 @@ else
                     lptools remove "$LP_NAME" >/dev/null 2>&1
                     lptools create "$LP_NAME" "$NEW_SIZE_BYTES" >/dev/null 2>&1
                     CREATE_RC=$?
+                    dbg "create $LP_NAME rc=$CREATE_RC (resize-failed fallback)"
                     if [ $CREATE_RC -ne 0 ]; then
                         ui_print "    ! remove+create also failed for $pname"
+                        RESIZE_FAIL_LIST="$RESIZE_FAIL_LIST $pname(rc=$CREATE_RC)"
                         RESIZE_OK=0
                         # F-H fix (T33): KEEP the rollback entry — the
                         # old code stripped it here, leaving NO rollback
@@ -1571,6 +1663,7 @@ else
                     done
                     if [ ! -e "$PTARGET_VERIFY" ]; then
                         ui_print "    ! $pname still not mapped after 10s — ABORT"
+                        RESIZE_FAIL_LIST="$RESIZE_FAIL_LIST $pname(not-mapped)"
                         RESIZE_OK=0
                         continue
                     fi
@@ -1602,6 +1695,7 @@ else
                             ui_print "    ✓ re-mapped OK: $(( ACTUAL_SIZE / 1048576 )) MB [verified]"
                         else
                             ui_print "    ! still mismatch after re-map — dd will likely fail"
+                            RESIZE_FAIL_LIST="$RESIZE_FAIL_LIST $pname(size-mismatch)"
                             RESIZE_OK=0
                         fi
                     fi
@@ -1611,9 +1705,7 @@ else
             done
 
             if [ "$RESIZE_OK" != "1" ]; then
-                ui_print "! ABORT: resize+remap failed for one or more partitions."
-                ui_print "!  Try flashing via fastbootd or use a different recovery."
-                exit 1
+                fail E27 "resize+remap failed for one or more partitions" "try flashing via fastbootd or use a different recovery" "failed=$RESIZE_FAIL_LIST"
             fi
 
             ui_print "  All partitions resized and verified."
@@ -1638,6 +1730,7 @@ else
     // partition can hold its individual image.
     script.push_str(&format!(
         r#"# ── Step {free_space_step}/{total_steps}: Pre-flash free space check ──────────────────
+step "S08-freespace"
 ui_print "> Checking available storage space..."
 
 # ── TOTAL_FLASH_SIZE vs available space ──
@@ -1745,6 +1838,8 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     eval "POFFSET=\$PART_${{i}}_DATA_OFFSET"
     eval "PCOMP_HASH=\$PART_${{i}}_COMP_HASH"
 
+    step "S09-flash:$PNAME"
+
     STEP_NUM=$(( i + {flash_step_offset} ))
 
     # Bug NEW-A/B fix (flash step): guard empty variables before arithmetic.
@@ -1752,10 +1847,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     # them. Empty POFFSET/PCSIZE/PSIZE in $(( )) causes syntax errors in
     # POSIX sh (dash) — the Android recovery default shell.
     if [ -z "$POFFSET" ] || [ -z "$PCSIZE" ] || [ -z "$PSIZE" ]; then
-        ui_print "! ABORT: Missing partition metadata for $PNAME"
-        ui_print "!  POFFSET=${{POFFSET:-(empty)}} PCSIZE=${{PCSIZE:-(empty)}} PSIZE=${{PSIZE:-(empty)}}"
-        ui_print "!  Bundle is corrupt or was built with incompatible OTAku version."
-        exit 1
+        fail E28 "missing partition metadata for $PNAME" "bundle is corrupt or built with an incompatible OTAku version — rebuild it" "offset=${{POFFSET:-(empty)}} comp=${{PCSIZE:-(empty)}} unc=${{PSIZE:-(empty)}}"
     fi
 
     ui_print "> Flashing $PNAME ($(( PSIZE / 1048576 )) MB)..."
@@ -1883,9 +1975,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             ui_print "  ! dd status=$DF_STATUS (copied ${{DF_COPIED:-0}} of $DF_EXPECTED bytes) — verdict deferred to post-flash hash verify"
             return 0
         fi
-        ui_print "! ABORT: dd write failed for $DF_NAME (status=$DF_STATUS, copied ${{DF_COPIED:-0}} of $DF_EXPECTED bytes)"
-        ui_print "!  dd stderr: $(head -3 "$DF_ERR" 2>/dev/null | tr '\n' ' ')"
-        return 1
+        fail E36 "dd write failed for $DF_NAME" "real write failure (EIO/ENOSPC/EINVAL) — check device health and free space, then retry" "dd_status=$DF_STATUS copied=${{DF_COPIED:-0}} expected=$DF_EXPECTED stderr=$(head -3 "$DF_ERR" 2>/dev/null | tr '\n' ' ')"
     }}
 
     # ── Pre-flash compressed-data hash verification (streaming) ──
@@ -1936,23 +2026,10 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             # FIFO unavailable — fall back to separate hash pass (reads data twice)
             COMP_HASH_ACTUAL=$(dd_if_bundle | trim_pipe | sha256sum 2>/dev/null | awk '{{print $1}}')
             if [ -z "$COMP_HASH_ACTUAL" ]; then
-                ui_print "! ABORT: Cannot compute compressed data hash for $PNAME"
-                ui_print "!  Bundle may be unreadable or sha256sum not available."
-                ui_print "!  Bundle size: $BUNDLE_SIZE bytes"
-                exit 1
+                fail E29 "cannot compute compressed data hash for $PNAME" "bundle may be unreadable or sha256sum not available" "path=separate-pass bundle_size=$BUNDLE_SIZE"
             fi
             if [ "$COMP_HASH_ACTUAL" != "$PCOMP_HASH" ]; then
-                ui_print "! ABORT: Compressed data hash mismatch for $PNAME"
-                ui_print "!  Expected: $PCOMP_HASH"
-                ui_print "!  Actual:   $COMP_HASH_ACTUAL"
-                ui_print "!  The bundle is CORRUPT — compressed data does not match."
-                ui_print "!  Likely causes:"
-                ui_print "!    - ZIP corrupted during transfer (MTP/ADB corruption)"
-                ui_print "!    - tmpfs full during extraction"
-                ui_print "!    - Storage I/O error"
-                ui_print "!  Rebuild the bundle and re-transfer to device."
-                ui_print "!  Bundle size: $BUNDLE_SIZE bytes"
-                exit 1
+                fail E30 "compressed data hash mismatch for $PNAME — bundle is CORRUPT" "rebuild the bundle and re-transfer it (likely MTP/ADB corruption, tmpfs full, or storage I/O error)" "path=separate-pass expected=$PCOMP_HASH actual=$COMP_HASH_ACTUAL bundle_size=$BUNDLE_SIZE"
             fi
             ui_print "  ✓ Hash verified"
             STREAMING_HASH=0
@@ -1972,8 +2049,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             WAIT_COUNT=$(( WAIT_COUNT + 1 ))
         done
         if [ ! -e "$PTARGET" ]; then
-            ui_print "! ABORT: Block device $PTARGET not found after 30s wait"
-            exit 1
+            fail E31 "block device $PTARGET not found after 30s wait" "reboot recovery and retry; if it persists, check the partition layout" "waited=30s partition=$PNAME target=$PTARGET slot=$TARGET_SLOT"
         fi
     fi
     ui_print "  Writing to $PTARGET..."
@@ -1992,14 +2068,13 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             # no ordering constraint. Its exit code is the verdict; the
             # post-flash hash verify (Step C) still applies below.
             ui_print "  Chunked decode → pwrite $PTARGET"
-            if ! "$HELPER" --flash-chunked "$BUNDLE" $i --base $ZIP_DATA_OFFSET \
-                    --comp-hash "$PCOMP_HASH" --pwrite "$PTARGET" 2>"$GZIP_ERR"; then
+            "$HELPER" --flash-chunked "$BUNDLE" $i --base $ZIP_DATA_OFFSET \
+                    --comp-hash "$PCOMP_HASH" --pwrite "$PTARGET" 2>"$GZIP_ERR"
+            PWRITE_RC=$?
+            if [ "$PWRITE_RC" -ne 0 ]; then
                 GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ' ')
                 rm -f "$GZIP_ERR"
-                ui_print "✗ Error: chunked decode/pwrite failed for $PNAME"
-                ui_print "  Details: $GZIP_ERR_MSG"
-                ui_print "  Bundle: $BUNDLE_SIZE bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
-                exit 1
+                fail E33 "chunked decode/pwrite failed for $PNAME" "helper rejected the stream — retry once; if persistent, rebuild the bundle" "rc=$PWRITE_RC stderr=$GZIP_ERR_MSG cmd=$HELPER --flash-chunked $BUNDLE $i --base $ZIP_DATA_OFFSET --comp-hash <baked> --pwrite $PTARGET bundle=$BUNDLE_SIZE comp=$PCSIZE unc=$PSIZE"
             fi
             rm -f "$GZIP_ERR"
         else
@@ -2010,8 +2085,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             rm -f "$TMP_FIFO"
             mkfifo "$TMP_FIFO" 2>/dev/null
             if [ $? -ne 0 ]; then
-                ui_print "! ABORT: mkfifo failed for $PNAME (tmpfs full?)"
-                exit 1
+                fail E32 "mkfifo failed for $PNAME (tmpfs full?)" "free /tmp space or reboot recovery" "fifo=$TMP_FIFO"
             fi
             "$HELPER" --flash-chunked "$BUNDLE" $i --base $ZIP_DATA_OFFSET \
                 --comp-hash "$PCOMP_HASH" > "$TMP_FIFO" 2>"$GZIP_ERR" &
@@ -2029,6 +2103,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
                 if dd oflag=direct if="$_OD_PROBE" of="$PTARGET" bs=4096 count=1 conv=notrunc 2>/dev/null; then
                     DD_OFLAG="oflag=direct"
                 fi
+                dbg "odirect probe $PNAME: ${{DD_OFLAG:-buffered}}"
                 rm -f "$_OD_PROBE"
             fi
 
@@ -2041,10 +2116,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             if [ $DECOMP_STATUS -ne 0 ]; then
                 GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ' ')
                 rm -f "$GZIP_ERR"
-                ui_print "✗ Error: chunked decode failed for $PNAME (status=$DECOMP_STATUS)"
-                ui_print "  Details: $GZIP_ERR_MSG"
-                ui_print "  Bundle: $BUNDLE_SIZE bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
-                exit 1
+                fail E34 "chunked decode failed for $PNAME" "helper rejected the stream — retry once; if persistent, rebuild the bundle" "status=$DECOMP_STATUS stderr=$GZIP_ERR_MSG cmd=$HELPER --flash-chunked $BUNDLE $i --base $ZIP_DATA_OFFSET --comp-hash <baked> bundle=$BUNDLE_SIZE comp=$PCSIZE unc=$PSIZE"
             fi
             rm -f "$GZIP_ERR"
 
@@ -2152,6 +2224,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             if dd oflag=direct if="$_OD_PROBE" of="$PTARGET" bs=4096 count=1 conv=notrunc 2>/dev/null; then
                 DD_OFLAG="oflag=direct"
             fi
+            dbg "odirect probe $PNAME: ${{DD_OFLAG:-buffered}}"
             rm -f "$_OD_PROBE"
         fi
 
@@ -2185,52 +2258,30 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             rm -f "$HASH_FILE"
             HASH_VERIFIED=0
             if [ -z "$COMP_HASH_ACTUAL" ]; then
-                ui_print "! ABORT: Cannot compute compressed data hash for $PNAME"
-                ui_print "!  Bundle may be unreadable or sha256sum not available."
-                ui_print "!  Bundle size: $BUNDLE_SIZE bytes"
-                exit 1
+                fail E29 "cannot compute compressed data hash for $PNAME" "bundle may be unreadable or sha256sum not available" "path=streaming bundle_size=$BUNDLE_SIZE"
             fi
             if [ "$COMP_HASH_ACTUAL" != "$PCOMP_HASH" ]; then
-                ui_print "! ABORT: Compressed data hash mismatch for $PNAME"
-                ui_print "!  Expected: $PCOMP_HASH"
-                ui_print "!  Actual:   $COMP_HASH_ACTUAL"
-                ui_print "!  The bundle is CORRUPT — compressed data does not match."
-                ui_print "!  Likely causes:"
-                ui_print "!    - ZIP corrupted during transfer (MTP/ADB corruption)"
-                ui_print "!    - tmpfs full during extraction"
-                ui_print "!    - Storage I/O error"
-                ui_print "!  Rebuild the bundle and re-transfer to device."
-                ui_print "!  Bundle size: $BUNDLE_SIZE bytes"
-                exit 1
+                fail E30 "compressed data hash mismatch for $PNAME — bundle is CORRUPT" "rebuild the bundle and re-transfer it (likely MTP/ADB corruption, tmpfs full, or storage I/O error)" "path=streaming expected=$PCOMP_HASH actual=$COMP_HASH_ACTUAL bundle_size=$BUNDLE_SIZE"
             fi
+            dbg "comp-hash ok (streaming) part=$PNAME"
             ui_print "  ✓ Hash verified"
         fi
 
         if [ $DECOMP_STATUS -ne 0 ]; then
-            # Print diagnostic info on decompression failure.
-            # This is critical for debugging — without it, we only see
-            # "status=2" with no context.
             # F12 fix (T25): flatten to ONE line — ui_print renders a single
             # line per call; embedded newlines broke the recovery log layout.
             GZIP_ERR_MSG=$(cat "$GZIP_ERR" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ' ')
             rm -f "$GZIP_ERR"
-            # T49: straight ABORT — the bundled helper is the only
-            # decompressor by design; there is no fallback chain to try.
-            ui_print "✗ Error: Decompression failed for $PNAME"
-            ui_print "  Decompressor: $DECOMP_PIPE (status=$DECOMP_STATUS)"
-            ui_print "  Details: $GZIP_ERR_MSG"
-            ui_print "  Bundle: $BUNDLE_SIZE bytes | Compressed: $PCSIZE | Uncompressed: $PSIZE"
-
             # T49: helper-only design — no recovery-side fallback decompressor
             # exists anymore. If the compressed hash was verified OK earlier,
             # the bytes are intact and the bundled helper rejected them
             # (corrupt section or a helper bug) — either way, stop here.
             if [ -n "$PCOMP_HASH" ]; then
-                ui_print "  Compressed-data hash was verified OK — data intact;"
-                ui_print "  the bundled decompressor rejected this stream."
+                EXTRA_CTX="comp-hash was verified OK — data intact; the bundled helper rejected this stream"
+            else
+                EXTRA_CTX="no comp-hash baked for this bundle"
             fi
-            ui_print "! ABORT: no alternative decompressor exists (T49 bundled-only)."
-            exit 1
+            fail E35 "decompression failed for $PNAME" "no alternative decompressor exists (T49 bundled-only); retry once, then rebuild the bundle" "status=$DECOMP_STATUS pipe=$DECOMP_PIPE stderr=$GZIP_ERR_MSG bundle=$BUNDLE_SIZE comp=$PCSIZE unc=$PSIZE note=$EXTRA_CTX"
         else
             rm -f "$GZIP_ERR"
         fi
@@ -2274,6 +2325,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             if dd oflag=direct if="$_OD_PROBE" of="$PTARGET" bs=4096 count=1 conv=notrunc 2>/dev/null; then
                 DD_OFLAG="oflag=direct"
             fi
+            dbg "odirect probe $PNAME: ${{DD_OFLAG:-buffered}} (no-fifo path)"
             rm -f "$_OD_PROBE"
         fi
         dd_if_bundle | \
@@ -2287,8 +2339,10 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
             rm -f "$GZIP_ERR"
             # F2 policy: proof via dd byte-count or post-flash hash — never
             # via partition size (the old silent-brick path, T25 finding F2).
+            # (dd_failure_verdict aborts internally on a proven failure —
+            # T52 E36; this branch is a safety net for unexpected returns.)
             if ! dd_failure_verdict "$DD_STATUS" "$DD_ERR" "$PNAME" "$PSIZE"; then
-                ui_print "!  Decompressor stderr: $GZIP_ERR_MSG"
+                dbg "E36 safety-net exit: decomp stderr: $GZIP_ERR_MSG"
                 rm -f "$DD_ERR"
                 exit 1
             fi
@@ -2313,6 +2367,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
     #
     # Silent on success (reduce log noise), warn only on failure.
     if is_dynamic_partition "$PNAME"; then
+        step "S12-remap:$PNAME"
         if [ -n "$TARGET_SLOT" ]; then
             REMAP_LP_NAME="${{PNAME}}${{TARGET_SLOT}}"
         else
@@ -2321,6 +2376,7 @@ for i in $(seq 0 $(( NUM_PARTS - 1 ))); do
         lptools unmap "$REMAP_LP_NAME" >/dev/null 2>&1
         lptools map "$REMAP_LP_NAME" >/dev/null 2>&1
         REMAP_RC=$?
+        dbg "remap $REMAP_LP_NAME rc=$REMAP_RC"
         if [ $REMAP_RC -ne 0 ]; then
             ui_print "  ! warning: post-flash re-map failed for $REMAP_LP_NAME (rc=$REMAP_RC)"
             ui_print "  ! Data was written + sync'd — re-map is defensive only."
@@ -2335,11 +2391,13 @@ sync
 
 # Disable the cleanup trap — we completed successfully.
 CLEANUP_DONE=1
+OTAKU_EXIT_OK=1
 
 # ── Slot verification (A/B devices only) ────────────────────
 # Verify that the active boot slot matches the slot we just flashed.
 # This catches the rare case where the bootloader reset the active slot
 # during the flash process, which would cause a bootloop after reboot.
+step "S13-slotfix"
 if [ -n "$TARGET_SLOT" ]; then
     CURRENT_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
     if [ -z "$CURRENT_SLOT" ]; then
@@ -2371,6 +2429,8 @@ fi
 if [ "$BUNDLE" = "/tmp/otaku.bin" ] && [ -f "$BUNDLE" ]; then
     rm -f "$BUNDLE"
 fi
+step "S14-done"
+dbg "flash complete: $NUM_PARTS partition(s)"
 ui_print "======================================"
 ui_print "  Flash complete — $NUM_PARTS partition(s)"
 ui_print "======================================"
