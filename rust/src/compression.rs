@@ -1386,9 +1386,8 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
     algorithm: &str,
     level: Option<i32>,
     writer: W,
-    mut on_progress: Option<&mut dyn FnMut(u64, u64)>,
+    on_progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Result<(StreamCompressResult, W), String> {
-    use sha2::{Digest, Sha256};
     use std::fs::File;
 
     let file_size = std::fs::metadata(file_path)
@@ -1406,8 +1405,127 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
         ));
     }
 
+    let file =
+        File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
+    hash_and_compress_reader_with_progress(
+        file,
+        file_size,
+        0,
+        algorithm,
+        level,
+        writer,
+        None,
+        on_progress,
+    )
+}
+
+/// T54 (53-a F01): hash and compress a byte RANGE of a file — streaming,
+/// with progress reported on a WHOLE-FILE basis.
+///
+/// Used by the payload.bin writer's op-splitting loop: each call compresses
+/// one block-aligned raw slice into an independent stream. The reader has
+/// always been able to iterate multiple install_operations per partition,
+/// but caps every op at MAX_OP_DATA_SIZE (256 MiB) — while the writer used
+/// to emit ONE unbounded op, so any partition whose compressed output
+/// exceeded the cap produced a payload.bin the app itself could not extract
+/// (production blocker for large ROM partitions, including every large
+/// ALG_NONE image — the exact use case this path advertises).
+///
+/// # Progress callback
+/// Receives `(range_start + bytes_read_in_range, file_size)` — i.e. GLOBAL
+/// progress over the whole file, so a caller looping over slices can use one
+/// uniform percent formula across all of them.
+///
+/// # `full_unc_hasher`
+/// Caller-owned SHA-256 accumulator of the WHOLE uncompressed file. Every
+/// raw byte read from the range is fed into it (in addition to the per-call
+/// hash returned in `StreamCompressResult.unc_hash_hex`, which covers ONLY
+/// this range). After the last slice the caller finalizes the accumulator
+/// for the full-image hash WITHOUT a second I/O pass over the file (same
+/// rationale as payload.rs `decode_hex_sha256`).
+///
+/// # ALG_NONE guard
+/// Applied to `range_len` (the slice), NOT the whole file — this path is
+/// the sanctioned home for huge uncompressed partitions.
+#[allow(clippy::too_many_arguments)] // T54: range+hasher params (8) — same waiver as dd/mod.rs
+pub fn hash_and_compress_file_range_to_writer_with_progress<W: Write>(
+    file_path: &str,
+    algorithm: &str,
+    level: Option<i32>,
+    range_start: u64,
+    range_len: u64,
+    writer: W,
+    full_unc_hasher: &mut sha2::Sha256,
+    on_progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<(StreamCompressResult, W), String> {
+    use std::fs::File;
+    use std::io::{Seek, SeekFrom};
+
+    let file_size = std::fs::metadata(file_path)
+        .map_err(|e| format!("Cannot stat {}: {}", file_path, e))?
+        .len();
+
+    // ALG_NONE slice guard — per-range, not per-file (see doc above).
+    const ALG_NONE_MAX_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
+    if is_alg(algorithm, ALG_NONE) && range_len > ALG_NONE_MAX_SIZE {
+        return Err(format!(
+            "ALG_NONE (no compression) slice refused for {} — slice length {} bytes exceeds \
+             the {} byte limit. The payload op-splitting writer must keep every slice below \
+             the reader's per-op cap.",
+            file_path, range_len, ALG_NONE_MAX_SIZE
+        ));
+    }
+
+    // T53-F06 discipline: checked arithmetic before any seek/allocation.
+    let range_end = range_start
+        .checked_add(range_len)
+        .ok_or_else(|| format!("Range overflow: start {} + len {}", range_start, range_len))?;
+    if range_end > file_size {
+        return Err(format!(
+            "Range [{}, {}) extends beyond file {} (size {})",
+            range_start, range_end, file_path, file_size
+        ));
+    }
+
     let mut file =
         File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
+    file.seek(SeekFrom::Start(range_start))
+        .map_err(|e| format!("Cannot seek {} to {}: {}", file_path, range_start, e))?;
+    let reader = file.take(range_len);
+    hash_and_compress_reader_with_progress(
+        reader,
+        file_size,
+        range_start,
+        algorithm,
+        level,
+        writer,
+        Some(full_unc_hasher),
+        on_progress,
+    )
+}
+
+/// Shared streaming compressor over an already-positioned, already-limited
+/// reader (T54 refactor of the former whole-file body). See the two public
+/// wrappers above for file/range semantics — this fn only knows bytes:
+///
+/// - `file_size` is ONLY the progress denominator.
+/// - `progress_base` is added to per-chunk `bytes_read` before reporting.
+/// - `full_unc_hasher`, when provided, is fed every raw byte (caller-owned
+///   whole-file accumulator); the per-call `unc_hash_hex` in the result
+///   always covers ONLY the bytes read by THIS call.
+#[allow(clippy::too_many_arguments)] // T54: shared impl carries both wrapper extras
+fn hash_and_compress_reader_with_progress<R: std::io::Read, W: Write>(
+    mut reader: R,
+    file_size: u64,
+    progress_base: u64,
+    algorithm: &str,
+    level: Option<i32>,
+    writer: W,
+    mut full_unc_hasher: Option<&mut sha2::Sha256>,
+    mut on_progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<(StreamCompressResult, W), String> {
+    use sha2::{Digest, Sha256};
+
     let mut hasher = Sha256::new();
     let chunk_size = 4 * 1024 * 1024; // 4 MB chunks
     let mut buf = vec![0u8; chunk_size];
@@ -1443,17 +1561,20 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
             if crate::cancel_requested() {
                 return Err(crate::CANCEL_SENTINEL.to_string());
             }
-            let n = file
+            let n = reader
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            if let Some(fh) = full_unc_hasher.as_mut() {
+                fh.update(&buf[..n]);
+            }
             counting.write_all(&buf[..n])
                 .map_err(|e| format!("Write error: {}", e))?;
             bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
+            report_progress(progress_base + bytes_read, file_size);
         }
         counting.flush().map_err(|e| format!("Flush error: {}", e))?;
         let comp_size = counting.bytes_written();
@@ -1478,18 +1599,21 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
             if crate::cancel_requested() {
                 return Err(crate::CANCEL_SENTINEL.to_string());
             }
-            let n = file
+            let n = reader
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            if let Some(fh) = full_unc_hasher.as_mut() {
+                fh.update(&buf[..n]);
+            }
             encoder
                 .write_all(&buf[..n])
                 .map_err(|e| format!("gzip compress write error: {}", e))?;
             bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
+            report_progress(progress_base + bytes_read, file_size);
         }
         encoder
             .finish()
@@ -1515,18 +1639,21 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
             if crate::cancel_requested() {
                 return Err(crate::CANCEL_SENTINEL.to_string());
             }
-            let n = file
+            let n = reader
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            if let Some(fh) = full_unc_hasher.as_mut() {
+                fh.update(&buf[..n]);
+            }
             encoder
                 .write_all(&buf[..n])
                 .map_err(|e| format!("bzip2 compress write error: {}", e))?;
             bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
+            report_progress(progress_base + bytes_read, file_size);
         }
         encoder
             .finish()
@@ -1549,18 +1676,21 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
             if crate::cancel_requested() {
                 return Err(crate::CANCEL_SENTINEL.to_string());
             }
-            let n = file
+            let n = reader
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            if let Some(fh) = full_unc_hasher.as_mut() {
+                fh.update(&buf[..n]);
+            }
             encoder
                 .write_all(&buf[..n])
                 .map_err(|e| format!("xz compress write error: {}", e))?;
             bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
+            report_progress(progress_base + bytes_read, file_size);
         }
         encoder
             .finish()
@@ -1584,18 +1714,21 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
                 if crate::cancel_requested() {
                     return Err(crate::CANCEL_SENTINEL.to_string());
                 }
-                let n = file
+                let n = reader
                     .read(&mut buf)
                     .map_err(|e| format!("Read error: {}", e))?;
                 if n == 0 {
                     break;
                 }
                 hasher.update(&buf[..n]);
+                if let Some(fh) = full_unc_hasher.as_mut() {
+                    fh.update(&buf[..n]);
+                }
                 encoder
                     .write_all(&buf[..n])
                     .map_err(|e| format!("lz4 compress write error: {}", e))?;
                 bytes_read += n as u64;
-                report_progress(bytes_read, file_size);
+                report_progress(progress_base + bytes_read, file_size);
             }
             encoder
                 .finish()
@@ -1625,18 +1758,21 @@ pub fn hash_and_compress_file_to_writer_with_progress<W: Write>(
             if crate::cancel_requested() {
                 return Err(crate::CANCEL_SENTINEL.to_string());
             }
-            let n = file
+            let n = reader
                 .read(&mut buf)
                 .map_err(|e| format!("Read error: {}", e))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            if let Some(fh) = full_unc_hasher.as_mut() {
+                fh.update(&buf[..n]);
+            }
             encoder
                 .write_all(&buf[..n])
                 .map_err(|e| format!("zstd compress write error: {}", e))?;
             bytes_read += n as u64;
-            report_progress(bytes_read, file_size);
+            report_progress(progress_base + bytes_read, file_size);
         }
         encoder.finish()
             .map_err(|e| format!("zstd compress finish error: {}", e))?;

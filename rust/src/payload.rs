@@ -23,7 +23,7 @@ use std::path::Path;
 
 use crate::compression::{
     decompress_to_writer, detect_compression, detect_from_data,
-    hash_and_compress_file_to_writer_with_progress,
+    hash_and_compress_file_range_to_writer_with_progress,
     operation_type_for_algorithm,
 };
 use crate::proto::{
@@ -58,6 +58,21 @@ pub const METADATA_SIG_ALIGNMENT: u64 = 4096;
 /// a REPLACE_XZ for a ~2GB partition, but split across many operations).
 #[allow(clippy::doc_lazy_continuation)]
 const MAX_OP_DATA_SIZE: u64 = 256 * 1024 * 1024;
+
+/// T54 (53-a F01): raw-byte slice size for the payload writer's
+/// op-splitting. The reader (`extract_and_decompress_partition_to_writer`)
+/// has always iterated `install_operations` sequentially, but caps every
+/// op at MAX_OP_DATA_SIZE (256 MiB) — while the writer emitted ONE op of
+/// unbounded size, so a partition whose compressed output exceeded the
+/// cap produced a payload.bin the app itself refused to extract
+/// (production blocker for large ROM partitions). The writer now slices
+/// each image at this raw-byte boundary and emits one op per slice.
+/// 64 MiB keeps every op 4x below the cap even for pathological codec
+/// expansion, bounds the reader's per-op RAM (compressed Vec +
+/// decompressed Cursor ≈ 2 x slice), matches the T51 chunked-DD chunk
+/// size (measured ratio impact < 1%), and keeps partitions smaller than
+/// one slice on the EXACT legacy single-op structure.
+const OP_SPLIT_SLICE_SIZE: u64 = 64 * 1024 * 1024;
 
 // T53-F05: absolute sanity caps for header/manifest lengths. The
 // file_size-relative bounds alone still allow a sparse or crafted multi-GB
@@ -762,6 +777,15 @@ pub struct WritePayloadResult {
 /// * `block_size` - Block size in bytes (default 4096)
 /// * `minor_version` - Payload minor version
 /// * `level` - Compression level (None = use algorithm default)
+///
+/// # Operation splitting (T54)
+/// Each partition image is compressed in block-aligned slices of
+/// OP_SPLIT_SLICE_SIZE raw bytes and emitted as one InstallOperation per
+/// slice. This keeps every op below the reader's 256 MiB per-op cap (the
+/// pre-T54 single unbounded op made any partition with more than 256 MiB
+/// of compressed output unextractable — including every large ALG_NONE
+/// image, the exact use case this path advertises). Partitions smaller
+/// than one slice keep the exact legacy single-op structure.
 pub fn write_payload(
     output_path: &str,
     partitions_data: &[PartitionData],
@@ -775,6 +799,7 @@ pub fn write_payload(
         block_size,
         minor_version,
         level,
+        OP_SPLIT_SLICE_SIZE,
     );
     // The .progress sidecar is transient — remove it on the success AND
     // the error path so a stale file can never leak into the next build
@@ -792,6 +817,7 @@ fn write_payload_inner(
     block_size: u32,
     minor_version: u32,
     level: Option<i32>,
+    op_slice_size: u64,
 ) -> WritePayloadResult {
     let start = std::time::Instant::now();
     let mut lines: Vec<String> = Vec::new();
@@ -803,6 +829,19 @@ fn write_payload_inner(
     // when block_size <= 0, but write_payload itself should be defensive too.
     let block_size = if block_size == 0 { DEFAULT_BLOCK_SIZE } else { block_size };
 
+    // T54 (53-a F01): effective op-split slice size, rounded DOWN to a
+    // multiple of block_size so every slice's dst_extents tile whole
+    // blocks exactly (start_block = slice_start / block_size stays
+    // exact). The default 64 MiB is already a multiple of every sane
+    // block size (512 B .. 1 MiB powers of two); the round-down keeps
+    // correctness for exotic non-power-of-two choices. A slice smaller
+    // than one block degrades to one block per slice (never zero).
+    use sha2::{Digest, Sha256};
+    let mut eff_slice = op_slice_size - (op_slice_size % block_size as u64);
+    if eff_slice == 0 {
+        eff_slice = block_size as u64;
+    }
+
     // ── Phase 1: Read, hash, and compress each image, streaming to file ──
     //
     // OOM FIX (was OOM-01): Previous version accumulated ALL compressed blobs
@@ -812,9 +851,10 @@ fn write_payload_inner(
     // per-app heap limit.
     //
     // Fix: Stream each partition's compressed data directly to a temp file
-    // using `hash_and_compress_file_to_writer_with_progress`, which never holds the
-    // compressed output in memory. We only track (offset, compressed_size)
-    // per partition for building the manifest later.
+    // using `hash_and_compress_file_range_to_writer_with_progress` (one call per
+    // op-split slice since T54), which never holds the compressed output
+    // in memory. We only track (offset, compressed_size) per slice for
+    // building the manifest later.
     //
     // Memory usage per partition: ~4MB (one read buffer) + ~4MB (one write
     // buffer for the compressor) = ~8MB peak. Previous: O(sum of all
@@ -917,68 +957,183 @@ fn write_payload_inner(
             alg
         ));
 
-        // Stream compressed data directly to blobs temp file, with
-        // per-chunk progress. hash_and_compress_file_to_writer_with_progress
-        // writes compressed chunks as they are produced (never holding the
-        // full compressed output in memory) and invokes on_progress after
-        // every 4MB chunk read — the callback rewrites the .progress
-        // sidecar so Kotlin's 500ms poller sees smooth percentages.
-        // The writer moves BY VALUE and is handed back on return (borrow
-        // rules — same pattern as run_dd_build).
-        let output_path_owned = output_path.to_string();
-        let blobs_tmp_path_clone = blobs_tmp_path.clone();
-        let name_clone = name.clone();
-        let (comp_result, returned_blobs_file) =
-            match hash_and_compress_file_to_writer_with_progress(
-                image_path, alg, level, blobs_file,
-                Some(&mut |bytes_read: u64, file_size: u64| {
-                    let pct = (bytes_read * 100)
-                        .checked_div(file_size)
-                        .map(|v| v as i32)
-                        .unwrap_or(100);
-                    // Current blobs temp size = compressed bytes so far
-                    // (the file handle itself was moved into the
-                    // compressor, so stat by path — like run_dd_build).
-                    let current_size = std::fs::metadata(&blobs_tmp_path_clone)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    crate::dd::write_progress_with_percent(
-                        &output_path_owned,
-                        idx + 1,
-                        total_images,
-                        &name_clone,
-                        "compressing",
-                        current_size,
-                        Some(&blobs_tmp_path_str),
-                        total_estimated,
-                        pct,
-                    );
-                }),
-            ) {
-                Ok(r) => r,
-                Err(e) => {
+        // T54 (53-a F01) — op-splitting: compress the image in block-aligned
+        // raw slices and emit one InstallOperation per slice. The reader
+        // (extract_and_decompress_partition_to_writer) has always iterated
+        // install_operations sequentially, but caps every op at
+        // MAX_OP_DATA_SIZE (256 MiB) — while this writer used to emit ONE op
+        // of unbounded size. Any partition whose compressed output exceeded
+        // 256 MiB produced a payload.bin the app itself refused to extract
+        // (production blocker for large ROM partitions). Slicing also makes
+        // the payload.bin path the real home for huge ALG_NONE partitions
+        // (each slice independently small). Partitions smaller than one
+        // slice keep the exact legacy single-op structure — same extent,
+        // same hashes, same bytes.
+        //
+        // full_unc_hasher: SHA-256 of the WHOLE uncompressed image. The
+        // range helper feeds it every raw byte as it reads each slice — no
+        // second I/O pass over the image (same rationale as
+        // decode_hex_sha256).
+        let mut full_unc_hasher = Sha256::new();
+        let mut partition_comp_size: u64 = 0;
+        let mut ops: Vec<crate::proto::InstallOperation> = Vec::new();
+        let op_type = operation_type_for_algorithm(alg);
+
+        // Slice bounds: (start, len). A zero-size image keeps the legacy
+        // single-op structure (one empty op) instead of an op-less manifest.
+        let slice_bounds: Vec<(u64, u64)> = if img_size == 0 {
+            vec![(0u64, 0u64)]
+        } else {
+            let mut bounds = Vec::new();
+            let mut s: u64 = 0;
+            while s < img_size {
+                let l = eff_slice.min(img_size - s);
+                bounds.push((s, l));
+                s += l;
+            }
+            bounds
+        };
+
+        for (slice_start, this_len) in slice_bounds {
+            // The writer moves BY VALUE into the range compressor and comes
+            // back on return — same borrow pattern as the pre-T54 single
+            // call, repeated per slice. Progress stays whole-file: the range
+            // helper reports (slice_start + bytes_read, img_size).
+            let output_path_owned = output_path.to_string();
+            let blobs_tmp_path_clone = blobs_tmp_path.clone();
+            let name_clone = name.clone();
+            let (comp_result, returned_blobs_file) =
+                match hash_and_compress_file_range_to_writer_with_progress(
+                    image_path,
+                    alg,
+                    level,
+                    slice_start,
+                    this_len,
+                    blobs_file,
+                    &mut full_unc_hasher,
+                    Some(&mut |bytes_read: u64, file_size: u64| {
+                        let pct = (bytes_read * 100)
+                            .checked_div(file_size)
+                            .map(|v| v as i32)
+                            .unwrap_or(100);
+                        // Current blobs temp size = compressed bytes so far
+                        // (the file handle itself was moved into the
+                        // compressor, so stat by path — like run_dd_build).
+                        let current_size = std::fs::metadata(&blobs_tmp_path_clone)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        crate::dd::write_progress_with_percent(
+                            &output_path_owned,
+                            idx + 1,
+                            total_images,
+                            &name_clone,
+                            "compressing",
+                            current_size,
+                            Some(&blobs_tmp_path_str),
+                            total_estimated,
+                            pct,
+                        );
+                    }),
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&blobs_tmp_path);
+                        // T36: a deliberate cancellation keeps its clean sentinel
+                        // message — not wrapped in "Compression failed" noise.
+                        let msg = if e == crate::CANCEL_SENTINEL {
+                            e
+                        } else {
+                            format!(
+                                "Compression failed for {} (slice at byte offset {}): {}",
+                                name, slice_start, e
+                            )
+                        };
+                        return WritePayloadResult {
+                            success: false,
+                            output: msg.clone(),
+                            output_path: None,
+                            file_size: None,
+                            partitions: partition_summaries,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            error: Some(msg),
+                        };
+                    }
+                };
+            blobs_file = returned_blobs_file;
+            let compressed_size = comp_result.comp_size;
+
+            // T54: writer-side mirror of the reader's MAX_OP_DATA_SIZE — a
+            // slice whose compressed output exceeds the cap would recreate
+            // F01 (a buildable-but-unextractable payload). Unreachable for
+            // the default 64 MiB slices (all codecs have bounded overhead;
+            // ALG_NONE emits exactly the slice size) — kept for honesty.
+            if compressed_size > MAX_OP_DATA_SIZE {
+                let _ = std::fs::remove_file(&blobs_tmp_path);
+                return WritePayloadResult {
+                    success: false,
+                    output: format!(
+                        "Slice compressed size {} exceeds the {} byte op limit \
+                         (partition '{}', slice at byte offset {}) — the reader would \
+                         refuse this op. Reduce the partition size or use a smaller \
+                         op slice size.",
+                        compressed_size, MAX_OP_DATA_SIZE, name, slice_start
+                    ),
+                    output_path: None,
+                    file_size: None,
+                    partitions: partition_summaries,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!(
+                        "Slice compressed size exceeds op cap for partition {}",
+                        name
+                    )),
+                };
+            }
+
+            // Per-op hash: SHA-256 of THIS slice's uncompressed bytes. For a
+            // single-slice partition this is byte-identical to the legacy
+            // full-image hash, so small payloads keep their exact structure.
+            // BUG FIX (kept from pre-T54): never unwrap_or_default() — a
+            // failed decode must abort, not embed a zero hash.
+            let slice_hash_bytes: Vec<u8> = match decode_hex_sha256(&comp_result.unc_hash_hex) {
+                Some(bytes) => bytes,
+                None => {
                     let _ = std::fs::remove_file(&blobs_tmp_path);
-                    // T36: a deliberate cancellation keeps its clean sentinel
-                    // message — not wrapped in "Compression failed" noise.
-                    let msg = if e == crate::CANCEL_SENTINEL {
-                        e
-                    } else {
-                        format!("Compression failed for {}: {}", name, e)
-                    };
                     return WritePayloadResult {
                         success: false,
-                        output: msg.clone(),
+                        output: format!(
+                            "Invalid SHA-256 hex for partition '{}': got '{}' (expected 64 hex chars)",
+                            name, comp_result.unc_hash_hex
+                        ),
                         output_path: None,
                         file_size: None,
                         partitions: partition_summaries,
                         duration_ms: start.elapsed().as_millis() as u64,
-                        error: Some(msg),
+                        error: Some(format!("Invalid SHA-256 hex for {}", name)),
                     };
                 }
             };
-        blobs_file = returned_blobs_file;
-        let compressed_size = comp_result.comp_size;
-        let hash_hex = comp_result.unc_hash_hex;
+
+            // One op per slice: the extent tiles
+            // [start_block, start_block + num_blocks) exactly; the final
+            // partial slice rounds up and the reader zero-pads — the same
+            // legacy semantics the old single-op path had for images whose
+            // size is not a block multiple.
+            let num_blocks = this_len.div_ceil(block_size as u64);
+            let start_block = slice_start / block_size as u64;
+            let dst_extent = build_extent(start_block, num_blocks);
+            let op = build_replace_operation(
+                op_type,
+                current_data_offset,
+                compressed_size,
+                vec![dst_extent],
+                slice_hash_bytes,
+                this_len as u32,
+            );
+            ops.push(op);
+            current_data_offset += compressed_size;
+            partition_comp_size += compressed_size;
+        }
+        let compressed_size = partition_comp_size;
 
         // Progress: this partition's compression is done (100%).
         crate::dd::write_progress_with_percent(
@@ -993,69 +1148,19 @@ fn write_payload_inner(
             100,
         );
 
-        // Decode the hex string back to bytes for protobuf fields.
-        // BUG FIX: Previously used unwrap_or_default() which silently produced
-        // an empty hash on decode failure — embedding a zero/missing hash in
-        // the payload manifest, causing silent data corruption.
-        let hash_bytes: Vec<u8> = match decode_hex_sha256(&hash_hex) {
-            Some(bytes) => bytes,
-            None => {
-                let _ = std::fs::remove_file(&blobs_tmp_path);
-                return WritePayloadResult {
-                    success: false,
-                    output: format!("Invalid SHA-256 hex for partition '{}': got '{}' (expected 64 hex chars)", name, hash_hex),
-                    output_path: None,
-                    file_size: None,
-                    partitions: partition_summaries,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    error: Some(format!("Invalid SHA-256 hex for {}", name)),
-                };
-            }
-        };
+        // Full-image hash (partition-level): the accumulator was fed every
+        // raw byte of every slice by the range helper. Pre-T54 this came
+        // from the single whole-file compress call; the accumulate-while-
+        // slicing form avoids a second I/O pass (same rationale as
+        // decode_hex_sha256).
+        let full_hash_bytes = full_unc_hasher.clone().finalize().to_vec();
+        let hash_hex: String = full_hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
 
-        // BUG FIX: Validate img_size fits in u32 before casting.
-        // AOSP protobuf field is uint32, so partitions >4 GiB would silently
-        // truncate, producing a corrupt payload.bin with wrong size metadata.
-        if img_size > u32::MAX as u64 {
-            let _ = std::fs::remove_file(&blobs_tmp_path);
-            return WritePayloadResult {
-                success: false,
-                output: format!(
-                    "Partition '{}' is {} bytes — exceeds u32 max ({}). \
-                     AOSP payload format does not support partitions >4 GiB in dst_length.",
-                    name, img_size, u32::MAX
-                ),
-                output_path: None,
-                file_size: None,
-                partitions: partition_summaries,
-                duration_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("Partition {} too large for u32 dst_length", name)),
-            };
-        }
-
-        // Build InstallOperation
-        let op_type = operation_type_for_algorithm(alg);
-        let num_blocks = img_size.div_ceil(block_size as u64);
-        let dst_extent = build_extent(0, num_blocks);
-
-        let op = build_replace_operation(
-            op_type,
-            current_data_offset,
-            compressed_size,
-            vec![dst_extent],
-            hash_bytes.clone(),
-            img_size as u32,
-        );
-        let _op_encoded = crate::proto::encode_install_operation(&op);
-
-        // Build PartitionUpdate (reuse hash_bytes — no second sha256_file call)
-        let new_info = build_partition_info(img_size, hash_bytes);
-        let part_update =
-            build_partition_update(name.clone(), vec![op], Some(new_info));
+        // Build PartitionUpdate — one op per slice.
+        let new_info = build_partition_info(img_size, full_hash_bytes);
+        let part_update = build_partition_update(name.clone(), ops, Some(new_info));
         let part_encoded = crate::proto::encode_partition_update(&part_update);
-
         encoded_partitions.push(part_encoded);
-        current_data_offset += compressed_size;
 
         let ratio = if img_size > 0 {
             compressed_size as f64 / img_size as f64
@@ -1623,6 +1728,191 @@ mod tests {
         content.extend_from_slice(&[0u8; 8]);
         std::fs::write(&p, content).unwrap();
         assert!(read_payload(&p.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T54 (53-a F01): op-splitting — images larger than one slice are
+    /// emitted as multiple InstallOperations, each independently
+    /// decompressable and far below the reader's 256 MiB op cap.
+    #[test]
+    fn test_op_split_multi_slice_round_trip() {
+        // 160 KiB image, 64 KiB slices -> 3 ops (64 + 64 + 32 KiB).
+        // 1 KiB constant runs (cycling 0..250): clearly compressible, so
+        // every gzip slice stays far below its raw slice size (the
+        // data_length <= slice assert below is only sound for data the
+        // codec actually shrinks; incompressible input can exceed raw by
+        // the codec's bounded overhead).
+        let dir = temp_dir("split");
+        let original: Vec<u8> = (0..163_840usize)
+            .map(|i| ((i / 1024) % 251) as u8)
+            .collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+        assert!(res.success, "write_payload_inner gagal: {:?}", res.error);
+
+        let info = read_payload(&out).expect("read gagal");
+        let part = &info.manifest.partitions[0];
+        assert_eq!(part.install_operations.len(), 3, "expected 3 sliced ops");
+
+        // Every op stays below the reader cap AND below the raw slice size.
+        for op in &part.install_operations {
+            assert!(op.data_length <= MAX_OP_DATA_SIZE, "op melewati cap reader");
+            assert!(op.data_length <= 64 * 1024, "op melewati ukuran slice");
+        }
+
+        // Extents tile the image exactly: [0,16) [16,32) [32,40) blocks.
+        assert_eq!(part.install_operations[0].dst_extents[0].start_block, 0);
+        assert_eq!(part.install_operations[1].dst_extents[0].start_block, 16);
+        assert_eq!(part.install_operations[2].dst_extents[0].start_block, 32);
+        assert_eq!(part.install_operations[2].dst_extents[0].num_blocks, 8);
+
+        // Data blobs are contiguous.
+        assert_eq!(
+            part.install_operations[1].data_offset,
+            part.install_operations[0].data_offset + part.install_operations[0].data_length
+        );
+
+        // Partition-level hash = hash of the WHOLE image (T54 accumulator).
+        let full = crate::compression::sha256(&original);
+        assert_eq!(part.new_partition_info.as_ref().unwrap().hash, full);
+
+        // Per-op hash = hash of that slice's uncompressed bytes.
+        assert_eq!(
+            part.install_operations[0].data_sha256_hash,
+            crate::compression::sha256(&original[..65_536])
+        );
+
+        // Extract reproduces the image byte-for-byte.
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let n = extract_and_decompress_partition_to_writer(&info, "system", &mut extracted)
+            .unwrap_or_else(|e| panic!("extract gagal: {}", e));
+        assert_eq!(n as usize, original.len());
+        assert_eq!(extracted.get_ref(), &original);
+
+        // Self-verify parses the multi-op manifest.
+        let v = verify_payload(&out);
+        assert!(v.success, "verify gagal: {:?}", v.error);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T54: op-splitting round-trips for every algorithm — each slice is an
+    /// independent stream, so multi-op extraction must reproduce the image
+    /// byte-for-byte for all six codecs.
+    #[test]
+    fn test_op_split_round_trip_per_algorithm() {
+        for alg in ["gzip", "bzip2", "xz", "lz4", "zstd", "none"] {
+            let dir = temp_dir("splita");
+            // 196 KiB -> 4 slices @ 64 KiB (64*3 + 4 KiB final, block-aligned).
+            let original: Vec<u8> = (0..200_704usize)
+                .map(|i| ((i * 7 + i / 4096) % 251) as u8)
+                .collect();
+            let img_path = dir.join("sys.img");
+            std::fs::write(&img_path, &original).unwrap();
+            let out = dir.join("p.bin").to_string_lossy().to_string();
+            let pd = vec![PartitionData {
+                name: "system".to_string(),
+                image_path: img_path.to_string_lossy().to_string(),
+                compress: alg.to_string(),
+            }];
+            let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+            assert!(res.success, "write({}) gagal: {:?}", alg, res.error);
+
+            let info = read_payload(&out).expect("read gagal");
+            assert_eq!(
+                info.manifest.partitions[0].install_operations.len(),
+                4,
+                "alg {}",
+                alg
+            );
+
+            let mut extracted = std::io::Cursor::new(Vec::new());
+            let n = extract_and_decompress_partition_to_writer(&info, "system", &mut extracted)
+                .unwrap_or_else(|e| panic!("extract({}) gagal: {}", alg, e));
+            assert_eq!(n as usize, original.len(), "ukuran extract({}) salah", alg);
+            assert_eq!(
+                extracted.get_ref(),
+                &original,
+                "isi extract({}) != asli",
+                alg
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// T54: sub-slice images keep the EXACT legacy single-op structure —
+    /// one op, extent from block 0, op hash == full-image hash.
+    #[test]
+    fn test_op_split_single_slice_legacy_structure() {
+        let dir = temp_dir("oneop");
+        let original: Vec<u8> = (0..32_768usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("boot.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        let part = &info.manifest.partitions[0];
+        assert_eq!(part.install_operations.len(), 1, "harus tetap 1 op");
+        let op = &part.install_operations[0];
+        assert_eq!(op.dst_extents[0].start_block, 0);
+        assert_eq!(op.dst_extents[0].num_blocks, 8); // 32 KiB / 4096
+        assert_eq!(op.dst_length, 32_768);
+        // Op hash == full-image hash (legacy behavior preserved).
+        assert_eq!(op.data_sha256_hash, crate::compression::sha256(&original));
+        assert_eq!(
+            part.new_partition_info.as_ref().unwrap().hash,
+            crate::compression::sha256(&original)
+        );
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let n = extract_and_decompress_partition_to_writer(&info, "boot", &mut extracted).unwrap();
+        assert_eq!(n as usize, original.len());
+        assert_eq!(extracted.get_ref(), &original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T54: unaligned final slice — the extent rounds up to the block
+    /// boundary and the reader zero-pads, preserving the legacy single-op
+    /// padding semantics for images whose size is not a block multiple.
+    #[test]
+    fn test_op_split_unaligned_final_slice_pads() {
+        let dir = temp_dir("pad");
+        // 160_100 bytes -> slices 65536 + 65536 + 29028 (3 ops).
+        let original: Vec<u8> = (0..160_100usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        assert_eq!(info.manifest.partitions[0].install_operations.len(), 3);
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        extract_and_decompress_partition_to_writer(&info, "system", &mut extracted).unwrap();
+        // Block-rounded: 160_100 -> 163_840 (40 blocks), zeros padded.
+        assert_eq!(extracted.get_ref().len(), 163_840);
+        assert_eq!(&extracted.get_ref()[..160_100], &original[..]);
+        assert!(extracted.get_ref()[160_100..].iter().all(|&b| b == 0));
+        assert_eq!(partition_expected_size(&info, "system"), 163_840);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
