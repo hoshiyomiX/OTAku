@@ -409,16 +409,36 @@ pub fn extract_and_decompress_partition_to_writer<W: ExtractSink>(
         // at once. Now we stream decompressed chunks directly to the writer via
         // decompress_to_writer(), using only ~8 MB RAM.
         //
-        // BUG FIX (NEW-4): When auto-detection returns ALG_NONE but the operation
-        // type indicates compression, fall back to the operation-type hint.
-        let detected_alg = detect_from_data(&compressed_data);
-        let effective_alg = if detected_alg == "none" {
-            // NEW-4: data sniffing found no magic — trust the manifest's
-            // op_type hint (canonical set already validated above).
-            detect_compression(op_type)
-        } else {
-            detected_alg
-        };
+        // T56 (53-a F04): codec selection is MANIFEST-FIRST — op_type is
+        // the format's canonical contract (T27 AlgoSpec); the magic-byte
+        // sniff is a compatibility fallback, never an override:
+        //  - Compressed op_types decode as the DECLARED codec first; only
+        //    on failure is the sniffed codec retried (rescue for mislabeled
+        //    data — the same two-codec coverage as the old sniff-first
+        //    order, with the priority restored to the manifest). NEW-4
+        //    folds in naturally: sniff = none means the manifest codec is
+        //    the primary (and only) candidate.
+        //  - REPLACE (raw) keeps sniff-first as the documented legacy
+        //    rescue (pre-T27 manifests labeled LZ4/ZSTD blobs as plain
+        //    REPLACE — extraction only survived via sniffing, see the
+        //    proto.rs HONESTY NOTE). The ladder is completed with an
+        //    extent-consistency discriminator so honest raw data that
+        //    merely STARTS with a codec magic is no longer a hard error:
+        //      decode ok   + size fits extents -> decompressed (legacy)
+        //      decode ok   + size overshoots   -> raw (sniff false
+        //                                          positive on honest raw)
+        //      decode fail + raw fits extents  -> raw (manifest honored)
+        //      decode fail + raw does not fit  -> error (corrupt legacy
+        //                                          blob; refuse garbage)
+        //    "Fits" tolerates the writer's sub-block padding: an honest
+        //    raw op's extents are ceil(raw_len / block_size) blocks, so
+        //    the gap is < block_size; a lying manifest's extents describe
+        //    the DECOMPRESSED image, whose gap from the compressed length
+        //    is typically many blocks.
+        //    The O-4 firewall is unchanged: ops that DECLARE compression
+        //    never write raw data on failure.
+        let sniffed_alg = detect_from_data(&compressed_data);
+        let manifest_alg = detect_compression(op_type);
 
         // Compute expected size from dst_extents for padding/truncation.
         let expected_size: Option<u64> = if !op.dst_extents.is_empty() {
@@ -451,7 +471,7 @@ pub fn extract_and_decompress_partition_to_writer<W: ExtractSink>(
         // RAM: a failed attempt's bytes are truncated away BEFORE the
         // fallback runs, and the O-1 surplus truncation reuses the same
         // mechanism.
-        let decomp_bytes = if effective_alg == "none" {
+        let decomp_bytes = if manifest_alg == "none" && sniffed_alg == "none" {
             // Raw data — truncate to expected_size if needed
             let raw_len = if let Some(expected) = expected_size {
                 (compressed_data.len() as u64).min(expected) as usize
@@ -461,12 +481,86 @@ pub fn extract_and_decompress_partition_to_writer<W: ExtractSink>(
             writer.write_all(&compressed_data[..raw_len])
                 .map_err(|e| format!("Write raw error: {}", e))?;
             raw_len as u64
+        } else if manifest_alg == "none" {
+            // T56 (53-a F04): REPLACE + sniffed magic — the legacy-rescue
+            // ladder (see the T56 note above). Checkpoint = the loop's own
+            // counter, the exact sink anchor.
+            let checkpoint = total_written;
+            match decompress_to_writer(&compressed_data, sniffed_alg, writer) {
+                Ok(n) => {
+                    // Extent consistency: a legacy lying manifest sized its
+                    // extents to the DECOMPRESSED image (fits, sub-block
+                    // gap); an overshoot means the sniff decoded honest raw
+                    // data the manifest declares verbatim — honor the
+                    // manifest and write the bytes raw.
+                    let fits = if let Some(expected) = expected_size {
+                        n <= expected && expected - n < block_size
+                    } else {
+                        true
+                    };
+                    if fits {
+                        n
+                    } else {
+                        writer.rollback(checkpoint).map_err(|e| {
+                            format!("Rollback after failed decompression attempt: {}", e)
+                        })?;
+                        let raw_len = if let Some(expected) = expected_size {
+                            (compressed_data.len() as u64).min(expected) as usize
+                        } else {
+                            compressed_data.len()
+                        };
+                        writer.write_all(&compressed_data[..raw_len])
+                            .map_err(|e| format!("Write raw error: {}", e))?;
+                        raw_len as u64
+                    }
+                }
+                Err(sniff_err) => {
+                    // T36 cancel: surface the sentinel verbatim — a
+                    // user-requested abort must not be buried under the
+                    // raw fallback below.
+                    if sniff_err.contains(crate::CANCEL_SENTINEL) {
+                        return Err(sniff_err);
+                    }
+                    // Discard the failed attempt's partial bytes first.
+                    writer.rollback(checkpoint).map_err(|e| {
+                        format!("Rollback after failed decompression attempt: {}", e)
+                    })?;
+                    // Honest raw data whose prefix merely matches a codec
+                    // magic: the manifest declares these bytes ARE the
+                    // image. Gate on extent consistency — an honest raw
+                    // op's extents ceil to raw_len (gap < block_size); a
+                    // lying manifest's extents describe the decompressed
+                    // image and cannot fit the compressed bytes.
+                    let raw_u64 = compressed_data.len() as u64;
+                    let fits = if let Some(expected) = expected_size {
+                        raw_u64 <= expected && expected - raw_u64 < block_size
+                    } else {
+                        true
+                    };
+                    if !fits {
+                        return Err(format!(
+                            "Sniffed codec {} failed for REPLACE operation and raw length {} \
+                             is inconsistent with extent size — corrupt legacy blob. \
+                             Raw data NOT written to prevent corruption.",
+                            sniffed_alg, raw_u64
+                        ));
+                    }
+                    let raw_len = if let Some(expected) = expected_size {
+                        raw_u64.min(expected) as usize
+                    } else {
+                        compressed_data.len()
+                    };
+                    writer.write_all(&compressed_data[..raw_len])
+                        .map_err(|e| format!("Write raw error: {}", e))?;
+                    raw_len as u64
+                }
+            }
         } else {
             // Checkpoint = sink position before this op's output. The loop's
             // own counter is the exact anchor: every op adds precisely the
             // bytes it wrote (ZERO chunks, raw writes, padding included).
             let checkpoint = total_written;
-            let primary_n = decompress_to_writer(&compressed_data, effective_alg, writer);
+            let primary_n = decompress_to_writer(&compressed_data, manifest_alg, writer);
             let n = match primary_n {
                 Ok(n) => n,
                 Err(primary_err) => {
@@ -483,21 +577,33 @@ pub fn extract_and_decompress_partition_to_writer<W: ExtractSink>(
                     writer.rollback(checkpoint).map_err(|e| {
                         format!("Rollback after failed decompression attempt: {}", e)
                     })?;
-                    let fallback_alg = detect_compression(op_type);
-                    if fallback_alg != "none" && fallback_alg != effective_alg {
-                        match decompress_to_writer(&compressed_data, fallback_alg, writer) {
+                    // T56: the retry uses the SNIFFED codec — the
+                    // manifest codec already had first refusal above.
+                    if sniffed_alg != "none" && sniffed_alg != manifest_alg {
+                        match decompress_to_writer(&compressed_data, sniffed_alg, writer) {
                             Ok(n) => n,
                             Err(fallback_err) => {
                                 if fallback_err.contains(crate::CANCEL_SENTINEL) {
                                     return Err(fallback_err);
                                 }
+                                // T56 fixup (PR #5 run merah #1): the retry decoder
+                                // may have streamed REAL output before hitting its
+                                // corruption / truncation point — in the old
+                                // sniff-first order the partial-writer ran FIRST
+                                // and the rollback above covered it; manifest-first
+                                // runs it SECOND. Roll the sink back so a failed op
+                                // leaves zero bytes (no-garbage guarantee, same as
+                                // every other failure path in this loop).
+                                writer.rollback(checkpoint).map_err(|e| {
+                                    format!("Rollback after failed decompression attempt: {}", e)
+                                })?;
                                 // BUG FIX (O-4): Return error instead of writing raw
                                 // compressed data as "last resort" — that silently produces
                                 // a corrupt file that could brick the device if flashed.
                                 return Err(format!(
                                     "All decompressors failed for operation (type={}): \
                                      primary={}, fallback={}. Raw data NOT written to prevent corruption.",
-                                    op_type, effective_alg, fallback_alg
+                                    op_type, manifest_alg, sniffed_alg
                                 ));
                             }
                         }
@@ -506,7 +612,7 @@ pub fn extract_and_decompress_partition_to_writer<W: ExtractSink>(
                         return Err(format!(
                             "Decompression failed for operation (type={}): algorithm={}, \
                              no fallback available. Raw data NOT written to prevent corruption.",
-                            op_type, effective_alg
+                            op_type, manifest_alg
                         ));
                     }
                 }
@@ -2219,6 +2325,243 @@ mod tests {
             sidecar.contains("\"bytes_written\":8"),
             "sidecar tidak mengikuti rollback: {}",
             sidecar
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T56 (53-a F04): honest RAW payload whose image merely STARTS with a
+    /// codec magic (gzip 1F 8B) extracts VERBATIM — the manifest declares
+    /// REPLACE and the extent gate confirms the bytes fit, so a failed
+    /// sniffed decode must not become a hard "no fallback" error (the
+    /// pre-T56 false negative on the app's own raw builds).
+    #[test]
+    fn test_t56_replace_raw_with_gzip_magic_prefix_extracts_raw() {
+        let dir = temp_dir("t56magic");
+        // 8192 = 2 blok @4096 (aligned — extent gate hits exact equality).
+        let mut original: Vec<u8> = vec![0x1Fu8, 0x8Bu8];
+        original.extend((2..8192usize).map(|i| (i % 251) as u8));
+        let img_path = dir.join("boot.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "none".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let n = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "boot",
+            &mut extracted,
+        )
+        .expect("raw dengan prefiks magic harus tetap ter-extract verbatim");
+        assert_eq!(n, 8192, "total byte salah: {}", n);
+        assert_eq!(extracted.get_ref(), &original[..], "output harus identik");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T56 (53-a F04): the legacy rescue is LOAD-BEARING — a pre-T27
+    /// payload labels a genuinely-compressed blob as plain REPLACE and
+    /// extraction only survived via magic-byte sniffing (proto.rs HONESTY
+    /// NOTE). Flipping an honest gzip build's op_type to REPLACE must
+    /// still yield the decompressed image (decode ok + extents fit).
+    #[test]
+    fn test_t56_legacy_replace_labeled_gzip_still_rescued() {
+        let dir = temp_dir("t56leg");
+        let original: Vec<u8> = (0..16_384usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        // Patch op_type gzip(14) -> REPLACE(0): "kebohongan" ala pre-T27.
+        let info = read_payload(&out).unwrap();
+        let file_bytes = std::fs::read(&out).unwrap();
+        let old_data_start = info.data_offset as usize;
+        let mut bad_manifest = info.manifest.clone();
+        bad_manifest.partitions[0].install_operations[0].r#type = 0; // OP_REPLACE
+        let bad_manifest_bytes = crate::proto::encode_manifest(&bad_manifest);
+        let mut bad_header = info.header.clone();
+        bad_header.manifest_len = bad_manifest_bytes.len() as u64;
+        let bad_header_bytes = crate::proto::encode_payload_header(&bad_header);
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(b"OTKU");
+        rebuilt.extend_from_slice(&(bad_header_bytes.len() as u64).to_be_bytes());
+        rebuilt.extend_from_slice(&bad_header_bytes);
+        rebuilt.extend_from_slice(&bad_manifest_bytes);
+        rebuilt.extend_from_slice(&file_bytes[old_data_start..]);
+        std::fs::write(&out, &rebuilt).unwrap();
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let n = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "system",
+            &mut extracted,
+        )
+        .expect("legacy rescue harus tetap memdekompresi blob ter-label REPLACE");
+        assert_eq!(n, 16_384, "total byte salah: {}", n);
+        assert_eq!(extracted.get_ref(), &original[..], "output harus image asli");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T56 (53-a F04): compressed op_type decodes as the DECLARED codec
+    /// FIRST; when that fails and the sniffed codec differs, the sniff
+    /// retry rescues the data (mislabeled op: type=XZ, bytes=gzip) — the
+    /// priority moves to the manifest without losing the rescue.
+    #[test]
+    fn test_t56_compressed_op_manifest_first_sniff_rescue() {
+        let dir = temp_dir("t56mf");
+        let original: Vec<u8> = (0..16_384usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        // Patch op_type gzip(14) -> XZ(8): manifest salah label arah lain.
+        let info = read_payload(&out).unwrap();
+        let file_bytes = std::fs::read(&out).unwrap();
+        let old_data_start = info.data_offset as usize;
+        let mut bad_manifest = info.manifest.clone();
+        bad_manifest.partitions[0].install_operations[0].r#type = 8; // OP_REPLACE_XZ
+        let bad_manifest_bytes = crate::proto::encode_manifest(&bad_manifest);
+        let mut bad_header = info.header.clone();
+        bad_header.manifest_len = bad_manifest_bytes.len() as u64;
+        let bad_header_bytes = crate::proto::encode_payload_header(&bad_header);
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(b"OTKU");
+        rebuilt.extend_from_slice(&(bad_header_bytes.len() as u64).to_be_bytes());
+        rebuilt.extend_from_slice(&bad_header_bytes);
+        rebuilt.extend_from_slice(&bad_manifest_bytes);
+        rebuilt.extend_from_slice(&file_bytes[old_data_start..]);
+        std::fs::write(&out, &rebuilt).unwrap();
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let n = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "system",
+            &mut extracted,
+        )
+        .expect("manifest-first gagal, sniff rescue harus memdekompresi");
+        assert_eq!(n, 16_384, "total byte salah: {}", n);
+        assert_eq!(extracted.get_ref(), &original[..], "output harus image asli");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T56 (53-a F04): REPLACE op whose sniffed decode FAILS and whose raw
+    /// length cannot fit the extents is a corrupt legacy blob (a lying
+    /// manifest's extents describe the DECOMPRESSED image) — refuse to
+    /// write garbage; the sink stays rolled back to the checkpoint.
+    #[test]
+    fn test_t56_replace_corrupt_legacy_blob_refuses_raw() {
+        let dir = temp_dir("t56corrupt");
+        let original: Vec<u8> = (0..16_384usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        // Blob gzip TERPOTONG + label REPLACE: extent 16384 byte tak mungkin
+        // diisi blob compress terpotong (gap >> block_size) -> tolak.
+        let info = read_payload(&out).unwrap();
+        let file_bytes = std::fs::read(&out).unwrap();
+        let old_data_start = info.data_offset as usize;
+        let mut bad_manifest = info.manifest.clone();
+        {
+            let op = &mut bad_manifest.partitions[0].install_operations[0];
+            let orig_len = op.data_length;
+            assert!(orig_len > 40, "blob gzip terlalu kecil utk dipotong: {}", orig_len);
+            op.data_length = orig_len / 2;
+            op.r#type = 0; // OP_REPLACE
+        }
+        let bad_manifest_bytes = crate::proto::encode_manifest(&bad_manifest);
+        let mut bad_header = info.header.clone();
+        bad_header.manifest_len = bad_manifest_bytes.len() as u64;
+        let bad_header_bytes = crate::proto::encode_payload_header(&bad_header);
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(b"OTKU");
+        rebuilt.extend_from_slice(&(bad_header_bytes.len() as u64).to_be_bytes());
+        rebuilt.extend_from_slice(&bad_header_bytes);
+        rebuilt.extend_from_slice(&bad_manifest_bytes);
+        rebuilt.extend_from_slice(&file_bytes[old_data_start..]);
+        std::fs::write(&out, &rebuilt).unwrap();
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let err = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "system",
+            &mut extracted,
+        )
+        .err()
+        .expect("blob legacy korup harus ditolak, bukan ditulis mentah");
+        assert!(
+            err.contains("Raw data NOT written"),
+            "pesan error: {}",
+            err
+        );
+        // Sink bersih: checkpoint op tunggal = 0, rollback penuh.
+        assert!(extracted.get_ref().is_empty(), "sink harus kosong");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T56 (53-a F04): a raw image that IS a complete valid gzip stream
+    /// (an honest "none" build sizes extents to the compressed bytes)
+    /// must extract VERBATIM — the sniff's successful decode overshoots
+    /// the extents, exposing it as a false positive on honest raw data
+    /// (pre-T56 this silently wrote truncated decompressed output).
+    #[test]
+    fn test_t56_gzip_file_as_raw_image_honors_manifest() {
+        let dir = temp_dir("t56gzraw");
+        // Image = stream gzip utuh dari pattern 16 KiB (terkompresi << 1 blok).
+        let plain: Vec<u8> = (0..16_384usize).map(|i| (i % 251) as u8).collect();
+        let gz = crate::compression::compress(&plain, "gzip", None).unwrap();
+        assert!(gz.len() < 4096, "gzip 16KiB pattern harus < 1 blok: {}", gz.len());
+        let img_path = dir.join("boot.img");
+        std::fs::write(&img_path, &gz).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "none".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let mut extracted = std::io::Cursor::new(Vec::new());
+        let n = extract_and_decompress_partition_to_writer(
+            &read_payload(&out).unwrap(),
+            "boot",
+            &mut extracted,
+        )
+        .expect("image gzip mentah harus dihormati sebagai raw");
+        // Extents = 1 blok (ceil dari panjang stream gzip) -> hasil = stream
+        // mentah + zero padding sub-blok (semantik padding T54).
+        assert_eq!(n, 4096, "total byte salah: {}", n);
+        let got = extracted.get_ref();
+        assert_eq!(&got[..gz.len()], &gz[..], "awal harus stream gzip verbatim");
+        assert!(
+            got[gz.len()..].iter().all(|&b| b == 0),
+            "sisa harus zero padding"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
