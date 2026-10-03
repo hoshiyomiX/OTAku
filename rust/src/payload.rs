@@ -972,7 +972,7 @@ pub fn verify_extracted_partition_hash(
     );
     let mut hasher = Sha256::new();
     let mut remaining: u64 = new_info.partition_size;
-    let chunk = vec![0u8; 4 * 1024 * 1024]; // same cadence as the extract loop
+    let mut chunk = vec![0u8; 4 * 1024 * 1024]; // same cadence as the extract loop
     while remaining > 0 {
         let want = remaining.min(chunk.len() as u64) as usize;
         file.read_exact(&mut chunk[..want]).map_err(|e| {
@@ -2788,8 +2788,11 @@ mod tests {
                 .unwrap_or_else(|e| panic!("extract gagal: {}", e));
         }
         // Tamper: flip a byte in the middle of the extracted image.
+        // (Split the index expression — img[img.len() / 2] is a
+        // self-borrow the checker rejects: E0502.)
         let mut img = std::fs::read(&out_img).unwrap();
-        img[img.len() / 2] ^= 0xFF;
+        let mid = img.len() / 2;
+        img[mid] ^= 0xFF;
         std::fs::write(&out_img, &img).unwrap();
 
         let err = verify_extracted_partition_hash(&info, "boot", out_img.to_str().unwrap())
