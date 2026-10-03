@@ -646,8 +646,11 @@ pub fn extract_and_decompress_partition_to_writer<W: ExtractSink>(
         if let Some(expected) = expected_size {
             if decomp_bytes < expected {
                 let padding = (expected - decomp_bytes) as usize;
-                // F14 (T27): heap buffer — 4MB stack array overflows small-stack threads.
-            let zero_chunk = vec![0u8; 4 * 1024 * 1024];
+                // F14 (T27): heap buffer — a stack array overflows
+                // small-stack threads. T57 (F-E): sized to the padding
+                // itself (capped at the 4 MB chunk cadence) so a
+                // sub-block pad no longer pays a 4 MB allocation.
+                let zero_chunk = vec![0u8; padding.min(4 * 1024 * 1024)];
                 let mut remaining = padding;
                 while remaining > 0 {
                     let n = remaining.min(zero_chunk.len());
@@ -979,14 +982,43 @@ pub fn write_payload(
     minor_version: u32,
     level: Option<i32>,
 ) -> WritePayloadResult {
-    let result = write_payload_inner(
-        output_path,
-        partitions_data,
-        block_size,
-        minor_version,
-        level,
-        OP_SPLIT_SLICE_SIZE,
-    );
+    // T57 (F-D): a panic inside the build (compression helpers, manifest
+    // assembly, the final blob copy) used to propagate straight through
+    // this wrapper — skipping the sidecar removal below AND orphaning the
+    // multi-GB blobs temp file in the output directory. Catch it here, the
+    // one place that knows the temp path, and return the same failure
+    // shape every other error returns. The partial payload.bin is NOT
+    // removed: File::create only truncates it minutes into the build
+    // (Phase 4), so before that the path may still hold a previous run's
+    // good payload (the T53-F01 pre-existing-artifact rule).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        write_payload_inner(
+            output_path,
+            partitions_data,
+            block_size,
+            minor_version,
+            level,
+            OP_SPLIT_SLICE_SIZE,
+        )
+    }))
+    .unwrap_or_else(|panic_info| {
+        let msg = crate::panic_message(&panic_info);
+        log::error!("PANIC inside payload build (converted to failure): {}", msg);
+        let blobs_tmp = Path::new(output_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("otaku_payload_blobs_tmp.bin");
+        let _ = std::fs::remove_file(&blobs_tmp);
+        WritePayloadResult {
+            success: false,
+            output: format!("internal panic during payload build: {}", msg),
+            output_path: None,
+            file_size: None,
+            partitions: Vec::new(),
+            duration_ms: 0,
+            error: Some(format!("internal panic during payload build: {}", msg)),
+        }
+    });
     // The .progress sidecar is transient — remove it on the success AND
     // the error path so a stale file can never leak into the next build
     // (same discipline as run_dd_build; Kotlin's finally also deletes).
@@ -1298,6 +1330,32 @@ fn write_payload_inner(
                     };
                 }
             };
+
+            // T57 (F-B): dst_length is a u32 protobuf field — a slice
+            // larger than u32::MAX would silently truncate the declared
+            // uncompressed length. Unreachable for the production 64 MiB
+            // slice and for any jint-derived block size (whose effective
+            // slice degrades below 2 GiB); kept for the same honesty as
+            // the MAX_OP_DATA_SIZE mirror above.
+            if this_len > u32::MAX as u64 {
+                let _ = std::fs::remove_file(&blobs_tmp_path);
+                return WritePayloadResult {
+                    success: false,
+                    output: format!(
+                        "Slice raw length {} exceeds u32::MAX (partition '{}', slice at \
+                         byte offset {}) — dst_length cannot represent it",
+                        this_len, name, slice_start
+                    ),
+                    output_path: None,
+                    file_size: None,
+                    partitions: partition_summaries,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!(
+                        "Slice raw length exceeds u32::MAX for partition {}",
+                        name
+                    )),
+                };
+            }
 
             // One op per slice: the extent tiles
             // [start_block, start_block + num_blocks) exactly; the final

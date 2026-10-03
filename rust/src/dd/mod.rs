@@ -580,7 +580,13 @@ pub fn run_dd_build(
     // only when THIS build destroyed/replaced the file, never a valid
     // pre-existing ZIP from an earlier build on early-failure paths.
     let mut zip_started = false;
-    let result: Result<DdBuildResult, String> = (|| {
+    // T57 (F-D): panics inside the build funnel used to skip EVERY cleanup
+    // below (temp bundle, partial ZIP, sidecar) — only the Err path runs it.
+    // catch_unwind converts a panic into an ordinary failure so the
+    // T53-F01-aware cleanup handles artifacts exactly as any other error
+    // would — including "never delete a pre-existing ZIP this run did not
+    // yet truncate".
+    let build_closure = || {
         let num_parts = images.len();
         // Resolve effective level: 0 = algorithm default (zstd→3, gzip→6, etc.)
         // Always show the actual level used — never display the raw sentinel 0.
@@ -1143,7 +1149,15 @@ pub fn run_dd_build(
             error: None,
             duration_ms: elapsed.as_millis() as u64,
         })
-    })();
+    };
+    let result: Result<DdBuildResult, String> = std::panic::catch_unwind(
+        std::panic::AssertUnwindSafe(build_closure),
+    )
+    .unwrap_or_else(|panic_info| {
+        let msg = crate::panic_message(&panic_info);
+        log::error!("PANIC inside run_dd_build (converted to failure): {}", msg);
+        Err(format!("internal panic during DD build: {}", msg))
+    });
 
     // Clean up progress file on error too
     delete_progress_file(output_path);

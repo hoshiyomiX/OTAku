@@ -54,19 +54,27 @@ fn null_jstring() -> jstring {
     std::ptr::null_mut()
 }
 
+/// Recover the human-readable message out of a caught panic payload.
+///
+/// T57 (F-D): shared by `log_panic` and the pipeline-level panic converters
+/// (DD build / payload build), which turn a caught panic into an ordinary
+/// `Err` so the existing error-path cleanup runs.
+pub(crate) fn panic_message(panic_info: &Box<dyn std::any::Any + Send>) -> String {
+    // T53 (audit): Debug on a Box<dyn Any> prints only "Any { .. }" —
+    // downcast to the real payload instead (&str / String are what
+    // panic! produces).
+    panic_info
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic_info.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".to_string())
+}
+
 /// Log a panic message to Android logcat (best-effort) so the failure is
 /// debuggable. We can't call `env.new_string()` here because the JNIEnv
 /// may be in an inconsistent state post-panic — just log the message.
 fn log_panic(location: &str, panic_info: &Box<dyn std::any::Any + Send>) {
-    // T53 (audit): the previous body took a &str built by the callers via
-    // format!("{:?}", panic_info) — Debug on a Box<dyn Any> prints only
-    // "Any { .. }", so the actual panic message was NEVER logged. Downcast
-    // to the real payload instead (&str / String are what panic! produces).
-    let msg = panic_info
-        .downcast_ref::<&str>()
-        .map(|s| s.to_string())
-        .or_else(|| panic_info.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown panic payload".to_string());
+    let msg = panic_message(panic_info);
     // Truncate to 500 CHARS, not bytes — byte-slicing at 500 can split a
     // multi-byte UTF-8 char and panic inside the panic handler itself.
     let truncated: String = msg.chars().take(500).collect();
@@ -707,20 +715,26 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
     partition_name: JString,
     output_path: JString,
 ) -> jstring {
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let payload_str: String = match env.get_string(&payload_path) {
-            Ok(s) => s.into(),
-            Err(_) => return make_error_json(&env, "Invalid payload path"),
-        };
-        let partition_str: String = match env.get_string(&partition_name) {
-            Ok(s) => s.into(),
-            Err(_) => return make_error_json(&env, "Invalid partition name"),
-        };
-        let output_str: String = match env.get_string(&output_path) {
-            Ok(s) => s.into(),
-            Err(_) => return make_error_json(&env, "Invalid output path"),
-        };
+    // T57 (F-D): the strings are extracted BEFORE the catch_unwind
+    // boundary so the panic handler below can clean this run's artifacts.
+    let payload_str: String = match env.get_string(&payload_path) {
+        Ok(s) => s.into(),
+        Err(_) => return make_error_json(&env, "Invalid payload path"),
+    };
+    let partition_str: String = match env.get_string(&partition_name) {
+        Ok(s) => s.into(),
+        Err(_) => return make_error_json(&env, "Invalid partition name"),
+    };
+    let output_str: String = match env.get_string(&output_path) {
+        Ok(s) => s.into(),
+        Err(_) => return make_error_json(&env, "Invalid output path"),
+    };
+    // T57 (F-D): flips the moment File::create truncates the output path.
+    // Before that the path may still hold a PREVIOUS run's good image,
+    // which a panic must not delete (T53-F01 pre-existing-artifact rule).
+    let output_created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let start = std::time::Instant::now();
 
         // Read payload info
@@ -749,6 +763,8 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
                 return make_error_json(&env, &format!("Cannot create output file: {}", e));
             }
         };
+        // From here on the output path holds THIS run's (partial) image.
+        output_created.store(true, Ordering::SeqCst);
 
         // Progress sidecar — same convention as the DD build: Rust writes
         // <output>.progress, Kotlin polls every 500ms (locked design
@@ -796,6 +812,15 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
     }));
     result.unwrap_or_else(|panic_info| {
         log_panic("nativeExtractPartition", &panic_info);
+        // T57 (F-D): a panic mid-extract must not leave a partial image
+        // behind — the error path's own comment warns about a surviving
+        // partial .img "the user might later flash by mistake". The
+        // sidecar is always this run's; the image only when the flag says
+        // File::create already truncated it.
+        if output_created.load(Ordering::SeqCst) {
+            let _ = std::fs::remove_file(&output_str);
+        }
+        let _ = std::fs::remove_file(format!("{}.progress", output_str));
         null_jstring()
     })
 }
@@ -1005,4 +1030,35 @@ pub extern "system" fn JNI_OnLoad(
         let _ = panic_info; // best-effort — no way to surface to logcat
         -1 as jint
     })
+}
+
+// ---------------------------------------------------------------------------
+//  Tests — panic-message recovery (T57 F-D)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::panic_message;
+
+    #[test]
+    fn test_panic_message_recovers_str_and_string_payloads() {
+        let p1: Box<dyn std::any::Any + Send> = Box::new("boom &str");
+        assert_eq!(panic_message(&p1), "boom &str");
+        let p2: Box<dyn std::any::Any + Send> = Box::new("boom String".to_string());
+        assert_eq!(panic_message(&p2), "boom String");
+    }
+
+    #[test]
+    fn test_panic_message_unknown_payload_falls_back() {
+        let p: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert_eq!(panic_message(&p), "unknown panic payload");
+    }
+
+    #[test]
+    fn test_log_panic_truncates_via_chars_not_bytes() {
+        // 600 two-byte chars: a 500-BYTE slice would split a UTF-8 char and
+        // panic inside the panic handler itself; 500 CHARS must not.
+        let long: Box<dyn std::any::Any + Send> = Box::new("é".repeat(600));
+        super::log_panic("test-location", &long); // must not panic
+    }
 }
