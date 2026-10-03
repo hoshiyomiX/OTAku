@@ -911,6 +911,96 @@ pub fn partition_expected_size(info: &PayloadInfo, partition_name: &str) -> u64 
     }
 }
 
+/// T58 (F-A): verify an extracted partition image against the manifest's
+/// integrity hash — the gate the extract loop itself cannot provide.
+///
+/// The extract loop streams op payloads straight to the sink and never
+/// hashes what it wrote: the T55 sink rollback makes a stream-through
+/// SHA-256 impossible (a failed attempt's bytes are truncated away, and
+/// re-hashing the retried bytes would double-count them). The manifest's
+/// `new_partition_info.hash` — written by our builder as the SHA-256 of
+/// the WHOLE uncompressed image (`full_unc_hasher`) — was therefore never
+/// verified anywhere: a corrupt-but-decodable payload produced a garbage
+/// .img the user could flash. This closes that hole with a second read
+/// pass over the finished output file.
+///
+/// Semantics (locked product decision, T58):
+/// * default-on — runs whenever the manifest carries a hash. The OTAku
+///   magic gate means every readable payload is our own format, whose
+///   builder always writes a full 32-byte SHA-256 here;
+/// * the hash covers exactly the first `partition_size` bytes of the
+///   output — trailing bytes beyond the declared image are ignored, so a
+///   surplus from odd manifests cannot spuriously fail the gate;
+/// * `Ok(false)` = verification SKIPPED, not failed: no hash in the
+///   manifest, `partition_size == 0`, or the output is shorter than the
+///   declared image (a manifest whose ops do not tile the full partition
+///   — the T57 F-C class). Nothing was compared, so nothing is asserted;
+/// * `Err` = the output does not match the manifest hash, or the output
+///   could not be re-read. Both mean the .img is not what the manifest
+///   promised — the JNI caller deletes it and fails the extract
+///   (hard-fail: a flashable-but-garbage image is a brick risk, not an
+///   inconvenience).
+///
+/// Cost: one extra read pass (~30-90s per 5 GB on typical internal
+/// storage) — the price of never flashing garbage.
+pub fn verify_extracted_partition_hash(
+    info: &PayloadInfo,
+    partition_name: &str,
+    output_path: &str,
+) -> Result<bool, String> {
+    let partition = find_partition(&info.manifest, partition_name)?;
+    let new_info = match partition.new_partition_info.as_ref() {
+        Some(i) if !i.hash.is_empty() && i.partition_size > 0 => i,
+        _ => return Ok(false), // nothing verifiable in the manifest
+    };
+
+    // The output must be at least as long as the declared image — a
+    // shorter file means the ops never tiled the full partition and the
+    // manifest hash is not comparable (skip, not fail).
+    let file_size = std::fs::metadata(output_path)
+        .map_err(|e| format!("Cannot stat output file for verification: {}", e))?
+        .len();
+    if file_size < new_info.partition_size {
+        return Ok(false);
+    }
+
+    // Second pass: hash exactly partition_size bytes from the start.
+    use sha2::{Digest, Sha256};
+    let mut file = BufReader::new(
+        File::open(output_path)
+            .map_err(|e| format!("Cannot re-open output for verification: {}", e))?,
+    );
+    let mut hasher = Sha256::new();
+    let mut remaining: u64 = new_info.partition_size;
+    let chunk = vec![0u8; 4 * 1024 * 1024]; // same cadence as the extract loop
+    while remaining > 0 {
+        let want = remaining.min(chunk.len() as u64) as usize;
+        file.read_exact(&mut chunk[..want]).map_err(|e| {
+            format!(
+                "Verification read failed ({} bytes left): {}",
+                remaining, e
+            )
+        })?;
+        hasher.update(&chunk[..want]);
+        remaining -= want as u64;
+    }
+
+    let actual = hasher.finalize();
+    if actual.as_slice() == new_info.hash.as_slice() {
+        Ok(true)
+    } else {
+        let to_hex =
+            |b: &[u8]| b.iter().map(|x| format!("{:02x}", x)).collect::<String>();
+        Err(format!(
+            "Hash mismatch: output does not match the manifest integrity hash for partition '{}' \
+             (expected {}, got {})",
+            partition_name,
+            to_hex(&new_info.hash),
+            to_hex(&actual)
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  WRITE — generate a payload.bin from partition images
 // ---------------------------------------------------------------------------
@@ -2620,6 +2710,169 @@ mod tests {
         assert!(
             got[gz.len()..].iter().all(|&b| b == 0),
             "sisa harus zero padding"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T58 (F-A): round-trip — the extracted image re-hashes to the
+    /// manifest's new_partition_info.hash. Multi-slice payload (T54
+    /// op-splitting) proves the whole-image hash composes across ops;
+    /// trailing bytes beyond partition_size are ignored by design.
+    #[test]
+    fn test_extract_hash_verify_round_trip() {
+        let dir = temp_dir("t58ver");
+        let original: Vec<u8> = (0..163_840usize)
+            .map(|i| ((i / 1024) % 251) as u8)
+            .collect();
+        let img_path = dir.join("sys.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "system".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload_inner(&out, &pd, 4096, 0, None, 64 * 1024);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        // Extract to a real file — the JNI path's sink.
+        let out_img = dir.join("system.img");
+        {
+            let mut f = File::create(&out_img).unwrap();
+            let n = extract_and_decompress_partition_to_writer(&info, "system", &mut f)
+                .unwrap_or_else(|e| panic!("extract gagal: {}", e));
+            assert_eq!(n as usize, original.len());
+        }
+        // Default-on gate: hash of the whole image matches.
+        assert_eq!(
+            verify_extracted_partition_hash(&info, "system", out_img.to_str().unwrap()),
+            Ok(true)
+        );
+        // Trailing bytes beyond the declared image are NOT hashed — a
+        // surplus from odd manifests cannot spuriously fail the gate.
+        let mut with_tail = std::fs::read(&out_img).unwrap();
+        with_tail.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        std::fs::write(&out_img, &with_tail).unwrap();
+        assert_eq!(
+            verify_extracted_partition_hash(&info, "system", out_img.to_str().unwrap()),
+            Ok(true)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T58 (F-A): a corrupted output (bit flip mid-image) must hard-fail
+    /// verification — the exact garbage-.img-the-user-could-flash scenario
+    /// the gate exists to stop. The function itself deletes nothing:
+    /// cleanup belongs to the JNI artifact owner (T57 design).
+    #[test]
+    fn test_extract_hash_verify_mismatch() {
+        let dir = temp_dir("t58bad");
+        let original: Vec<u8> = (0..32_768usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("boot.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        let out_img = dir.join("boot.img.out");
+        {
+            let mut f = File::create(&out_img).unwrap();
+            extract_and_decompress_partition_to_writer(&info, "boot", &mut f)
+                .unwrap_or_else(|e| panic!("extract gagal: {}", e));
+        }
+        // Tamper: flip a byte in the middle of the extracted image.
+        let mut img = std::fs::read(&out_img).unwrap();
+        img[img.len() / 2] ^= 0xFF;
+        std::fs::write(&out_img, &img).unwrap();
+
+        let err = verify_extracted_partition_hash(&info, "boot", out_img.to_str().unwrap())
+            .err()
+            .expect("hash mismatch harus Err");
+        assert!(err.contains("Hash mismatch"), "pesan error: {}", err);
+        // Both digests hex-encoded for diagnosability — the expected one
+        // must appear verbatim.
+        let want = crate::compression::sha256(&original);
+        let want_hex: String = want.iter().map(|b| format!("{:02x}", b)).collect();
+        assert!(err.contains(&want_hex), "pesan error: {}", err);
+        // The output file is NOT deleted by the verifier — cleanup is the
+        // JNI owner's job (T57 catch-at-owning-layer design).
+        assert!(out_img.exists(), "verify tidak boleh menghapus output");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T58 (F-A): output shorter than the declared partition_size → the
+    /// manifest hash is not comparable (ops never tiled the full
+    /// partition — the T57 F-C class) → SKIP (Ok(false)), not fail.
+    #[test]
+    fn test_extract_hash_verify_short_output_skips() {
+        let dir = temp_dir("t58short");
+        let original: Vec<u8> = (0..32_768usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("boot.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        let out_img = dir.join("boot.img.out");
+        // Output shorter than partition_size (a half-length image).
+        std::fs::write(&out_img, &original[..original.len() / 2]).unwrap();
+        assert_eq!(
+            verify_extracted_partition_hash(&info, "boot", out_img.to_str().unwrap()),
+            Ok(false)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T58 (F-A): manifest without new_partition_info → nothing to verify
+    /// → SKIP (Ok(false)) — hash-less manifests keep the pre-T58 behavior
+    /// exactly (the gate is additive, never a new failure class).
+    #[test]
+    fn test_extract_hash_verify_missing_hash_skips() {
+        let dir = temp_dir("t58nohash");
+        let original: Vec<u8> = (0..32_768usize).map(|i| (i % 251) as u8).collect();
+        let img_path = dir.join("boot.img");
+        std::fs::write(&img_path, &original).unwrap();
+        let out = dir.join("p.bin").to_string_lossy().to_string();
+        let pd = vec![PartitionData {
+            name: "boot".to_string(),
+            image_path: img_path.to_string_lossy().to_string(),
+            compress: "gzip".to_string(),
+        }];
+        let res = write_payload(&out, &pd, 4096, 0, None);
+        assert!(res.success, "write gagal: {:?}", res.error);
+
+        let info = read_payload(&out).unwrap();
+        let out_img = dir.join("boot.img.out");
+        std::fs::write(&out_img, &original).unwrap();
+        // Manifest tanpa hash: salin info dengan new_partition_info = None.
+        let mut manifest = info.manifest.clone();
+        manifest.partitions[0].new_partition_info = None;
+        let info_no_hash = PayloadInfo {
+            header: info.header.clone(),
+            manifest,
+            manifest_bytes: info.manifest_bytes.clone(),
+            data_offset: info.data_offset,
+            file_size: info.file_size,
+            header_len: info.header_len,
+            metadata_sig_offset: info.metadata_sig_offset,
+            file_path: info.file_path.clone(),
+        };
+        assert_eq!(
+            verify_extracted_partition_hash(&info_no_hash, "boot", out_img.to_str().unwrap()),
+            Ok(false)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -706,6 +706,12 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeReadPayload(
 /// ): String`
 ///
 /// Extracts the partition image and saves it to outputPath.
+///
+/// T58 (F-A): on success the finished image is verified against the
+/// manifest's `new_partition_info.hash` (second read pass, default-on —
+/// see `payload::verify_extracted_partition_hash`). A mismatch fails the
+/// extract and deletes the output; manifests without a usable hash skip
+/// the gate. The success JSON carries `hash_verified` accordingly.
 /// Returns JSON with success/error and file info.
 #[no_mangle]
 pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartition(
@@ -793,6 +799,31 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
         };
         progress_writer.remove_sidecar();
 
+        // T58 (F-A): default-on integrity gate. The extract loop cannot
+        // hash what it streams (sink rollback would double-count retried
+        // bytes), so verify the finished image in a second read pass
+        // against new_partition_info.hash. A mismatch (or an unreadable
+        // output) means the .img is NOT what the manifest promised —
+        // delete it and fail, exactly like an extract error: a
+        // flashable-but-garbage image is a brick risk, not a warning.
+        // Ok(false) = the manifest carries no usable hash / the output is
+        // shorter than the declared image — nothing comparable, the
+        // extract stays a success.
+        let hash_verified =
+            match payload::verify_extracted_partition_hash(&info, &partition_str, &output_str) {
+                Ok(verified) => verified,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&output_str);
+                    return make_error_json(
+                        &env,
+                        &format!(
+                            "Extract partition '{}' failed: integrity verification: {}",
+                            partition_str, e
+                        ),
+                    );
+                }
+            };
+
         let elapsed = start.elapsed();
         let file_size = decompressed_size;
         let result = serde_json::json!({
@@ -801,6 +832,7 @@ pub extern "system" fn Java_com_hoshiyomi_otaku_NativeBridge_nativeExtractPartit
             "output_path": output_str,
             "file_size": file_size,
             "human_size": payload::human_size(file_size),
+            "hash_verified": hash_verified,
             "duration_ms": elapsed.as_millis() as u64,
             "native_version": env!("CARGO_PKG_VERSION"),
         });
