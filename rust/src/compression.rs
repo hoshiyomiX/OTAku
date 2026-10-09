@@ -222,6 +222,10 @@ pub fn compress(data: &[u8], algorithm: &str, level: Option<i32>) -> Result<Vec<
 /// * `algorithm` - One of "zstd", "xz", "bzip2", "gzip", "lz4", "auto"
 ///
 /// "auto" attempts to detect the format from magic bytes.
+///
+/// Note: Only used in tests. Production code uses the streaming
+/// decompress_to_writer path.
+#[cfg(test)]
 pub fn decompress(data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
     let alg = normalise(algorithm);
 
@@ -394,6 +398,7 @@ fn compress_gzip(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
 /// to gigabytes, exceeding Android's 256-512 MB per-app heap limit.
 const MAX_DECOMPRESSED_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
 
+#[cfg(test)]
 fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
@@ -434,6 +439,7 @@ fn compress_bzip2(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("bzip2 compress finish error: {}", e))
 }
 
+#[cfg(test)]
 fn decompress_bzip2(data: &[u8]) -> Result<Vec<u8>, String> {
     use bzip2::read::BzDecoder;
     use std::io::Read;
@@ -472,6 +478,7 @@ fn compress_xz(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
+#[cfg(test)]
 fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, String> {
     use std::io::Read;
 
@@ -542,6 +549,7 @@ fn compress_lz4(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
+#[cfg(test)]
 fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, String> {
     use std::io::{Cursor, Read};
     let cursor = Cursor::new(data);
@@ -607,6 +615,7 @@ fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
+#[cfg(test)]
 fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let decoder = zstd::Decoder::new(data)
@@ -812,6 +821,11 @@ pub fn compress_streaming(
 /// never held fully in memory.
 ///
 /// Returns `(compressed_data, sha256_hexdigest)`
+///
+/// Note: Only used in tests (ALG_NONE size-guard regression test).
+/// Production code uses the streaming
+/// hash_and_compress_file_to_writer_with_progress path.
+#[cfg(test)]
 pub fn hash_and_compress_file(
     file_path: &str,
     algorithm: &str,
@@ -1081,7 +1095,8 @@ impl<W: Write> Write for Sha256Writer<W> {
 
 /// A `Write` wrapper that counts how many bytes were written through it.
 ///
-/// Used by `hash_and_compress_file_to_writer` to track compressed output size
+/// Used by `hash_and_compress_reader_with_progress` (and its `to_writer`
+/// wrappers) to track compressed output size
 /// without holding the data in memory. The compressor writes compressed chunks
 /// through this wrapper to the underlying writer, and we count every byte.
 struct CountingWriter<W> {
@@ -1115,229 +1130,6 @@ impl<W: Write> Write for CountingWriter<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
-}
-
-// ---------------------------------------------------------------------------
-//  Hash and compress a file, streaming to a writer (OOM-safe)
-// ---------------------------------------------------------------------------
-
-/// Hash and compress a file, streaming compressed output directly to a writer.
-///
-/// This is the OOM-safe variant of `hash_and_compress_file`. Instead of
-/// accumulating the entire compressed output in a `Vec<u8>` (which can be
-/// 2-5GB for large partitions like system.img), it writes compressed chunks
-/// to the provided writer as they are produced by the compressor.
-///
-/// # Memory usage
-/// Peak RAM: ~8MB (4MB read buffer + ~4MB compressor internal buffer).
-/// Compare: `hash_and_compress_file` holds the entire compressed output in
-/// RAM, which can be 2-5GB for system.img.
-///
-/// # Returns
-/// `(compressed_size, sha256_hex_of_raw)` — the compressed size (bytes
-/// written to the writer) and the SHA-256 hex digest of the uncompressed
-/// input file. The compressed data itself is NOT returned; it was already
-/// written to the writer.
-///
-/// # When to use
-/// - `write_payload`: stream each partition's compressed data to a temp file
-/// - Any scenario where the compressed output should go directly to disk
-///   without holding it in RAM first
-pub fn hash_and_compress_file_to_writer<W: Write>(
-    file_path: &str,
-    algorithm: &str,
-    level: Option<i32>,
-    writer: &mut W,
-) -> Result<(u64, String), String> {
-    use sha2::{Digest, Sha256};
-    use std::fs::File;
-
-    let file_size = std::fs::metadata(file_path)
-        .map_err(|e| format!("Cannot stat {}: {}", file_path, e))?
-        .len();
-
-    // ALG_NONE size guard — same rationale as hash_and_compress_file.
-    // 256MB cap; large files must use gzip/xz (streaming) or payload.bin path.
-    const ALG_NONE_MAX_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
-    if is_alg(algorithm, ALG_NONE) && file_size > ALG_NONE_MAX_SIZE {
-        return Err(format!(
-            "ALG_NONE (no compression) refused for {} — file size {} bytes exceeds {} byte limit. \
-             ALG_NONE loads the entire file into memory, which would OOM Android's 256-512MB heap. \
-             Use gzip or xz instead (they stream chunks and never hold the full file in memory). \
-             If you genuinely need uncompressed storage, use the payload.bin path (write_payload) \
-             which supports streaming.",
-            file_path, file_size, ALG_NONE_MAX_SIZE
-        ));
-    }
-
-    let mut file =
-        File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
-    let mut hasher = Sha256::new();
-    let chunk_size = 4 * 1024 * 1024; // 4 MB chunks
-    let mut buf = vec![0u8; chunk_size];
-
-    // Wrap the writer in a CountingWriter to track compressed output size.
-    // The CountingWriter passes every write() through to the real writer
-    // while counting bytes — zero additional memory overhead.
-    let mut counting = CountingWriter::new(writer);
-
-    if is_alg(algorithm, ALG_NONE) {
-        // No compression: hash and write raw chunks directly to writer.
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            counting.write_all(&buf[..n])
-                .map_err(|e| format!("Write error: {}", e))?;
-        }
-        let compressed_size = counting.bytes_written();
-        counting.flush().map_err(|e| format!("Flush error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed_size, hex));
-    }
-
-    let resolved_level = resolve_level(algorithm, level);
-
-    if is_alg(algorithm, ALG_GZIP) {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-
-        let level_clamped = resolved_level.clamp(1, 9) as u32;
-        // GzEncoder writes compressed chunks through our CountingWriter
-        let mut encoder = GzEncoder::new(&mut counting, Compression::new(level_clamped));
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            encoder
-                .write_all(&buf[..n])
-                .map_err(|e| format!("gzip compress write error: {}", e))?;
-        }
-        encoder
-            .finish()
-            .map_err(|e| format!("gzip compress finish error: {}", e))?;
-        let compressed_size = counting.bytes_written();
-        counting.flush().map_err(|e| format!("gzip flush error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed_size, hex));
-    }
-
-    if is_alg(algorithm, ALG_BZIP2) {
-        use bzip2::write::BzEncoder;
-        use bzip2::Compression;
-
-        let level_clamped = resolved_level.clamp(1, 9) as u32;
-        let mut encoder = BzEncoder::new(&mut counting, Compression::new(level_clamped));
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            encoder
-                .write_all(&buf[..n])
-                .map_err(|e| format!("bzip2 compress write error: {}", e))?;
-        }
-        encoder
-            .finish()
-            .map_err(|e| format!("bzip2 compress finish error: {}", e))?;
-        let compressed_size = counting.bytes_written();
-        counting.flush().map_err(|e| format!("bzip2 flush error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed_size, hex));
-    }
-
-    if is_alg(algorithm, ALG_XZ) {
-        let level_clamped = resolved_level.clamp(0, 9) as u32;
-        let mut encoder = xz2::write::XzEncoder::new(&mut counting, level_clamped);
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            encoder
-                .write_all(&buf[..n])
-                .map_err(|e| format!("xz compress write error: {}", e))?;
-        }
-        encoder
-            .finish()
-            .map_err(|e| format!("xz compress finish error: {}", e))?;
-        let compressed_size = counting.bytes_written();
-        counting.flush().map_err(|e| format!("xz flush error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed_size, hex));
-    }
-
-    if is_alg(algorithm, ALG_LZ4) {
-        let frame_info = lz4_frame_info_for_level(resolved_level);
-        {
-            let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, &mut counting);
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Read error: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                encoder
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("lz4 compress write error: {}", e))?;
-            }
-            encoder
-                .finish()
-                .map_err(|e| format!("lz4 compress finish error: {}", e))?;
-        }
-        // T53-F03: explicit finish replaced drop-time auto_finish — errors
-        // from the final block flush now propagate.
-        let compressed_size = counting.bytes_written();
-        counting.flush().map_err(|e| format!("lz4 flush error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed_size, hex));
-    }
-
-    if is_alg(algorithm, ALG_ZSTD) {
-        let level_clamped = resolved_level.clamp(1, 22);
-        let mut encoder = zstd::Encoder::new(&mut counting, level_clamped)
-            .map_err(|e| format!("zstd encoder init error: {}", e))?;
-        // T50: libzstd worker pool (see mt_workers).
-        encoder
-            .multithread(mt_workers())
-            .map_err(|e| format!("zstd encoder mt init error: {}", e))?;
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            encoder
-                .write_all(&buf[..n])
-                .map_err(|e| format!("zstd compress write error: {}", e))?;
-        }
-        encoder.finish()
-            .map_err(|e| format!("zstd compress finish error: {}", e))?;
-        let compressed_size = counting.bytes_written();
-        counting.flush().map_err(|e| format!("zstd flush error: {}", e))?;
-        let hex: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-        return Ok((compressed_size, hex));
-    }
-
-    Err(format!("Unknown compression algorithm: {:?}", algorithm))
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,14 +1979,14 @@ mod tests {
             source.contains("ALG_NONE (no compression) refused"),
             "ALG_NONE refusal error message missing"
         );
-        // The guard must be present in hash_and_compress_file,
-        // hash_and_compress_file_with_progress,
-        // hash_and_compress_file_to_writer, and
-        // hash_and_compress_file_to_writer_with_progress. Count occurrences:
+        // The guard must be present in every ALG_NONE-capable compress entry
+        // point: hash_and_compress_file (test-gated),
+        // hash_and_compress_file_to_writer_with_progress, and
+        // hash_and_compress_file_range_to_writer_with_progress. Count occurrences:
         let guard_count = source.matches("ALG_NONE_MAX_SIZE").count();
         assert!(
             guard_count >= 4,
-            "ALG_NONE size guard must appear in all four compress functions (found {} occurrences, need >= 4)",
+            "ALG_NONE size guard must appear in every ALG_NONE-capable compress function (found {} occurrences, need >= 4)",
             guard_count
         );
     }
